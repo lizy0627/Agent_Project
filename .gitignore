@@ -1,0 +1,13 @@
+# Python 缓存文件
+__pycache__/
+*.py[cod]
+
+# 本地环境变量文件，避免提交 API Key
+.env
+
+# 本地运行日志
+*.log
+
+# 虚拟环境目录
+.venv/
+venv/
