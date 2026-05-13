@@ -1,0 +1,537 @@
+/* 统一盒模型，避免 padding 影响元素最终尺寸。 */
+* {
+  box-sizing: border-box;
+}
+
+/* 页面基础视觉：以中性色为底，减少干扰，让对话内容成为主角。 */
+body {
+  margin: 0;
+  min-height: 100vh;
+  font-family: Inter, "Microsoft YaHei", "PingFang SC", Arial, sans-serif;
+  color: #182230;
+  background: #e9eef6;
+}
+
+/* 应用整体布局：左侧工作区导航，右侧聊天主界面。 */
+.app-shell {
+  display: grid;
+  grid-template-columns: 292px minmax(0, 1fr);
+  height: 100vh;
+  overflow: hidden;
+}
+
+/* 左侧侧边栏，使用深色提高产品感和区域区分。 */
+.sidebar {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  padding: 22px;
+  color: #ffffff;
+  background: #111827;
+  border-right: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+/* 项目标识区域。 */
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 46px;
+}
+
+/* 项目标识图形。 */
+.brand-mark {
+  display: grid;
+  width: 44px;
+  height: 44px;
+  place-items: center;
+  border-radius: 8px;
+  color: #0f172a;
+  background: #ffffff;
+  font-size: 14px;
+  font-weight: 800;
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.22);
+}
+
+/* 项目名和副标题。 */
+.brand-text {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.brand-text strong {
+  overflow: hidden;
+  font-size: 17px;
+  letter-spacing: 0;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.brand-text span {
+  color: #9ca3af;
+  font-size: 13px;
+}
+
+/* 新建对话按钮。 */
+.new-chat-button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 44px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 8px;
+  color: #ffffff;
+  background: #2563eb;
+  font-size: 15px;
+  font-weight: 700;
+  cursor: pointer;
+  box-shadow: 0 12px 28px rgba(37, 99, 235, 0.28);
+  transition: transform 0.18s ease, background 0.18s ease, box-shadow 0.18s ease;
+}
+
+.new-chat-button:hover {
+  background: #1d4ed8;
+  box-shadow: 0 16px 34px rgba(37, 99, 235, 0.34);
+  transform: translateY(-1px);
+}
+
+/* 按钮中的加号。 */
+.button-icon {
+  font-size: 20px;
+  line-height: 1;
+}
+
+/* 当前会话信息卡片。 */
+.session-card {
+  padding: 15px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.session-label {
+  display: block;
+  margin-bottom: 9px;
+  color: #9ca3af;
+  font-size: 12px;
+}
+
+.session-id {
+  display: block;
+  overflow: hidden;
+  color: #f9fafb;
+  font-family: Consolas, "Courier New", monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 侧边栏弹性占位，让状态固定靠底。 */
+.sidebar-spacer {
+  flex: 1;
+}
+
+/* 侧边栏底部状态。 */
+.sidebar-footer {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 38px;
+  padding: 0 12px;
+  border-radius: 8px;
+  color: #d1d5db;
+  background: rgba(255, 255, 255, 0.06);
+  font-size: 13px;
+}
+
+.status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: #22c55e;
+  box-shadow: 0 0 0 4px rgba(34, 197, 94, 0.14);
+}
+
+/* 右侧聊天主面板。 */
+.chat-panel {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  background: #f4f7fb;
+}
+
+/* 顶部标题栏，使用轻量阴影与主体分层。 */
+.chat-topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 82px;
+  padding: 18px 34px;
+  border-bottom: 1px solid #e2e8f0;
+  background: rgba(255, 255, 255, 0.92);
+  box-shadow: 0 10px 30px rgba(15, 23, 42, 0.04);
+}
+
+.chat-topbar h1 {
+  margin: 0;
+  font-size: 23px;
+  font-weight: 800;
+  letter-spacing: 0;
+}
+
+.chat-topbar p {
+  margin: 7px 0 0;
+  color: #667085;
+  font-size: 13px;
+}
+
+/* 顶部运行状态标签。 */
+.status-pill {
+  display: inline-flex;
+  align-items: center;
+  min-height: 34px;
+  padding: 0 13px;
+  border: 1px solid #dbeafe;
+  border-radius: 8px;
+  color: #1d4ed8;
+  background: #eff6ff;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+/* 聊天消息区域。 */
+.message-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 32px 34px;
+  scroll-behavior: smooth;
+}
+
+/* 给聊天内容一个舒适阅读宽度。 */
+.message-list > * {
+  max-width: 920px;
+  margin-left: auto;
+  margin-right: auto;
+}
+
+/* 空会话欢迎态。 */
+.empty-state {
+  display: grid;
+  min-height: 100%;
+  place-items: center;
+  color: #475467;
+  text-align: center;
+}
+
+.empty-state-card {
+  width: min(680px, 100%);
+  padding: 34px;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  background: #ffffff;
+  box-shadow: 0 24px 60px rgba(15, 23, 42, 0.08);
+}
+
+.empty-badge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 30px;
+  margin-bottom: 16px;
+  padding: 0 12px;
+  border-radius: 8px;
+  color: #047857;
+  background: #ecfdf5;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.empty-state-card h2 {
+  margin: 0 0 10px;
+  color: #111827;
+  font-size: 30px;
+  letter-spacing: 0;
+}
+
+.empty-state-card p {
+  margin: 0 auto;
+  max-width: 520px;
+  line-height: 1.7;
+}
+
+/* 示例问题区域。 */
+.prompt-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 24px;
+}
+
+.prompt-card {
+  min-height: 54px;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  color: #344054;
+  background: #f8fafc;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  padding: 12px;
+}
+
+.prompt-card:hover {
+  border-color: #bfdbfe;
+  background: #eff6ff;
+}
+
+/* 单条消息容器。 */
+.message {
+  display: flex;
+  margin-bottom: 20px;
+}
+
+/* 用户消息显示在右侧。 */
+.user-message {
+  justify-content: flex-end;
+}
+
+/* Agent、错误、加载消息显示在左侧。 */
+.agent-message,
+.error-message {
+  justify-content: flex-start;
+}
+
+/* 消息内容列，后续可在 meta 区扩展工具调用和 RAG 来源。 */
+.message-content {
+  max-width: min(720px, 78%);
+}
+
+/* 消息气泡通用样式。 */
+.message-bubble {
+  padding: 14px 16px;
+  border-radius: 8px;
+  line-height: 1.7;
+  word-break: break-word;
+  white-space: pre-wrap;
+  box-shadow: 0 12px 28px rgba(15, 23, 42, 0.08);
+}
+
+/* 用户消息气泡。 */
+.user-message .message-bubble {
+  color: #ffffff;
+  background: #2563eb;
+}
+
+/* Agent 消息气泡。 */
+.agent-message .message-bubble {
+  color: #182230;
+  border: 1px solid #e4e7ec;
+  background: #ffffff;
+}
+
+/* 错误消息气泡。 */
+.error-message .message-bubble {
+  color: #b42318;
+  border: 1px solid #fecdca;
+  background: #fff4f3;
+}
+
+/* 消息下方的轻量元信息。 */
+.message-meta {
+  margin-top: 7px;
+  color: #98a2b3;
+  font-size: 12px;
+}
+
+/* 用户消息的元信息靠右。 */
+.user-message .message-meta {
+  text-align: right;
+}
+
+/* 加载状态小圆点。 */
+.typing-indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.typing-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: #98a2b3;
+  animation: typingPulse 1s infinite ease-in-out;
+}
+
+.typing-dot:nth-child(2) {
+  animation-delay: 0.16s;
+}
+
+.typing-dot:nth-child(3) {
+  animation-delay: 0.32s;
+}
+
+@keyframes typingPulse {
+  0%,
+  80%,
+  100% {
+    opacity: 0.35;
+    transform: translateY(0);
+  }
+
+  40% {
+    opacity: 1;
+    transform: translateY(-3px);
+  }
+}
+
+/* 输入区域外壳。 */
+.composer-shell {
+  padding: 18px 34px 26px;
+  border-top: 1px solid #e2e8f0;
+  background: rgba(255, 255, 255, 0.94);
+}
+
+/* 输入表单。 */
+.composer {
+  display: flex;
+  align-items: flex-end;
+  gap: 12px;
+  max-width: 920px;
+  margin: 0 auto;
+  padding: 10px;
+  border: 1px solid #dbe3ef;
+  border-radius: 8px;
+  background: #ffffff;
+  box-shadow: 0 18px 45px rgba(15, 23, 42, 0.08);
+}
+
+/* 多行输入框。 */
+.message-input {
+  flex: 1;
+  min-width: 0;
+  max-height: 180px;
+  min-height: 44px;
+  resize: none;
+  overflow-y: auto;
+  padding: 11px 12px;
+  border: 0;
+  outline: none;
+  color: #111827;
+  background: transparent;
+  font: inherit;
+  line-height: 1.55;
+}
+
+.message-input::placeholder {
+  color: #98a2b3;
+}
+
+/* 发送按钮。 */
+.send-button {
+  min-width: 88px;
+  height: 44px;
+  border: 0;
+  border-radius: 8px;
+  color: #ffffff;
+  background: #2563eb;
+  font-size: 15px;
+  font-weight: 800;
+  cursor: pointer;
+  transition: transform 0.18s ease, background 0.18s ease;
+}
+
+.send-button:hover {
+  background: #1d4ed8;
+  transform: translateY(-1px);
+}
+
+.send-button:disabled {
+  background: #a4b9ee;
+  cursor: not-allowed;
+  transform: none;
+}
+
+/* 中等屏幕：缩窄侧边栏。 */
+@media (max-width: 920px) {
+  .app-shell {
+    grid-template-columns: 236px minmax(0, 1fr);
+  }
+
+  .sidebar {
+    padding: 18px;
+  }
+
+  .message-list {
+    padding: 24px;
+  }
+}
+
+/* 小屏幕：侧边栏移到顶部，聊天区继续占满剩余空间。 */
+@media (max-width: 720px) {
+  .app-shell {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto minmax(0, 1fr);
+  }
+
+  .sidebar {
+    gap: 12px;
+    padding: 14px;
+  }
+
+  .sidebar-spacer,
+  .sidebar-footer,
+  .brand-text span {
+    display: none;
+  }
+
+  .session-card {
+    padding: 12px;
+  }
+
+  .chat-topbar,
+  .composer-shell {
+    padding-left: 16px;
+    padding-right: 16px;
+  }
+
+  .chat-topbar {
+    min-height: 72px;
+  }
+
+  .chat-topbar h1 {
+    font-size: 20px;
+  }
+
+  .status-pill {
+    display: none;
+  }
+
+  .message-list {
+    padding: 16px;
+  }
+
+  .empty-state-card {
+    padding: 24px 18px;
+  }
+
+  .prompt-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .message-content {
+    max-width: 88%;
+  }
+
+  .composer {
+    padding: 8px;
+  }
+
+  .send-button {
+    min-width: 74px;
+  }
+}

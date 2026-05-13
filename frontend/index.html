@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Agent 智能体对话助手</title>
+    <!-- 引入页面样式，当前项目不使用任何前端框架。 -->
+    <link rel="stylesheet" href="/frontend/style.css" />
+  </head>
+  <body>
+    <!-- 应用外壳：左侧会话栏 + 右侧聊天主界面。 -->
+    <div class="app-shell">
+      <!-- 左侧侧边栏，放置项目名、会话操作和当前会话信息。 -->
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="brand-mark">AP</div>
+          <div class="brand-text">
+            <strong>Agent_Project</strong>
+            <span>Workspace</span>
+          </div>
+        </div>
+
+        <button id="newConversationButton" class="new-chat-button" type="button">
+          <span class="button-icon">+</span>
+          <span>新建对话</span>
+        </button>
+
+        <div class="session-card">
+          <span class="session-label">当前会话 ID</span>
+          <code id="conversationIdText" class="session-id"></code>
+        </div>
+
+        <div class="sidebar-spacer"></div>
+
+        <div class="sidebar-footer">
+          <span class="status-dot"></span>
+          <span>DashScope API</span>
+        </div>
+      </aside>
+
+      <!-- 右侧聊天区域，后续可以在这里扩展工具调用和 RAG 结果展示。 -->
+      <main class="chat-panel">
+        <header class="chat-topbar">
+          <div>
+            <h1>Agent 智能体对话助手</h1>
+            <p>面向本地开发的轻量 AI Agent 工作台</p>
+          </div>
+          <span id="statusText" class="status-pill">准备就绪</span>
+        </header>
+
+        <!-- 消息流区域，JS 会动态渲染用户消息、Agent 消息、错误和加载状态。 -->
+        <section id="messageList" class="message-list" aria-live="polite"></section>
+
+        <!-- 底部输入区，textarea 支持多行输入。 -->
+        <footer class="composer-shell">
+          <form id="chatForm" class="composer">
+            <textarea
+              id="messageInput"
+              class="message-input"
+              rows="1"
+              autocomplete="off"
+              placeholder="向 Agent 提问..."
+            ></textarea>
+            <button id="sendButton" class="send-button" type="submit">
+              <span>发送</span>
+            </button>
+          </form>
+        </footer>
+      </main>
+    </div>
+
+    <!-- 引入交互脚本，defer 确保页面结构加载完成后再运行。 -->
+    <script src="/frontend/main.js" defer></script>
+  </body>
+</html>

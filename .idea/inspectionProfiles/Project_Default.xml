@@ -10,6 +10,7 @@
           <option value="scikit-learn" />
           <option value="openpyxl" />
           <option value="PyMySQL" />
+          <option value="uvicorn" />
         </list>
       </option>
     </inspection_tool>
