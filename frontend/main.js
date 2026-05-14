@@ -1,5 +1,4 @@
 const CHAT_API_URL = "http://127.0.0.1:8000/chat";
-const CHAT_STREAM_API_URL = "http://127.0.0.1:8000/chat/stream";
 
 const ACTIVE_CONVERSATION_KEY = "agent_project_conversation_id";
 const CONVERSATIONS_KEY = "agent_project_conversations";
@@ -45,26 +44,27 @@ const FRIENDLY_ERROR_MESSAGES = [
 ];
 
 const EXAMPLE_PROMPTS = [
+  "帮我写Python冒泡排序",
   "帮我总结一下这个 FastAPI 项目的结构",
   "解释一下 /chat 接口从请求到返回的完整流程",
   "给我一个适合初学者的 Agent 学习路线",
-  "帮我把“增加多轮对话”拆成开发任务",
 ];
 
-const chatForm = document.querySelector("#chatForm");
-const messageInput = document.querySelector("#messageInput");
-const messageList = document.querySelector("#messageList");
-const sendButton = document.querySelector("#sendButton");
-const charCounter = document.querySelector("#charCounter");
-const conversationIdText = document.querySelector("#conversationIdText");
-const conversationList = document.querySelector("#conversationList");
-const conversationCountText = document.querySelector("#conversationCountText");
-const activeConversationTitle = document.querySelector("#activeConversationTitle");
-const newConversationButton = document.querySelector("#newConversationButton");
-const clearConversationButton = document.querySelector("#clearConversationButton");
-const currentModelText = document.querySelector("#currentModelText");
-const currentModeText = document.querySelector("#currentModeText");
+const chatForm = getRequiredElement("#chatForm");
+const messageInput = getRequiredElement("#messageInput");
+const messageList = getRequiredElement("#messageList");
+const sendButton = getRequiredElement("#sendButton");
+const charCounter = getRequiredElement("#charCounter");
+const conversationIdText = getRequiredElement("#conversationIdText");
+const conversationList = getRequiredElement("#conversationList");
+const conversationCountText = getRequiredElement("#conversationCountText");
+const activeConversationTitle = getRequiredElement("#activeConversationTitle");
+const newConversationButton = getRequiredElement("#newConversationButton");
+const clearConversationButton = getRequiredElement("#clearConversationButton");
+const currentModelText = getRequiredElement("#currentModelText");
+const currentModeText = getRequiredElement("#currentModeText");
 const modeButtons = document.querySelectorAll(".mode-item");
+console.log("modeButtons found", modeButtons.length);
 
 let conversations = loadConversations();
 let conversationId = getInitialConversationId();
@@ -75,6 +75,16 @@ let isLoading = false;
 let activeAbortController = null;
 
 initPage();
+
+function getRequiredElement(selector) {
+  const element = document.querySelector(selector);
+  if (!element) {
+    console.error("element missing", selector);
+    throw new Error(`页面缺少必要元素：${selector}`);
+  }
+  console.log("element found", selector, element);
+  return element;
+}
 
 function initPage() {
   ensureConversation(conversationId);
@@ -262,13 +272,18 @@ function renderConversationList() {
     item.role = "button";
     item.classList.toggle("active", conversation.id === conversationId);
     item.setAttribute("aria-label", `切换到 ${conversation.title}`);
-    item.addEventListener("click", () => switchConversation(conversation.id));
+    item.addEventListener("click", () => {
+      console.log("conversation item clicked", conversation.id);
+      switchConversation(conversation.id);
+    });
     item.addEventListener("keydown", (event) => {
+      console.log("conversation item keydown", event.key, conversation.id);
       if (event.target !== item) {
         return;
       }
       if (event.key === "Enter" || event.key === " ") {
         event.preventDefault();
+        console.log("conversation item keyboard activate", conversation.id);
         switchConversation(conversation.id);
       }
     });
@@ -293,6 +308,7 @@ function renderConversationList() {
     deleteButton.title = "删除会话";
     deleteButton.setAttribute("aria-label", `删除 ${conversation.title}`);
     deleteButton.addEventListener("click", (event) => {
+      console.log("deleteConversationButton clicked", conversation.id);
       event.stopPropagation();
       deleteConversation(conversation.id);
     });
@@ -372,7 +388,9 @@ function renderWelcomePanel() {
     button.className = "prompt-card";
     button.type = "button";
     button.textContent = prompt;
+    console.log("prompt-card created", prompt);
     button.addEventListener("click", () => {
+      console.log("prompt-card clicked", prompt);
       messageInput.value = prompt;
       updateInputState();
       autoResizeInput();
@@ -459,7 +477,10 @@ function createCopyToolbar(text) {
   button.className = "copy-message-button";
   button.type = "button";
   button.textContent = "复制";
-  button.addEventListener("click", () => copyText(text, button, "已复制"));
+  button.addEventListener("click", () => {
+    console.log("copy-message-button clicked");
+    copyText(text, button, "已复制");
+  });
 
   toolbar.appendChild(button);
   return toolbar;
@@ -699,7 +720,10 @@ function createCodeBlock(code, language) {
   copyButton.className = "code-copy-button";
   copyButton.type = "button";
   copyButton.textContent = "复制代码";
-  copyButton.addEventListener("click", () => copyText(code, copyButton, "已复制"));
+  copyButton.addEventListener("click", () => {
+    console.log("code-copy-button clicked", language || "text");
+    copyText(code, copyButton, "已复制");
+  });
 
   const pre = document.createElement("pre");
   const codeElement = document.createElement("code");
@@ -760,6 +784,9 @@ function escapeHtml(value) {
 }
 
 async function copyText(text, button, successText) {
+  console.log("copyText start", {
+    textLength: text.length,
+  });
   const previousText = button.textContent;
   try {
     if (navigator.clipboard && window.isSecureContext) {
@@ -890,6 +917,7 @@ function updateInputState() {
 }
 
 function setMode(mode) {
+  console.log("setMode start", mode);
   currentMode = MODE_PROMPTS[mode] ? mode : "智能问答";
   localStorage.setItem(MODE_KEY, currentMode);
   currentModeText.textContent = currentMode;
@@ -899,7 +927,12 @@ function setMode(mode) {
   });
 }
 
-async function requestAgentReplyStream(message, callbacks) {
+async function requestAgentReply(message) {
+  console.log("requestAgentReply start", {
+    conversationId,
+    messageLength: message.length,
+    mode: currentMode,
+  });
   const requestBody = {
     message,
     system_prompt: MODE_PROMPTS[currentMode],
@@ -915,16 +948,23 @@ async function requestAgentReplyStream(message, callbacks) {
 
   let response;
   try {
-    response = await fetch(CHAT_STREAM_API_URL, {
+    console.log("POST /chat request start", requestBody);
+    response = await fetch(CHAT_API_URL, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Accept: "text/event-stream",
+        Accept: "application/json",
       },
       body: JSON.stringify(requestBody),
       signal: activeAbortController.signal,
     });
+    console.log("POST /chat response received", {
+      ok: response.ok,
+      status: response.status,
+      statusText: response.statusText,
+    });
   } catch (error) {
+    console.error("POST /chat request error", error);
     window.clearTimeout(timeoutTimer);
     activeAbortController = null;
     if (error.name === "AbortError") {
@@ -933,95 +973,37 @@ async function requestAgentReplyStream(message, callbacks) {
       }
       return { aborted: true };
     }
-    throw new Error("无法连接到流式接口。请确认 FastAPI 服务正在运行。");
+    throw new Error("请求失败，请检查后端");
   }
+
+  window.clearTimeout(timeoutTimer);
+  activeAbortController = null;
 
   if (!response.ok) {
     const data = await parseJsonResponse(response);
-    window.clearTimeout(timeoutTimer);
-    activeAbortController = null;
-    throw new Error(toFriendlyError(data.error || `请求失败，状态码：${response.status}`));
+    console.error("Chat request failed:", data.error || response.status);
+    throw new Error("请求失败，请检查后端");
   }
 
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder("utf-8");
-  let buffer = "";
-
-  try {
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) {
-        break;
-      }
-
-      buffer += decoder.decode(value, { stream: true });
-      buffer = processSseBuffer(buffer, callbacks);
-    }
-
-    buffer += decoder.decode();
-    processSseBuffer(`${buffer}\n\n`, callbacks);
-    return { aborted: false };
-  } catch (error) {
-    if (error.name === "AbortError") {
-      if (didTimeout) {
-        throw new Error(toFriendlyError("Request timed out"));
-      }
-      return { aborted: true };
-    }
-    throw error;
-  } finally {
-    window.clearTimeout(timeoutTimer);
-    activeAbortController = null;
-  }
-}
-
-function processSseBuffer(buffer, callbacks) {
-  const events = buffer.split(/\r?\n\r?\n/);
-  const remainder = events.pop() || "";
-
-  events.forEach((rawEvent) => {
-    const event = parseSseEvent(rawEvent);
-    if (!event) {
-      return;
-    }
-
-    if (event.type === "metadata") {
-      callbacks.onMetadata?.(event.data);
-    } else if (event.type === "chunk") {
-      callbacks.onChunk?.(event.data.content || "");
-    } else if (event.type === "done") {
-      callbacks.onDone?.(event.data);
-    } else if (event.type === "error") {
-      throw new Error(toFriendlyError(event.data.error));
-    }
-  });
-
-  return remainder;
-}
-
-function parseSseEvent(rawEvent) {
-  let type = "message";
-  const dataLines = [];
-
-  rawEvent.split(/\r?\n/).forEach((line) => {
-    if (line.startsWith("event:")) {
-      type = line.slice(6).trim();
-    } else if (line.startsWith("data:")) {
-      dataLines.push(line.slice(5).trimStart());
-    }
-  });
-
-  if (dataLines.length === 0) {
-    return null;
+  const data = await parseJsonResponse(response);
+  console.log("POST /chat response body", data);
+  if (!data.success) {
+    console.error("Chat API returned an error:", data.error);
+    throw new Error("请求失败，请检查后端");
   }
 
   return {
-    type,
-    data: JSON.parse(dataLines.join("\n")),
+    aborted: false,
+    reply: data.reply || "",
+    model: data.model || "",
+    conversationId: data.conversation_id || conversationId,
+    usedTool: data.used_tool,
+    toolName: data.tool_name,
+    toolResult: data.tool_result,
   };
 }
 
-function abortCurrentStream() {
+function abortCurrentRequest() {
   if (activeAbortController) {
     activeAbortController.abort();
   }
@@ -1042,13 +1024,19 @@ function toFriendlyError(errorText) {
 }
 
 async function sendCurrentMessage() {
+  console.log("sendCurrentMessage start", {
+    isLoading,
+    inputLength: messageInput.value.length,
+  });
   if (isLoading) {
-    abortCurrentStream();
+    console.log("sendCurrentMessage abort current request");
+    abortCurrentRequest();
     return;
   }
 
   const userText = messageInput.value.trim();
   if (!userText) {
+    console.log("sendCurrentMessage empty input");
     updateInputState();
     return;
   }
@@ -1075,64 +1063,47 @@ async function sendCurrentMessage() {
   }, THINKING_NOTICE_DELAY_MS);
 
   try {
-    let streamedReply = "";
-    let streamedModel = "";
-
-    const streamResult = await requestAgentReplyStream(userText, {
-      onMetadata(data) {
-        if (data.conversation_id && data.conversation_id !== conversationId) {
-          replaceActiveConversationId(data.conversation_id);
-        }
-
-        if (data.model) {
-          streamedModel = data.model;
-          latestModel = data.model;
-          localStorage.setItem(LATEST_MODEL_KEY, latestModel);
-          currentModelText.textContent = latestModel;
-        }
-      },
-      onChunk(chunk) {
-        hasReceivedFirstChunk = true;
-        window.clearTimeout(thinkingTimer);
-        streamedReply += chunk;
-        updateMessage(loadingMessage.id, {
-          type: "text",
-          role: "agent",
-          content: streamedReply,
-          model: streamedModel,
-          createdAt: getCurrentTime(),
-        });
-      },
-      onDone(data) {
-        if (data.model) {
-          streamedModel = data.model;
-        }
-      },
-    });
-
-    if (streamResult.aborted) {
+    const result = await requestAgentReply(userText);
+    console.log("sendCurrentMessage received result", result);
+    if (result.aborted) {
       updateMessage(loadingMessage.id, {
         type: "text",
-        role: streamedReply ? "agent" : "error",
-        content: streamedReply || "已停止生成。",
-        model: streamedModel,
+        role: "error",
+        content: "已停止生成。",
         createdAt: getCurrentTime(),
       });
       return;
     }
 
+    hasReceivedFirstChunk = true;
+    window.clearTimeout(thinkingTimer);
+
+    if (result.conversationId && result.conversationId !== conversationId) {
+      replaceActiveConversationId(result.conversationId);
+    }
+
+    if (result.model) {
+      latestModel = result.model;
+      localStorage.setItem(LATEST_MODEL_KEY, latestModel);
+      currentModelText.textContent = latestModel;
+    }
+
     updateMessage(loadingMessage.id, {
       type: "text",
       role: "agent",
-      content: streamedReply || "Agent 没有返回文本内容。",
-      model: streamedModel,
+      content: result.reply || "Agent 没有返回文本内容。",
+      model: result.model,
+      usedTool: result.usedTool,
+      toolName: result.toolName,
+      toolResult: result.toolResult,
       createdAt: getCurrentTime(),
     });
   } catch (error) {
+    console.error("sendCurrentMessage error", error);
     updateMessage(loadingMessage.id, {
       type: "text",
       role: "error",
-      content: error.message,
+      content: "请求失败，请检查后端",
       createdAt: getCurrentTime(),
     });
   } finally {
@@ -1143,11 +1114,14 @@ async function sendCurrentMessage() {
 }
 
 function startNewConversation() {
+  console.log("startNewConversation start");
   if (guardActionDuringLoading()) {
+    console.log("startNewConversation blocked by loading");
     return;
   }
 
   conversationId = createConversationId();
+  console.log("newConversation created", conversationId);
   localStorage.setItem(ACTIVE_CONVERSATION_KEY, conversationId);
   conversations.unshift({
     id: conversationId,
@@ -1170,7 +1144,13 @@ function startNewConversation() {
 }
 
 function switchConversation(nextId) {
+  console.log("switchConversation start", nextId);
   if (nextId === conversationId || guardActionDuringLoading()) {
+    console.log("switchConversation skipped", {
+      nextId,
+      conversationId,
+      isLoading,
+    });
     return;
   }
 
@@ -1188,7 +1168,9 @@ function switchConversation(nextId) {
 }
 
 function deleteConversation(targetId) {
+  console.log("deleteConversation start", targetId);
   if (guardActionDuringLoading()) {
+    console.log("deleteConversation blocked by loading", targetId);
     return;
   }
 
@@ -1229,7 +1211,9 @@ function deleteConversation(targetId) {
 }
 
 function clearCurrentConversation() {
+  console.log("clearCurrentConversation start", conversationId);
   if (guardActionDuringLoading()) {
+    console.log("clearCurrentConversation blocked by loading");
     return;
   }
 
@@ -1248,32 +1232,53 @@ function guardActionDuringLoading() {
     return false;
   }
 
+  console.log("guardActionDuringLoading blocked action");
   window.alert("当前正在生成回复，请先点击“停止生成”。");
   return true;
 }
 
 chatForm.addEventListener("submit", (event) => {
+  console.log("chatForm submit start");
   event.preventDefault();
   sendCurrentMessage();
 });
 
+sendButton.addEventListener("click", () => {
+  console.log("sendButton clicked");
+});
+
 messageInput.addEventListener("keydown", (event) => {
+  console.log("messageInput keydown", {
+    key: event.key,
+    shiftKey: event.shiftKey,
+  });
   if (event.key === "Enter" && !event.shiftKey) {
     event.preventDefault();
+    console.log("messageInput enter send");
     sendCurrentMessage();
   }
 });
 
 messageInput.addEventListener("input", () => {
+  console.log("messageInput input", {
+    length: messageInput.value.length,
+  });
   updateInputState();
   autoResizeInput();
 });
 
-newConversationButton.addEventListener("click", startNewConversation);
-clearConversationButton.addEventListener("click", clearCurrentConversation);
+newConversationButton.addEventListener("click", () => {
+  console.log("newConversation clicked");
+  startNewConversation();
+});
+clearConversationButton.addEventListener("click", () => {
+  console.log("clearConversation clicked");
+  clearCurrentConversation();
+});
 
 modeButtons.forEach((button) => {
   button.addEventListener("click", () => {
+    console.log("modeButton clicked", button.dataset.mode);
     setMode(button.dataset.mode);
     messageInput.focus();
   });
