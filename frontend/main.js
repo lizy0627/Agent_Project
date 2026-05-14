@@ -8,12 +8,26 @@ const LATEST_MODEL_KEY = "agent_project_latest_model";
 const MAX_MESSAGE_LENGTH = 4000;
 const THINKING_NOTICE_DELAY_MS = 8000;
 const REQUEST_TIMEOUT_MS = 45000;
+const CHAT_FAILURE_MESSAGE = "请求失败，请检查后端服务或 API Key";
+const DEFAULT_MODE = "通用助手";
 
 const MODE_PROMPTS = {
-  智能问答: "你是一个简洁、可靠的中文 AI 助手。回答要清晰、可执行，适合初学者理解。",
+  通用助手: "你是一个简洁、可靠的中文 AI 助手。回答要清晰、可执行，适合初学者理解。",
   代码助手: "你是一个耐心的编程导师。请优先解释思路，再给出简洁代码，并提醒可能的坑。",
-  学习助手: "你是一个学习教练。请把复杂概念拆成小步骤，并给出适合练习的例子。",
-  项目分析: "你是一个项目分析助手。请从结构、职责、风险和下一步建议几个角度回答。",
+  学习助手: "你是一个学习教练。请把复杂概念拆成小步骤，并给出适合练习的例子、检查点和复习建议。",
+  面试助手: "你是一个专业的面试辅导助手。请围绕岗位面试场景回答，优先给出结构化思路、示例回答、追问点和改进建议。",
+};
+
+const MODE_ALIASES = {
+  智能问答: "通用助手",
+  项目分析: "面试助手",
+};
+
+const MODE_ICONS = {
+  通用助手: "?",
+  代码助手: "{ }",
+  学习助手: "A",
+  面试助手: "#",
 };
 
 const FRIENDLY_ERROR_MESSAGES = [
@@ -63,13 +77,14 @@ const newConversationButton = getRequiredElement("#newConversationButton");
 const clearConversationButton = getRequiredElement("#clearConversationButton");
 const currentModelText = getRequiredElement("#currentModelText");
 const currentModeText = getRequiredElement("#currentModeText");
-const modeButtons = document.querySelectorAll(".mode-item");
+ensureModeItems();
+const modeButtons = getRequiredElements(".mode-item");
 console.log("modeButtons found", modeButtons.length);
 
 let conversations = loadConversations();
 let conversationId = getInitialConversationId();
 let messages = loadMessages(conversationId);
-let currentMode = localStorage.getItem(MODE_KEY) || "智能问答";
+let currentMode = normalizeMode(localStorage.getItem(MODE_KEY));
 let latestModel = localStorage.getItem(LATEST_MODEL_KEY) || "等待后端返回";
 let isLoading = false;
 let activeAbortController = null;
@@ -79,11 +94,62 @@ initPage();
 function getRequiredElement(selector) {
   const element = document.querySelector(selector);
   if (!element) {
+    if (selector === "#messageInput") {
+      console.error("messageInput missing");
+    }
     console.error("element missing", selector);
     throw new Error(`页面缺少必要元素：${selector}`);
   }
   console.log("element found", selector, element);
   return element;
+}
+
+function getRequiredElements(selector) {
+  const elements = document.querySelectorAll(selector);
+  if (elements.length === 0) {
+    console.error("elements missing", selector);
+    throw new Error(`页面缺少必要元素：${selector}`);
+  }
+  console.log("elements found", selector, elements.length);
+  return elements;
+}
+
+function normalizeMode(mode) {
+  const normalizedMode = MODE_ALIASES[mode] || mode;
+  return MODE_PROMPTS[normalizedMode] ? normalizedMode : DEFAULT_MODE;
+}
+
+function createModeButton(modeName) {
+  const button = document.createElement("button");
+  button.className = "mode-item";
+  button.type = "button";
+  button.dataset.mode = modeName;
+
+  const icon = document.createElement("span");
+  icon.className = "mode-icon";
+  icon.setAttribute("aria-hidden", "true");
+  icon.textContent = MODE_ICONS[modeName] || "?";
+
+  button.append(icon, document.createTextNode(` ${modeName}`));
+  return button;
+}
+
+function ensureModeItems() {
+  const modeMenu = document.querySelector(".mode-menu");
+  if (!modeMenu) {
+    console.error("elements missing", ".mode-menu");
+    return;
+  }
+
+  Object.keys(MODE_PROMPTS).forEach((modeName) => {
+    const existingButton = modeMenu.querySelector(
+      `.mode-item[data-mode="${modeName}"]`,
+    );
+    if (!existingButton) {
+      console.log("mode-item created", modeName);
+      modeMenu.appendChild(createModeButton(modeName));
+    }
+  });
 }
 
 function initPage() {
@@ -389,19 +455,32 @@ function renderWelcomePanel() {
     button.type = "button";
     button.textContent = prompt;
     console.log("prompt-card created", prompt);
-    button.addEventListener("click", () => {
-      console.log("prompt-card clicked", prompt);
-      messageInput.value = prompt;
-      updateInputState();
-      autoResizeInput();
-      messageInput.focus();
-    });
     promptGrid.appendChild(button);
   });
 
   card.append(badge, title, description, promptGrid);
   welcomePanel.appendChild(card);
   messageList.appendChild(welcomePanel);
+}
+
+function handlePromptCardClick(promptCard) {
+  const text = promptCard.textContent.trim();
+  console.log("prompt card clicked", text);
+
+  const input = document.querySelector("#messageInput");
+  if (!input) {
+    console.error("messageInput missing");
+    return;
+  }
+
+  input.value = text;
+  updateInputState();
+  autoResizeInput();
+  input.focus();
+
+  if (typeof input.setSelectionRange === "function") {
+    input.setSelectionRange(text.length, text.length);
+  }
 }
 
 function appendMessage(message) {
@@ -895,6 +974,7 @@ function maybeRenameConversation(text) {
 }
 
 function setLoading(nextLoading) {
+  console.log("setLoading", nextLoading);
   isLoading = nextLoading;
   messageInput.disabled = nextLoading;
   sendButton.textContent = nextLoading ? "停止生成" : "发送";
@@ -918,13 +998,14 @@ function updateInputState() {
 
 function setMode(mode) {
   console.log("setMode start", mode);
-  currentMode = MODE_PROMPTS[mode] ? mode : "智能问答";
+  currentMode = normalizeMode(mode);
   localStorage.setItem(MODE_KEY, currentMode);
   currentModeText.textContent = currentMode;
 
   modeButtons.forEach((button) => {
     button.classList.toggle("active", button.dataset.mode === currentMode);
   });
+  console.log("mode changed", currentMode);
 }
 
 async function requestAgentReply(message) {
@@ -973,7 +1054,7 @@ async function requestAgentReply(message) {
       }
       return { aborted: true };
     }
-    throw new Error("请求失败，请检查后端");
+    throw new Error(CHAT_FAILURE_MESSAGE);
   }
 
   window.clearTimeout(timeoutTimer);
@@ -982,14 +1063,14 @@ async function requestAgentReply(message) {
   if (!response.ok) {
     const data = await parseJsonResponse(response);
     console.error("Chat request failed:", data.error || response.status);
-    throw new Error("请求失败，请检查后端");
+    throw new Error(CHAT_FAILURE_MESSAGE);
   }
 
   const data = await parseJsonResponse(response);
   console.log("POST /chat response body", data);
   if (!data.success) {
     console.error("Chat API returned an error:", data.error);
-    throw new Error("请求失败，请检查后端");
+    throw new Error(CHAT_FAILURE_MESSAGE);
   }
 
   return {
@@ -1042,12 +1123,14 @@ async function sendCurrentMessage() {
   }
 
   appendMessage(createMessage("user", userText));
+  console.log("sendCurrentMessage user message appended");
   messageInput.value = "";
   autoResizeInput();
   updateInputState();
 
   const loadingMessage = createMessage("agent", "Agent 正在思考", "loading");
   appendMessage(loadingMessage);
+  console.log("sendCurrentMessage loading message appended", loadingMessage.id);
   setLoading(true);
 
   let hasReceivedFirstChunk = false;
@@ -1098,12 +1181,13 @@ async function sendCurrentMessage() {
       toolResult: result.toolResult,
       createdAt: getCurrentTime(),
     });
+    console.log("sendCurrentMessage agent reply rendered", loadingMessage.id);
   } catch (error) {
     console.error("sendCurrentMessage error", error);
     updateMessage(loadingMessage.id, {
       type: "text",
       role: "error",
-      content: "请求失败，请检查后端",
+      content: CHAT_FAILURE_MESSAGE,
       createdAt: getCurrentTime(),
     });
   } finally {
@@ -1111,6 +1195,16 @@ async function sendCurrentMessage() {
     setLoading(false);
     messageInput.focus();
   }
+}
+
+function submitChatForm(source) {
+  console.log("submitChatForm start", source);
+  if (typeof chatForm.requestSubmit === "function") {
+    chatForm.requestSubmit();
+    return;
+  }
+
+  sendCurrentMessage();
 }
 
 function startNewConversation() {
@@ -1217,10 +1311,14 @@ function clearCurrentConversation() {
     return;
   }
 
+  if (!window.confirm("确定要清空当前会话吗？")) {
+    console.log("clearCurrentConversation cancelled");
+    return;
+  }
+
   messages = [];
   saveMessages();
   updateConversationMeta({
-    title: "新会话",
     messageCount: 0,
   });
   renderMessages();
@@ -1247,6 +1345,19 @@ sendButton.addEventListener("click", () => {
   console.log("sendButton clicked");
 });
 
+document.addEventListener("click", (event) => {
+  if (!(event.target instanceof Element)) {
+    return;
+  }
+
+  const promptCard = event.target.closest(".prompt-card");
+  if (!promptCard) {
+    return;
+  }
+
+  handlePromptCardClick(promptCard);
+});
+
 messageInput.addEventListener("keydown", (event) => {
   console.log("messageInput keydown", {
     key: event.key,
@@ -1254,8 +1365,8 @@ messageInput.addEventListener("keydown", (event) => {
   });
   if (event.key === "Enter" && !event.shiftKey) {
     event.preventDefault();
-    console.log("messageInput enter send");
-    sendCurrentMessage();
+    console.log("messageInput enter submit");
+    submitChatForm("keyboard-enter");
   }
 });
 
@@ -1268,11 +1379,11 @@ messageInput.addEventListener("input", () => {
 });
 
 newConversationButton.addEventListener("click", () => {
-  console.log("newConversation clicked");
+  console.log("new conversation clicked");
   startNewConversation();
 });
 clearConversationButton.addEventListener("click", () => {
-  console.log("clearConversation clicked");
+  console.log("clear conversation clicked");
   clearCurrentConversation();
 });
 

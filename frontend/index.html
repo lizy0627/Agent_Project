@@ -4,7 +4,8 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Agent_Project | 智能体助手</title>
-    <link rel="stylesheet" href="style.css" onerror="this.onerror=null;this.href='/frontend/style.css';" />
+    <link rel="icon" href="data:," />
+    <link rel="stylesheet" href="/frontend/style.css" />
   </head>
   <body>
     <div class="app-shell">
@@ -37,9 +38,9 @@
 
         <nav class="mode-menu" aria-label="功能菜单">
           <div class="section-label">能力模式</div>
-          <button class="mode-item active" type="button" data-mode="智能问答">
+          <button class="mode-item active" type="button" data-mode="通用助手">
             <span class="mode-icon" aria-hidden="true">?</span>
-            智能问答
+            通用助手
           </button>
           <button class="mode-item" type="button" data-mode="代码助手">
             <span class="mode-icon" aria-hidden="true">{ }</span>
@@ -49,9 +50,9 @@
             <span class="mode-icon" aria-hidden="true">A</span>
             学习助手
           </button>
-          <button class="mode-item" type="button" data-mode="项目分析">
+          <button class="mode-item" type="button" data-mode="面试助手">
             <span class="mode-icon" aria-hidden="true">#</span>
-            项目分析
+            面试助手
           </button>
         </nav>
 
@@ -82,13 +83,29 @@
             </div>
             <div class="status-item">
               <span>模式</span>
-              <strong id="currentModeText">智能问答</strong>
+              <strong id="currentModeText">通用助手</strong>
             </div>
             <button id="clearConversationButton" class="ghost-button" type="button">清空</button>
           </div>
         </header>
 
-        <section id="messageList" class="message-list" aria-live="polite"></section>
+        <section id="messageList" class="message-list" aria-live="polite">
+          <div class="welcome-panel">
+            <div class="welcome-card">
+              <span class="welcome-badge">DashScope Agent 在线</span>
+              <h2>你好，我是你的 Agent 智能体助手</h2>
+              <p>
+                可以帮你解释概念、分析项目、生成代码思路，也能把任务拆成清晰的下一步。
+              </p>
+              <div class="prompt-grid">
+                <button class="prompt-card" type="button">解释一下 /chat 接口从请求到返回的完整流程</button>
+                <button class="prompt-card" type="button">帮我把一个复杂任务拆成可执行步骤</button>
+                <button class="prompt-card" type="button">检查这段代码可能存在的问题</button>
+                <button class="prompt-card" type="button">用简洁中文总结下面这段文字</button>
+              </div>
+            </div>
+          </div>
+        </section>
 
         <footer class="composer-wrap">
           <form id="chatForm" class="composer">
@@ -110,6 +127,6 @@
       </main>
     </div>
 
-    <script src="main.js" defer onerror="this.onerror=null;this.src='/frontend/main.js';"></script>
+    <script src="/frontend/main.js" defer></script>
   </body>
 </html>
