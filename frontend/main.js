@@ -3,11 +3,13 @@ const CHAT_API_URL = "http://127.0.0.1:8000/chat";
 const ACTIVE_CONVERSATION_KEY = "agent_project_conversation_id";
 const CONVERSATIONS_KEY = "agent_project_conversations";
 const MESSAGES_KEY_PREFIX = "agent_project_messages_";
+const SCROLL_POSITIONS_KEY = "agent_project_scroll_positions";
 const MODE_KEY = "agent_project_mode";
 const LATEST_MODEL_KEY = "agent_project_latest_model";
 const MAX_MESSAGE_LENGTH = 4000;
 const THINKING_NOTICE_DELAY_MS = 8000;
 const REQUEST_TIMEOUT_MS = 45000;
+const AUTO_SCROLL_THRESHOLD_PX = 200;
 const CHAT_FAILURE_MESSAGE = "请求失败，请检查后端服务或 API Key";
 const DEFAULT_MODE = "通用助手";
 
@@ -75,6 +77,8 @@ const conversationCountText = getRequiredElement("#conversationCountText");
 const activeConversationTitle = getRequiredElement("#activeConversationTitle");
 const newConversationButton = getRequiredElement("#newConversationButton");
 const clearConversationButton = getRequiredElement("#clearConversationButton");
+const scrollToBottomButton = getRequiredElement("#scrollToBottomButton");
+const newMessageNotice = getRequiredElement("#newMessageNotice");
 const currentModelText = getRequiredElement("#currentModelText");
 const currentModeText = getRequiredElement("#currentModeText");
 ensureModeItems();
@@ -84,10 +88,12 @@ console.log("modeButtons found", modeButtons.length);
 let conversations = loadConversations();
 let conversationId = getInitialConversationId();
 let messages = loadMessages(conversationId);
+let conversationScrollPositions = loadConversationScrollPositions();
 let currentMode = normalizeMode(localStorage.getItem(MODE_KEY));
 let latestModel = localStorage.getItem(LATEST_MODEL_KEY) || "等待后端返回";
 let isLoading = false;
 let activeAbortController = null;
+let shouldStickToBottom = true;
 
 initPage();
 
@@ -158,10 +164,12 @@ function initPage() {
   currentModelText.textContent = latestModel;
   setMode(currentMode);
   renderConversationList();
-  renderMessages();
+  renderMessages({ scrollToEnd: false });
+  restoreConversationScrollPosition(conversationId);
   updateHeaderTitle();
   updateInputState();
   autoResizeInput();
+  updateScrollToBottomButton();
   messageInput.focus();
 }
 
@@ -253,8 +261,25 @@ function loadMessages(id) {
   return Array.isArray(loaded) ? loaded : [];
 }
 
+function loadConversationScrollPositions() {
+  const loaded = readJson(SCROLL_POSITIONS_KEY, {});
+  if (!loaded || typeof loaded !== "object" || Array.isArray(loaded)) {
+    return {};
+  }
+
+  return Object.fromEntries(
+    Object.entries(loaded)
+      .map(([id, value]) => [id, Number(value)])
+      .filter(([id, value]) => id && Number.isFinite(value) && value >= 0),
+  );
+}
+
 function saveMessages() {
   localStorage.setItem(getMessagesKey(conversationId), JSON.stringify(messages));
+}
+
+function saveConversationScrollPositions() {
+  localStorage.setItem(SCROLL_POSITIONS_KEY, JSON.stringify(conversationScrollPositions));
 }
 
 function saveConversations() {
@@ -296,6 +321,7 @@ function replaceActiveConversationId(nextId) {
   }
 
   const oldId = conversationId;
+  saveCurrentScrollPosition(oldId);
   const current = getCurrentConversation();
   const nextConversation = {
     ...(current || {}),
@@ -307,6 +333,8 @@ function replaceActiveConversationId(nextId) {
   };
 
   conversationId = nextId;
+  conversationScrollPositions[conversationId] = conversationScrollPositions[oldId] || 0;
+  removeConversationScrollPosition(oldId);
   localStorage.setItem(ACTIVE_CONVERSATION_KEY, conversationId);
   localStorage.setItem(getMessagesKey(conversationId), JSON.stringify(messages));
   localStorage.removeItem(getMessagesKey(oldId));
@@ -416,16 +444,21 @@ function updateHeaderTitle() {
   activeConversationTitle.textContent = conversation?.title || "智能体助手";
 }
 
-function renderMessages() {
+function renderMessages({ scrollToEnd = true } = {}) {
   messageList.innerHTML = "";
 
   if (messages.length === 0) {
     renderWelcomePanel();
+    updateScrollToBottomButton();
     return;
   }
 
   messages.forEach((message) => appendMessageElement(message));
-  scrollToBottom();
+  if (scrollToEnd) {
+    scrollToBottom();
+  } else {
+    updateScrollToBottomButton();
+  }
 }
 
 function renderWelcomePanel() {
@@ -484,6 +517,8 @@ function handlePromptCardClick(promptCard) {
 }
 
 function appendMessage(message) {
+  const shouldKeepAtBottom = shouldStickToBottom || isMessageListNearBottom();
+
   messages.push(message);
   saveMessages();
   removeWelcomePanel();
@@ -495,7 +530,11 @@ function appendMessage(message) {
     updateConversationMeta();
   }
 
-  scrollToBottom();
+  if (shouldKeepAtBottom) {
+    scrollToBottom();
+  } else {
+    updateScrollToBottomButton();
+  }
 }
 
 function appendMessageElement(message) {
@@ -921,6 +960,14 @@ function removeWelcomePanel() {
 }
 
 function updateMessage(messageId, updates) {
+  const shouldKeepAtBottom = shouldStickToBottom || isMessageListNearBottom();
+  const previousScrollTop = messageList.scrollTop;
+  const currentMessage = messages.find((message) => message.id === messageId);
+  const nextRole = updates.role || currentMessage?.role;
+  const nextType = updates.type || currentMessage?.type;
+  const shouldShowNewMessageNotice =
+    !shouldKeepAtBottom && (nextRole === "agent" || nextRole === "error") && nextType !== "loading";
+
   messages = messages.map((message) => {
     if (message.id !== messageId) {
       return message;
@@ -934,11 +981,113 @@ function updateMessage(messageId, updates) {
 
   saveMessages();
   updateConversationMeta();
-  renderMessages();
+  renderMessages({ scrollToEnd: false });
+
+  if (shouldKeepAtBottom) {
+    scrollToBottom();
+  } else if (shouldShowNewMessageNotice) {
+    messageList.scrollTop = previousScrollTop;
+    showNewMessageNotice();
+  } else {
+    messageList.scrollTop = previousScrollTop;
+    updateScrollToBottomButton();
+  }
 }
 
-function scrollToBottom() {
-  messageList.scrollTop = messageList.scrollHeight;
+function scrollToBottom({ behavior = "smooth" } = {}) {
+  const messageList = document.querySelector("#messageList");
+  if (!messageList) return;
+  const button = document.querySelector("#scrollToBottomButton");
+  const notice = document.querySelector("#newMessageNotice");
+  shouldStickToBottom = true;
+
+  messageList.scrollTo({
+    top: messageList.scrollHeight,
+    behavior,
+  });
+  if (button) {
+    button.classList.add("is-hidden");
+  }
+  if (notice) {
+    notice.classList.add("is-hidden");
+  }
+}
+
+function saveCurrentScrollPosition(id = conversationId) {
+  if (!id) return;
+
+  conversationScrollPositions[id] = Math.max(0, Math.round(messageList.scrollTop));
+  saveConversationScrollPositions();
+}
+
+function restoreConversationScrollPosition(id) {
+  const savedScrollTop = conversationScrollPositions[id];
+
+  window.requestAnimationFrame(() => {
+    if (id !== conversationId) {
+      return;
+    }
+
+    if (Number.isFinite(savedScrollTop)) {
+      const maxScrollTop = Math.max(0, messageList.scrollHeight - messageList.clientHeight);
+      messageList.scrollTop = Math.min(savedScrollTop, maxScrollTop);
+      shouldStickToBottom = isMessageListNearBottom();
+      updateScrollToBottomButton();
+      return;
+    }
+
+    scrollToBottom({ behavior: "auto" });
+  });
+}
+
+function removeConversationScrollPosition(id) {
+  if (!id || !(id in conversationScrollPositions)) {
+    return;
+  }
+
+  delete conversationScrollPositions[id];
+  saveConversationScrollPositions();
+}
+
+function handleMessageListScroll() {
+  shouldStickToBottom = isMessageListNearBottom();
+  saveCurrentScrollPosition();
+  updateScrollToBottomButton();
+}
+
+function isMessageListNearBottom() {
+  const messageList = document.querySelector("#messageList");
+  if (!messageList) return true;
+
+  const distanceToBottom = messageList.scrollHeight - messageList.scrollTop - messageList.clientHeight;
+  return distanceToBottom <= AUTO_SCROLL_THRESHOLD_PX;
+}
+
+function updateScrollToBottomButton() {
+  const button = document.querySelector("#scrollToBottomButton");
+  if (!button) return;
+
+  const isNearBottom = isMessageListNearBottom();
+  button.classList.toggle("is-hidden", isNearBottom);
+
+  if (isNearBottom) {
+    hideNewMessageNotice();
+  }
+}
+
+function showNewMessageNotice() {
+  const notice = document.querySelector("#newMessageNotice");
+  if (!notice) return;
+
+  notice.classList.remove("is-hidden");
+  updateScrollToBottomButton();
+}
+
+function hideNewMessageNotice() {
+  const notice = document.querySelector("#newMessageNotice");
+  if (!notice) return;
+
+  notice.classList.add("is-hidden");
 }
 
 function getCurrentTime() {
@@ -1214,7 +1363,9 @@ function startNewConversation() {
     return;
   }
 
+  saveCurrentScrollPosition();
   conversationId = createConversationId();
+  removeConversationScrollPosition(conversationId);
   console.log("newConversation created", conversationId);
   localStorage.setItem(ACTIVE_CONVERSATION_KEY, conversationId);
   conversations.unshift({
@@ -1248,12 +1399,14 @@ function switchConversation(nextId) {
     return;
   }
 
+  saveCurrentScrollPosition();
   conversationId = nextId;
   localStorage.setItem(ACTIVE_CONVERSATION_KEY, conversationId);
   messages = loadMessages(conversationId);
   conversationIdText.textContent = conversationId;
   renderConversationList();
-  renderMessages();
+  renderMessages({ scrollToEnd: false });
+  restoreConversationScrollPosition(conversationId);
   updateHeaderTitle();
   messageInput.value = "";
   autoResizeInput();
@@ -1275,6 +1428,7 @@ function deleteConversation(targetId) {
   }
 
   localStorage.removeItem(getMessagesKey(targetId));
+  removeConversationScrollPosition(targetId);
   conversations = conversations.filter((item) => item.id !== targetId);
 
   if (conversations.length === 0) {
@@ -1295,7 +1449,8 @@ function deleteConversation(targetId) {
     messages = loadMessages(conversationId);
     localStorage.setItem(ACTIVE_CONVERSATION_KEY, conversationId);
     conversationIdText.textContent = conversationId;
-    renderMessages();
+    renderMessages({ scrollToEnd: false });
+    restoreConversationScrollPosition(conversationId);
     updateHeaderTitle();
   }
 
@@ -1318,6 +1473,7 @@ function clearCurrentConversation() {
 
   messages = [];
   saveMessages();
+  removeConversationScrollPosition(conversationId);
   updateConversationMeta({
     messageCount: 0,
   });
@@ -1343,6 +1499,16 @@ chatForm.addEventListener("submit", (event) => {
 
 sendButton.addEventListener("click", () => {
   console.log("sendButton clicked");
+});
+
+messageList.addEventListener("scroll", handleMessageListScroll);
+
+scrollToBottomButton.addEventListener("click", () => {
+  scrollToBottom({ behavior: "smooth" });
+});
+
+newMessageNotice.addEventListener("click", () => {
+  scrollToBottom({ behavior: "smooth" });
 });
 
 document.addEventListener("click", (event) => {
