@@ -1,21 +1,31 @@
 from functools import lru_cache
+from pathlib import Path
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+BASE_DIR = Path(__file__).resolve().parents[2]
+FRONTEND_DIR = BASE_DIR / "frontend"
+
+APP_TITLE = "DashScope Minimal Agent"
+APP_DESCRIPTION = "Minimal FastAPI agent example powered by DashScope."
+APP_VERSION = "0.1.0"
+
+HOST = "127.0.0.1"
+PORT = 8000
+FRONTEND_URL = f"http://{HOST}:{PORT}/ui"
+
+CORS_ALLOW_ORIGINS = ["*"]
+
+
 class Settings(BaseSettings):
-    """应用配置，从环境变量或 .env 文件读取。"""
+    """Application settings loaded from environment variables and .env."""
 
-    # DashScope API Key：真实项目不要写死在代码里，避免泄露。
-    dashscope_api_key: str
-
-    # DashScope OpenAI 兼容模式地址。
+    dashscope_api_key: str | None = None
     dashscope_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
-
-    # 默认使用的通义千问模型名称。
     dashscope_model: str = "qwen-plus"
+    dashscope_timeout_seconds: float = 30.0
 
-    # 让 pydantic-settings 自动读取 .env，并忽略未声明的变量。
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
@@ -26,6 +36,6 @@ class Settings(BaseSettings):
 
 @lru_cache
 def get_settings() -> Settings:
-    """缓存配置对象，避免每次请求都重新解析环境变量。"""
+    """Return cached application settings."""
 
     return Settings()

@@ -1,30 +1,58 @@
-# Python 缓存文件
+# Environment variables and local secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+
+# Python cache and build artifacts
 __pycache__/
 *.py[cod]
+*$py.class
+.python-version
+build/
+dist/
+*.egg-info/
 
-# 本地环境变量文件，避免提交 API Key
-.env
-
-# 本地运行日志
-*.log
-
-# PyCharm / IntelliJ 本地项目配置
-.idea/
-
-# VS Code 本地项目配置
-.vscode/
-
-# 虚拟环境目录
+# Virtual environments
 .venv/
 venv/
+env/
+ENV/
 
-# 测试、格式化和覆盖率缓存
+# Test, lint, type-check, and coverage cache
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
 .coverage
+.coverage.*
+coverage.xml
 htmlcov/
 
-# 系统临时文件
+# Local logs and runtime files
+*.log
+logs/
+*.pid
+*.sqlite
+*.sqlite3
+*.db
+
+# IDE and editor settings
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Frontend dependencies and build output
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# OS metadata
 .DS_Store
 Thumbs.db

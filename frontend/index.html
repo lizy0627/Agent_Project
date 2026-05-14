@@ -3,73 +3,113 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Agent 智能体对话助手</title>
-    <!-- 引入页面样式，当前项目不使用任何前端框架。 -->
-    <link rel="stylesheet" href="/frontend/style.css" />
+    <title>Agent_Project | 智能体助手</title>
+    <link rel="stylesheet" href="style.css" onerror="this.onerror=null;this.href='/frontend/style.css';" />
   </head>
   <body>
-    <!-- 应用外壳：左侧会话栏 + 右侧聊天主界面。 -->
     <div class="app-shell">
-      <!-- 左侧侧边栏，放置项目名、会话操作和当前会话信息。 -->
-      <aside class="sidebar">
-        <div class="brand">
-          <div class="brand-mark">AP</div>
-          <div class="brand-text">
+      <aside class="sidebar" aria-label="Agent 工作区侧边栏">
+        <section class="brand">
+          <div class="brand-mark" aria-hidden="true">AI</div>
+          <div class="brand-copy">
             <strong>Agent_Project</strong>
-            <span>Workspace</span>
+            <span>DashScope Agent</span>
           </div>
-        </div>
+        </section>
 
-        <button id="newConversationButton" class="new-chat-button" type="button">
-          <span class="button-icon">+</span>
-          <span>新建对话</span>
+        <button id="newConversationButton" class="primary-action" type="button">
+          <span aria-hidden="true">+</span>
+          新建会话
         </button>
 
-        <div class="session-card">
-          <span class="session-label">当前会话 ID</span>
+        <section class="conversation-section" aria-label="会话列表">
+          <div class="section-header">
+            <span class="section-label">会话列表</span>
+            <span id="conversationCountText" class="section-count">0</span>
+          </div>
+          <div id="conversationList" class="conversation-list"></div>
+        </section>
+
+        <section class="session-card" aria-label="当前会话">
+          <div class="section-label">当前会话 ID</div>
           <code id="conversationIdText" class="session-id"></code>
-        </div>
+        </section>
 
-        <div class="sidebar-spacer"></div>
+        <nav class="mode-menu" aria-label="功能菜单">
+          <div class="section-label">能力模式</div>
+          <button class="mode-item active" type="button" data-mode="智能问答">
+            <span class="mode-icon" aria-hidden="true">?</span>
+            智能问答
+          </button>
+          <button class="mode-item" type="button" data-mode="代码助手">
+            <span class="mode-icon" aria-hidden="true">{ }</span>
+            代码助手
+          </button>
+          <button class="mode-item" type="button" data-mode="学习助手">
+            <span class="mode-icon" aria-hidden="true">A</span>
+            学习助手
+          </button>
+          <button class="mode-item" type="button" data-mode="项目分析">
+            <span class="mode-icon" aria-hidden="true">#</span>
+            项目分析
+          </button>
+        </nav>
 
-        <div class="sidebar-footer">
-          <span class="status-dot"></span>
-          <span>DashScope API</span>
-        </div>
+        <section class="side-note">
+          <span class="online-dot" aria-hidden="true"></span>
+          <div>
+            <strong>本地开发模式</strong>
+            <span>POST http://127.0.0.1:8000/chat</span>
+          </div>
+        </section>
       </aside>
 
-      <!-- 右侧聊天区域，后续可以在这里扩展工具调用和 RAG 结果展示。 -->
       <main class="chat-panel">
-        <header class="chat-topbar">
-          <div>
-            <h1>Agent 智能体对话助手</h1>
-            <p>面向本地开发的轻量 AI Agent 工作台</p>
+        <header class="agent-topbar">
+          <div class="agent-title">
+            <span class="eyebrow">Agent Console</span>
+            <h1 id="activeConversationTitle">智能体助手</h1>
           </div>
-          <span id="statusText" class="status-pill">准备就绪</span>
+
+          <div class="agent-status" aria-label="Agent 状态">
+            <div class="status-item">
+              <span class="online-dot" aria-hidden="true"></span>
+              <span>在线</span>
+            </div>
+            <div class="status-item">
+              <span>模型</span>
+              <strong id="currentModelText">等待后端返回</strong>
+            </div>
+            <div class="status-item">
+              <span>模式</span>
+              <strong id="currentModeText">智能问答</strong>
+            </div>
+            <button id="clearConversationButton" class="ghost-button" type="button">清空</button>
+          </div>
         </header>
 
-        <!-- 消息流区域，JS 会动态渲染用户消息、Agent 消息、错误和加载状态。 -->
         <section id="messageList" class="message-list" aria-live="polite"></section>
 
-        <!-- 底部输入区，textarea 支持多行输入。 -->
-        <footer class="composer-shell">
+        <footer class="composer-wrap">
           <form id="chatForm" class="composer">
             <textarea
               id="messageInput"
               class="message-input"
               rows="1"
+              maxlength="4000"
               autocomplete="off"
-              placeholder="向 Agent 提问..."
+              placeholder="输入问题，Enter 发送，Shift + Enter 换行"
             ></textarea>
-            <button id="sendButton" class="send-button" type="submit">
-              <span>发送</span>
-            </button>
+
+            <div class="composer-actions">
+              <span id="charCounter" class="char-counter">0 / 4000</span>
+              <button id="sendButton" class="send-button" type="submit" disabled>发送</button>
+            </div>
           </form>
         </footer>
       </main>
     </div>
 
-    <!-- 引入交互脚本，defer 确保页面结构加载完成后再运行。 -->
-    <script src="/frontend/main.js" defer></script>
+    <script src="main.js" defer onerror="this.onerror=null;this.src='/frontend/main.js';"></script>
   </body>
 </html>
