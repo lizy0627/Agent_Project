@@ -1,3 +1,4 @@
+from time import perf_counter
 from typing import Any
 
 from app.core.logger import get_logger
@@ -21,6 +22,7 @@ class ToolManager:
         return self._tools.get(name)
 
     def call(self, name: str, **kwargs: Any) -> ToolResult:
+        started_at = perf_counter()
         tool = self.get(name)
         if tool is None:
             logger.warning("Tool call skipped because tool is not registered: name=%s", name)
@@ -28,16 +30,27 @@ class ToolManager:
                 name=name,
                 success=False,
                 error=f"Tool is not registered: {name}",
+                duration_ms=self._elapsed_ms(started_at),
             )
 
         try:
             logger.info("Tool call started: name=%s args=%s", name, self._safe_log_args(kwargs))
             result = tool.run(**kwargs)
             logger.info("Tool call succeeded: name=%s", name)
-            return ToolResult(name=name, success=True, result=result)
+            return ToolResult(
+                name=name,
+                success=True,
+                result=result,
+                duration_ms=self._elapsed_ms(started_at),
+            )
         except Exception as exc:
             logger.exception("Tool call failed: name=%s", name)
-            return ToolResult(name=name, success=False, error=str(exc))
+            return ToolResult(
+                name=name,
+                success=False,
+                error=str(exc),
+                duration_ms=self._elapsed_ms(started_at),
+            )
 
     def list_tools(self) -> list[str]:
         return sorted(self._tools)
@@ -50,3 +63,6 @@ class ToolManager:
             else:
                 safe_args[key] = value
         return safe_args
+
+    def _elapsed_ms(self, started_at: float) -> float:
+        return round((perf_counter() - started_at) * 1000, 2)

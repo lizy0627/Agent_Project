@@ -11,9 +11,19 @@ class ChatRequest(BaseModel):
         default=None,
         description="Optional system prompt for the agent",
     )
+    model: str | None = Field(
+        default=None,
+        description="Optional DashScope model name. Falls back to server default when omitted.",
+    )
     conversation_id: str | None = Field(
         default=None,
         description="Optional conversation id for multi-turn chat",
+    )
+    max_context_rounds: int | None = Field(
+        default=None,
+        ge=0,
+        le=30,
+        description="Optional number of previous user/assistant rounds to include.",
     )
 
 
@@ -26,7 +36,10 @@ class ChatResponse(BaseModel):
     conversation_id: str
     used_tool: bool = False
     tool_name: str | None = None
+    tool_status: str | None = None
     tool_result: Any | None = None
+    tool_error: str | None = None
+    tool_duration_ms: float | None = None
 
 
 class ErrorResponse(BaseModel):

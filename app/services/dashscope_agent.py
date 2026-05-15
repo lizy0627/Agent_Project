@@ -65,20 +65,21 @@ class DashScopeAgent:
         self.model = settings.dashscope_model
         self.tool_manager = tool_manager or create_default_tool_manager()
 
-    def chat(self, messages: list[ChatMessage]) -> AgentReply:
+    def chat(self, messages: list[ChatMessage], model: str | None = None) -> AgentReply:
         """Send a chat request with complete context and return model text."""
 
-        tool_result = self._maybe_call_tool(messages)
-        model_messages = self._messages_with_tool_result(messages, tool_result)
-        reply = self._complete_chat(model_messages)
+        model_messages, tool_result = self.prepare_chat_messages(messages)
+        reply = self._complete_chat(model_messages, model=model)
         return AgentReply(content=reply, tool_result=tool_result)
 
-    def _complete_chat(self, messages: list[ChatMessage]) -> str:
+    def _complete_chat(self, messages: list[ChatMessage], model: str | None = None) -> str:
         """Call the chat completion API and return model text."""
+
+        target_model = model or self.model
 
         try:
             completion = self.client.chat.completions.create(
-                model=self.model,
+                model=target_model,
                 messages=messages,
             )
         except AuthenticationError as exc:
@@ -111,19 +112,43 @@ class DashScopeAgent:
         reply = completion.choices[0].message.content
         return reply or ""
 
-    def stream_chat(self, messages: list[ChatMessage]) -> Iterator[str]:
+    def stream_chat(self, messages: list[ChatMessage], model: str | None = None) -> Iterator[str]:
         """Stream a chat request with complete context."""
 
-        tool_result = self._maybe_call_tool(messages)
-        model_messages = self._messages_with_tool_result(messages, tool_result)
-        yield from self._stream_complete_chat(model_messages)
+        model_messages, _tool_result = self.prepare_chat_messages(messages)
+        yield from self._stream_complete_chat(model_messages, model=model)
 
-    def _stream_complete_chat(self, messages: list[ChatMessage]) -> Iterator[str]:
+    def stream_chat_with_tool_result(
+        self,
+        messages: list[ChatMessage],
+        model: str | None = None,
+    ) -> tuple[Iterator[str], ToolResult | None]:
+        """Return a streaming iterator and the tool metadata used to build it."""
+
+        model_messages, tool_result = self.prepare_chat_messages(messages)
+        return self._stream_complete_chat(model_messages, model=model), tool_result
+
+    def prepare_chat_messages(
+        self,
+        messages: list[ChatMessage],
+    ) -> tuple[list[ChatMessage], ToolResult | None]:
+        """Apply optional local tool context before calling the model."""
+
+        tool_result = self._maybe_call_tool(messages)
+        return self._messages_with_tool_result(messages, tool_result), tool_result
+
+    def _stream_complete_chat(
+        self,
+        messages: list[ChatMessage],
+        model: str | None = None,
+    ) -> Iterator[str]:
         """Call the streaming chat completion API and yield model text chunks."""
+
+        target_model = model or self.model
 
         try:
             stream = self.client.chat.completions.create(
-                model=self.model,
+                model=target_model,
                 messages=messages,
                 stream=True,
             )

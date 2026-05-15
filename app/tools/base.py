@@ -10,6 +10,7 @@ class ToolResult:
     success: bool
     result: Any = None
     error: str | None = None
+    duration_ms: float | None = None
 
 
 class Tool(Protocol):

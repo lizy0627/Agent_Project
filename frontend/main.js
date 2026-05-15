@@ -1,17 +1,34 @@
+// Configuration
+
 const CHAT_API_URL = "http://127.0.0.1:8000/chat";
+const CHAT_STREAM_API_URL = "http://127.0.0.1:8000/chat/stream";
 
 const ACTIVE_CONVERSATION_KEY = "agent_project_conversation_id";
 const CONVERSATIONS_KEY = "agent_project_conversations";
 const MESSAGES_KEY_PREFIX = "agent_project_messages_";
 const SCROLL_POSITIONS_KEY = "agent_project_scroll_positions";
 const MODE_KEY = "agent_project_mode";
-const LATEST_MODEL_KEY = "agent_project_latest_model";
+const SELECTED_MODEL_KEY = "agent_project_selected_model";
+const THEME_KEY = "agent_project_theme";
+const MAX_CONTEXT_ROUNDS_KEY = "agent_project_max_context_rounds";
+const STREAMING_ENABLED_KEY = "agent_project_streaming_enabled";
 const MAX_MESSAGE_LENGTH = 4000;
+const DEFAULT_MAX_CONTEXT_ROUNDS = 10;
+const MIN_CONTEXT_ROUNDS = 0;
+const MAX_CONTEXT_ROUNDS = 30;
 const THINKING_NOTICE_DELAY_MS = 8000;
 const REQUEST_TIMEOUT_MS = 45000;
 const AUTO_SCROLL_THRESHOLD_PX = 200;
 const CHAT_FAILURE_MESSAGE = "请求失败，请检查后端服务或 API Key";
 const DEFAULT_MODE = "通用助手";
+const DEFAULT_THEME = "light";
+
+const AVAILABLE_MODELS = [
+  { value: "qwen-plus", label: "qwen-plus" },
+  { value: "qwen-turbo", label: "qwen-turbo" },
+  { value: "qwen-max", label: "qwen-max" },
+];
+const DEFAULT_MODEL = AVAILABLE_MODELS[0].value;
 
 const MODE_PROMPTS = {
   通用助手: "你是一个简洁、可靠的中文 AI 助手。回答要清晰、可执行，适合初学者理解。",
@@ -66,6 +83,8 @@ const EXAMPLE_PROMPTS = [
   "给我一个适合初学者的 Agent 学习路线",
 ];
 
+// DOM references
+
 const chatForm = getRequiredElement("#chatForm");
 const messageInput = getRequiredElement("#messageInput");
 const messageList = getRequiredElement("#messageList");
@@ -73,6 +92,7 @@ const sendButton = getRequiredElement("#sendButton");
 const charCounter = getRequiredElement("#charCounter");
 const conversationIdText = getRequiredElement("#conversationIdText");
 const conversationList = getRequiredElement("#conversationList");
+const conversationSearchInput = getRequiredElement("#conversationSearchInput");
 const conversationCountText = getRequiredElement("#conversationCountText");
 const activeConversationTitle = getRequiredElement("#activeConversationTitle");
 const newConversationButton = getRequiredElement("#newConversationButton");
@@ -80,30 +100,50 @@ const clearConversationButton = getRequiredElement("#clearConversationButton");
 const scrollToBottomButton = getRequiredElement("#scrollToBottomButton");
 const newMessageNotice = getRequiredElement("#newMessageNotice");
 const currentModelText = getRequiredElement("#currentModelText");
+const modelSelect = getRequiredElement("#modelSelect");
 const currentModeText = getRequiredElement("#currentModeText");
+const themeToggleButton = getRequiredElement("#themeToggleButton");
+const settingsButton = getRequiredElement("#settingsButton");
+const settingsOverlay = getRequiredElement("#settingsOverlay");
+const settingsCloseButton = getRequiredElement("#settingsCloseButton");
+const settingsModelSelect = getRequiredElement("#settingsModelSelect");
+const settingsMaxContextInput = getRequiredElement("#settingsMaxContextInput");
+const settingsStreamingToggle = getRequiredElement("#settingsStreamingToggle");
+const settingsModeSelect = getRequiredElement("#settingsModeSelect");
+const clearAllConversationsButton = getRequiredElement("#clearAllConversationsButton");
 ensureModeItems();
+ensureModelOptions();
+ensureSettingsModeOptions();
 const modeButtons = getRequiredElements(".mode-item");
 console.log("modeButtons found", modeButtons.length);
+
+// State
 
 let conversations = loadConversations();
 let conversationId = getInitialConversationId();
 let messages = loadMessages(conversationId);
 let conversationScrollPositions = loadConversationScrollPositions();
 let currentMode = normalizeMode(localStorage.getItem(MODE_KEY));
-let latestModel = localStorage.getItem(LATEST_MODEL_KEY) || "等待后端返回";
+let selectedModel = normalizeModel(localStorage.getItem(SELECTED_MODEL_KEY));
+let currentTheme = normalizeTheme(localStorage.getItem(THEME_KEY));
+let maxContextRounds = normalizeMaxContextRounds(localStorage.getItem(MAX_CONTEXT_ROUNDS_KEY));
+let streamingEnabled = normalizeBooleanSetting(localStorage.getItem(STREAMING_ENABLED_KEY), false);
 let isLoading = false;
 let activeAbortController = null;
 let shouldStickToBottom = true;
+let conversationSearchQuery = "";
 
 initPage();
+
+// DOM helpers
 
 function getRequiredElement(selector) {
   const element = document.querySelector(selector);
   if (!element) {
     if (selector === "#messageInput") {
-      console.error("messageInput missing");
+      console.warn("messageInput missing");
     }
-    console.error("element missing", selector);
+    console.warn("element missing", selector);
     throw new Error(`页面缺少必要元素：${selector}`);
   }
   console.log("element found", selector, element);
@@ -113,7 +153,7 @@ function getRequiredElement(selector) {
 function getRequiredElements(selector) {
   const elements = document.querySelectorAll(selector);
   if (elements.length === 0) {
-    console.error("elements missing", selector);
+    console.warn("elements missing", selector);
     throw new Error(`页面缺少必要元素：${selector}`);
   }
   console.log("elements found", selector, elements.length);
@@ -123,6 +163,36 @@ function getRequiredElements(selector) {
 function normalizeMode(mode) {
   const normalizedMode = MODE_ALIASES[mode] || mode;
   return MODE_PROMPTS[normalizedMode] ? normalizedMode : DEFAULT_MODE;
+}
+
+function normalizeModel(model) {
+  const value = String(model || "").trim();
+  return AVAILABLE_MODELS.some((item) => item.value === value) ? value : DEFAULT_MODEL;
+}
+
+function normalizeTheme(theme) {
+  return theme === "dark" || theme === "light" ? theme : DEFAULT_THEME;
+}
+
+function normalizeMaxContextRounds(value) {
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed)) {
+    return DEFAULT_MAX_CONTEXT_ROUNDS;
+  }
+
+  return Math.min(MAX_CONTEXT_ROUNDS, Math.max(MIN_CONTEXT_ROUNDS, parsed));
+}
+
+function normalizeBooleanSetting(value, fallback = false) {
+  if (value === "true" || value === true) {
+    return true;
+  }
+
+  if (value === "false" || value === false) {
+    return false;
+  }
+
+  return fallback;
 }
 
 function createModeButton(modeName) {
@@ -140,10 +210,34 @@ function createModeButton(modeName) {
   return button;
 }
 
+function ensureModelOptions() {
+  fillModelSelect(modelSelect);
+  fillModelSelect(settingsModelSelect);
+}
+
+function fillModelSelect(select) {
+  select.replaceChildren(
+    ...AVAILABLE_MODELS.map((model) => createOption(model.value, model.label)),
+  );
+}
+
+function createOption(value, label = value) {
+  const option = document.createElement("option");
+  option.value = value;
+  option.textContent = label;
+  return option;
+}
+
+function ensureSettingsModeOptions() {
+  settingsModeSelect.replaceChildren(
+    ...Object.keys(MODE_PROMPTS).map((modeName) => createOption(modeName)),
+  );
+}
+
 function ensureModeItems() {
   const modeMenu = document.querySelector(".mode-menu");
   if (!modeMenu) {
-    console.error("elements missing", ".mode-menu");
+    console.warn("elements missing", ".mode-menu");
     return;
   }
 
@@ -159,10 +253,13 @@ function ensureModeItems() {
 }
 
 function initPage() {
+  applyTheme(currentTheme);
   ensureConversation(conversationId);
   conversationIdText.textContent = conversationId;
-  currentModelText.textContent = latestModel;
+  setSelectedModel(selectedModel);
   setMode(currentMode);
+  setMaxContextRounds(maxContextRounds);
+  setStreamingEnabled(streamingEnabled);
   renderConversationList();
   renderMessages({ scrollToEnd: false });
   restoreConversationScrollPosition(conversationId);
@@ -172,6 +269,8 @@ function initPage() {
   updateScrollToBottomButton();
   messageInput.focus();
 }
+
+// Conversation storage
 
 function loadConversations() {
   const parsed = readJson(CONVERSATIONS_KEY, []);
@@ -184,6 +283,7 @@ function loadConversations() {
           createdAt: item.createdAt || Date.now(),
           updatedAt: item.updatedAt || item.createdAt || Date.now(),
           messageCount: Number(item.messageCount || 0),
+          lastMessageSummary: item.lastMessageSummary || getConversationLastMessageSummary(item.id),
         }))
     : [];
 
@@ -200,6 +300,7 @@ function loadConversations() {
       createdAt: Date.now(),
       updatedAt: Date.now(),
       messageCount: loadMessages(initialId).length,
+      lastMessageSummary: getConversationLastMessageSummary(initialId),
     },
   ];
 }
@@ -227,6 +328,7 @@ function ensureConversation(id) {
     createdAt: Date.now(),
     updatedAt: Date.now(),
     messageCount: loadMessages(id).length,
+    lastMessageSummary: getConversationLastMessageSummary(id),
   });
   saveConversations();
 }
@@ -259,6 +361,31 @@ function readJson(key, fallback) {
 function loadMessages(id) {
   const loaded = readJson(getMessagesKey(id), []);
   return Array.isArray(loaded) ? loaded : [];
+}
+
+function getConversationLastMessageSummary(id) {
+  return getLastMessageSummary(loadMessages(id));
+}
+
+function getLastMessageSummary(messageItems) {
+  const latestTextMessage = [...messageItems]
+    .reverse()
+    .find((message) => message && message.type !== "loading" && message.content);
+
+  if (!latestTextMessage) {
+    return "";
+  }
+
+  return summarizeMessageContent(latestTextMessage.content);
+}
+
+function summarizeMessageContent(content) {
+  const text = String(content || "").replace(/\s+/g, " ").trim();
+  if (text.length <= 72) {
+    return text;
+  }
+
+  return `${text.slice(0, 72)}...`;
 }
 
 function loadConversationScrollPositions() {
@@ -306,6 +433,7 @@ function updateConversationMeta(updates = {}) {
       ...item,
       updatedAt: updates.updatedAt || now,
       messageCount: messages.length,
+      lastMessageSummary: getLastMessageSummary(messages),
       ...updates,
     };
   });
@@ -330,6 +458,7 @@ function replaceActiveConversationId(nextId) {
     createdAt: current?.createdAt || Date.now(),
     updatedAt: Date.now(),
     messageCount: messages.length,
+    lastMessageSummary: getLastMessageSummary(messages),
   };
 
   conversationId = nextId;
@@ -347,19 +476,27 @@ function replaceActiveConversationId(nextId) {
   updateHeaderTitle();
 }
 
+// Conversation list
+
 function renderConversationList() {
   conversationList.innerHTML = "";
-  conversationCountText.textContent = String(conversations.length);
+  const visibleConversations = getVisibleConversations();
+  const hasSearchQuery = Boolean(normalizeSearchQuery(conversationSearchQuery));
+  conversationCountText.textContent = hasSearchQuery
+    ? `${visibleConversations.length}/${conversations.length}`
+    : String(conversations.length);
 
-  if (conversations.length === 0) {
+  if (visibleConversations.length === 0) {
     const empty = document.createElement("div");
     empty.className = "conversation-empty";
-    empty.textContent = "还没有会话。点击上方按钮开始一个新的 Agent 任务。";
+    empty.textContent = conversations.length === 0
+      ? "还没有会话。点击上方按钮开始一个新的 Agent 任务。"
+      : "没有匹配的会话。";
     conversationList.appendChild(empty);
     return;
   }
 
-  conversations.forEach((conversation) => {
+  visibleConversations.forEach((conversation) => {
     const item = document.createElement("div");
     item.className = "conversation-item";
     item.tabIndex = 0;
@@ -389,14 +526,33 @@ function renderConversationList() {
     title.className = "conversation-title";
     title.textContent = conversation.title || "新会话";
 
+    const summary = document.createElement("span");
+    summary.className = "conversation-summary";
+    summary.textContent = conversation.lastMessageSummary || "暂无消息";
+
     const meta = document.createElement("span");
     meta.className = "conversation-meta";
-    meta.textContent = `${conversation.messageCount || 0} 条 · ${formatRelativeTime(conversation.updatedAt)}`;
+    meta.textContent = formatRelativeTime(conversation.updatedAt);
 
-    main.append(title, meta);
+    main.append(title, summary, meta);
+
+    const actions = document.createElement("span");
+    actions.className = "conversation-actions";
+
+    const renameButton = document.createElement("button");
+    renameButton.className = "conversation-action conversation-rename";
+    renameButton.type = "button";
+    renameButton.textContent = "✎";
+    renameButton.title = "重命名会话";
+    renameButton.setAttribute("aria-label", `重命名 ${conversation.title}`);
+    renameButton.addEventListener("click", (event) => {
+      console.log("renameConversationButton clicked", conversation.id);
+      event.stopPropagation();
+      renameConversation(conversation.id);
+    });
 
     const deleteButton = document.createElement("button");
-    deleteButton.className = "conversation-delete";
+    deleteButton.className = "conversation-action conversation-delete";
     deleteButton.type = "button";
     deleteButton.textContent = "×";
     deleteButton.title = "删除会话";
@@ -407,9 +563,25 @@ function renderConversationList() {
       deleteConversation(conversation.id);
     });
 
-    item.append(main, deleteButton);
+    actions.append(renameButton, deleteButton);
+    item.append(main, actions);
     conversationList.appendChild(item);
   });
+}
+
+function getVisibleConversations() {
+  const query = normalizeSearchQuery(conversationSearchQuery);
+  if (!query) {
+    return conversations;
+  }
+
+  return conversations.filter((conversation) =>
+    normalizeSearchQuery(conversation.title || "新会话").includes(query),
+  );
+}
+
+function normalizeSearchQuery(value) {
+  return String(value || "").trim().toLocaleLowerCase("zh-CN");
 }
 
 function formatRelativeTime(timestamp) {
@@ -443,6 +615,8 @@ function updateHeaderTitle() {
   const conversation = getCurrentConversation();
   activeConversationTitle.textContent = conversation?.title || "智能体助手";
 }
+
+// Message rendering
 
 function renderMessages({ scrollToEnd = true } = {}) {
   messageList.innerHTML = "";
@@ -502,7 +676,7 @@ function handlePromptCardClick(promptCard) {
 
   const input = document.querySelector("#messageInput");
   if (!input) {
-    console.error("messageInput missing");
+    console.warn("messageInput missing");
     return;
   }
 
@@ -556,7 +730,7 @@ function appendMessageElement(message) {
   content.className = "message-content message-body";
 
   if (message.role === "agent" && message.type !== "loading") {
-    content.appendChild(createCopyToolbar(message.content || ""));
+    content.appendChild(createMessageToolbar(message));
   }
 
   const bubble = document.createElement("div");
@@ -570,6 +744,11 @@ function appendMessageElement(message) {
     bubble.textContent = message.content || "";
   }
 
+  const toolPanel = createToolPanel(message);
+  if (toolPanel) {
+    content.appendChild(toolPanel);
+  }
+
   content.appendChild(bubble);
 
   const meta = createMessageMeta(message);
@@ -577,20 +756,34 @@ function appendMessageElement(message) {
     content.appendChild(meta);
   }
 
-  const toolPanel = createToolPanel(message);
-  if (toolPanel) {
-    content.appendChild(toolPanel);
-  }
-
   shell.appendChild(content);
   messageItem.appendChild(shell);
   messageList.appendChild(messageItem);
 }
 
-function createCopyToolbar(text) {
+function createMessageToolbar(message) {
   const toolbar = document.createElement("div");
   toolbar.className = "message-toolbar";
 
+  toolbar.appendChild(createRegenerateButton(message));
+  toolbar.appendChild(createCopyButton(message.content || ""));
+  return toolbar;
+}
+
+function createRegenerateButton(message) {
+  const button = document.createElement("button");
+  button.className = "regenerate-message-button";
+  button.type = "button";
+  button.textContent = "重新生成";
+  button.addEventListener("click", () => {
+    console.log("regenerate-message-button clicked", message.id);
+    regenerateAgentReply(message.id);
+  });
+
+  return button;
+}
+
+function createCopyButton(text) {
   const button = document.createElement("button");
   button.className = "copy-message-button";
   button.type = "button";
@@ -600,8 +793,7 @@ function createCopyToolbar(text) {
     copyText(text, button, "已复制");
   });
 
-  toolbar.appendChild(button);
-  return toolbar;
+  return button;
 }
 
 function createMessageMeta(message) {
@@ -633,26 +825,104 @@ function createMessageMeta(message) {
 }
 
 function createToolPanel(message) {
-  if (!message.usedTool && !message.toolName && !message.toolResult) {
+  if (message.usedTool !== true) {
     return null;
   }
 
   const panel = document.createElement("div");
   panel.className = "tool-panel";
 
-  const rows = [];
-  if (message.usedTool !== undefined) {
-    rows.push(`<div><strong>used_tool: </strong>${escapeHtml(String(message.usedTool))}</div>`);
-  }
-  if (message.toolName) {
-    rows.push(`<div><strong>tool_name: </strong>${escapeHtml(message.toolName)}</div>`);
-  }
-  if (message.toolResult) {
-    rows.push(`<div><strong>tool_result: </strong>${escapeHtml(formatToolResult(message.toolResult))}</div>`);
+  const header = document.createElement("div");
+  header.className = "tool-panel-header";
+
+  const title = document.createElement("div");
+  title.className = "tool-panel-title";
+
+  const marker = document.createElement("span");
+  marker.className = "tool-panel-marker";
+  marker.setAttribute("aria-hidden", "true");
+
+  const name = document.createElement("span");
+  name.textContent = message.toolName || "工具调用";
+
+  title.append(marker, name);
+
+  const status = document.createElement("span");
+  const statusText = formatToolStatus(message.toolStatus, message.toolError);
+  status.className = `tool-status ${statusText === "失败" ? "failed" : "success"}`;
+  status.textContent = statusText;
+
+  header.append(title, status);
+  panel.appendChild(header);
+
+  const details = document.createElement("div");
+  details.className = "tool-panel-details";
+  details.appendChild(createToolDetail("工具名称", message.toolName || "未命名工具"));
+  details.appendChild(createToolDetail("工具状态", statusText));
+
+  if (message.toolDurationMs !== undefined && message.toolDurationMs !== null) {
+    details.appendChild(createToolDetail("耗时", formatToolDuration(message.toolDurationMs)));
   }
 
-  panel.innerHTML = rows.join("");
+  panel.appendChild(details);
+
+  const result = document.createElement("pre");
+  result.className = "tool-panel-result";
+  result.textContent = formatToolResult(getToolDisplayResult(message));
+  panel.appendChild(result);
+
   return panel;
+}
+
+function getToolDisplayResult(message) {
+  if (message.toolError) {
+    return message.toolError;
+  }
+
+  if (message.toolResult !== undefined && message.toolResult !== null && message.toolResult !== "") {
+    return message.toolResult;
+  }
+
+  return "无返回结果";
+}
+
+function createToolDetail(label, value) {
+  const item = document.createElement("div");
+  item.className = "tool-panel-detail";
+
+  const labelElement = document.createElement("span");
+  labelElement.textContent = label;
+
+  const valueElement = document.createElement("strong");
+  valueElement.textContent = value;
+
+  item.append(labelElement, valueElement);
+  return item;
+}
+
+function formatToolStatus(status, error) {
+  if (error || status === "failed" || status === false) {
+    return "失败";
+  }
+
+  if (status === "running") {
+    return "执行中";
+  }
+
+  return "已完成";
+}
+
+function formatToolDuration(durationMs) {
+  const value = Number(durationMs);
+  if (!Number.isFinite(value)) {
+    return String(durationMs);
+  }
+
+  if (value < 1000) {
+    return `${Math.max(0, Math.round(value))} ms`;
+  }
+
+  return `${(value / 1000).toFixed(2)} s`;
 }
 
 function formatToolResult(result) {
@@ -666,6 +936,8 @@ function formatToolResult(result) {
     return String(result);
   }
 }
+
+// Markdown rendering
 
 function renderMarkdown(markdown) {
   const root = document.createElement("div");
@@ -901,6 +1173,8 @@ function escapeHtml(value) {
     .replaceAll("'", "&#039;");
 }
 
+// Clipboard and indicators
+
 async function copyText(text, button, successText) {
   console.log("copyText start", {
     textLength: text.length,
@@ -993,6 +1267,8 @@ function updateMessage(messageId, updates) {
     updateScrollToBottomButton();
   }
 }
+
+// Scrolling
 
 function scrollToBottom({ behavior = "smooth" } = {}) {
   const messageList = document.querySelector("#messageList");
@@ -1109,6 +1385,8 @@ function createMessage(role, content, type = "text", extra = {}) {
   };
 }
 
+// Input state
+
 function maybeRenameConversation(text) {
   const conversation = getCurrentConversation();
   if (!conversation || conversation.title !== "新会话") {
@@ -1126,6 +1404,8 @@ function setLoading(nextLoading) {
   console.log("setLoading", nextLoading);
   isLoading = nextLoading;
   messageInput.disabled = nextLoading;
+  modelSelect.disabled = nextLoading;
+  settingsButton.disabled = nextLoading;
   sendButton.textContent = nextLoading ? "停止生成" : "发送";
   newConversationButton.disabled = nextLoading;
   clearConversationButton.disabled = nextLoading;
@@ -1150,6 +1430,7 @@ function setMode(mode) {
   currentMode = normalizeMode(mode);
   localStorage.setItem(MODE_KEY, currentMode);
   currentModeText.textContent = currentMode;
+  settingsModeSelect.value = currentMode;
 
   modeButtons.forEach((button) => {
     button.classList.toggle("active", button.dataset.mode === currentMode);
@@ -1157,16 +1438,75 @@ function setMode(mode) {
   console.log("mode changed", currentMode);
 }
 
-async function requestAgentReply(message) {
+function setSelectedModel(model) {
+  selectedModel = normalizeModel(model);
+  localStorage.setItem(SELECTED_MODEL_KEY, selectedModel);
+  modelSelect.value = selectedModel;
+  settingsModelSelect.value = selectedModel;
+  currentModelText.textContent = selectedModel;
+  console.log("model changed", selectedModel);
+}
+
+function setMaxContextRounds(value) {
+  maxContextRounds = normalizeMaxContextRounds(value);
+  localStorage.setItem(MAX_CONTEXT_ROUNDS_KEY, String(maxContextRounds));
+  settingsMaxContextInput.value = String(maxContextRounds);
+  console.log("max context rounds changed", maxContextRounds);
+}
+
+function setStreamingEnabled(value) {
+  streamingEnabled = Boolean(value);
+  localStorage.setItem(STREAMING_ENABLED_KEY, String(streamingEnabled));
+  settingsStreamingToggle.checked = streamingEnabled;
+  console.log("streaming changed", streamingEnabled);
+}
+
+function applyTheme(theme) {
+  currentTheme = normalizeTheme(theme);
+  document.documentElement.dataset.theme = currentTheme;
+  localStorage.setItem(THEME_KEY, currentTheme);
+
+  const isDark = currentTheme === "dark";
+  themeToggleButton.textContent = isDark ? "浅色" : "深色";
+  themeToggleButton.setAttribute(
+    "aria-label",
+    isDark ? "切换浅色主题" : "切换深色主题",
+  );
+  themeToggleButton.setAttribute("aria-pressed", String(isDark));
+  console.log("theme changed", currentTheme);
+}
+
+function toggleTheme() {
+  applyTheme(currentTheme === "dark" ? "light" : "dark");
+}
+
+// Agent request flow
+
+async function requestAgentReply(
+  message,
+  {
+    targetConversationId = conversationId,
+    targetMode = currentMode,
+    targetModel = selectedModel,
+    targetMaxContextRounds = maxContextRounds,
+    targetStreamingEnabled = streamingEnabled,
+    onChunk = null,
+  } = {},
+) {
   console.log("requestAgentReply start", {
-    conversationId,
+    conversationId: targetConversationId,
     messageLength: message.length,
-    mode: currentMode,
+    mode: targetMode,
+    model: targetModel,
+    maxContextRounds: targetMaxContextRounds,
+    streamingEnabled: targetStreamingEnabled,
   });
   const requestBody = {
     message,
-    system_prompt: MODE_PROMPTS[currentMode],
-    conversation_id: conversationId,
+    system_prompt: MODE_PROMPTS[targetMode],
+    model: targetModel,
+    conversation_id: targetConversationId,
+    max_context_rounds: targetMaxContextRounds,
   };
 
   activeAbortController = new AbortController();
@@ -1176,25 +1516,24 @@ async function requestAgentReply(message) {
     activeAbortController.abort();
   }, REQUEST_TIMEOUT_MS);
 
-  let response;
   try {
-    console.log("POST /chat request start", requestBody);
-    response = await fetch(CHAT_API_URL, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Accept: "application/json",
-      },
-      body: JSON.stringify(requestBody),
-      signal: activeAbortController.signal,
-    });
-    console.log("POST /chat response received", {
-      ok: response.ok,
-      status: response.status,
-      statusText: response.statusText,
-    });
+    const result = targetStreamingEnabled
+      ? await requestStreamingAgentReply(
+          requestBody,
+          activeAbortController.signal,
+          targetConversationId,
+          onChunk,
+        )
+      : await requestJsonAgentReply(
+          requestBody,
+          activeAbortController.signal,
+          targetConversationId,
+        );
+    window.clearTimeout(timeoutTimer);
+    activeAbortController = null;
+    return result;
   } catch (error) {
-    console.error("POST /chat request error", error);
+    console.warn("POST /chat request error", error);
     window.clearTimeout(timeoutTimer);
     activeAbortController = null;
     if (error.name === "AbortError") {
@@ -1203,39 +1542,290 @@ async function requestAgentReply(message) {
       }
       return { aborted: true };
     }
+    if (error instanceof Error && error.message && error.name !== "TypeError") {
+      throw error;
+    }
     throw new Error(CHAT_FAILURE_MESSAGE);
   }
+}
 
-  window.clearTimeout(timeoutTimer);
-  activeAbortController = null;
-
+async function requestJsonAgentReply(requestBody, signal, fallbackConversationId) {
+  console.log("POST /chat request start", requestBody);
+  const response = await fetch(CHAT_API_URL, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Accept: "application/json",
+    },
+    body: JSON.stringify(requestBody),
+    signal,
+  });
+  console.log("POST /chat response received", {
+    ok: response.ok,
+    status: response.status,
+    statusText: response.statusText,
+  });
   if (!response.ok) {
     const data = await parseJsonResponse(response);
-    console.error("Chat request failed:", data.error || response.status);
-    throw new Error(CHAT_FAILURE_MESSAGE);
+    const message = toFriendlyError(data.error || response.status);
+    console.warn("Chat request failed:", message);
+    throw new Error(message || CHAT_FAILURE_MESSAGE);
   }
 
   const data = await parseJsonResponse(response);
   console.log("POST /chat response body", data);
   if (!data.success) {
-    console.error("Chat API returned an error:", data.error);
-    throw new Error(CHAT_FAILURE_MESSAGE);
+    const message = toFriendlyError(data.error);
+    console.warn("Chat API returned an error:", message);
+    throw new Error(message || CHAT_FAILURE_MESSAGE);
   }
 
   return {
     aborted: false,
     reply: data.reply || "",
     model: data.model || "",
-    conversationId: data.conversation_id || conversationId,
+    conversationId: data.conversation_id || fallbackConversationId,
     usedTool: data.used_tool,
     toolName: data.tool_name,
+    toolStatus: data.tool_status,
     toolResult: data.tool_result,
+    toolError: data.tool_error,
+    toolDurationMs: data.tool_duration_ms,
   };
+}
+
+async function requestStreamingAgentReply(requestBody, signal, fallbackConversationId, onChunk) {
+  console.log("POST /chat/stream request start", requestBody);
+  const response = await fetch(CHAT_STREAM_API_URL, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Accept: "text/event-stream",
+    },
+    body: JSON.stringify(requestBody),
+    signal,
+  });
+
+  if (!response.ok) {
+    const data = await parseJsonResponse(response);
+    const message = toFriendlyError(data.error || response.status);
+    console.warn("Streaming chat request failed:", message);
+    throw new Error(message || CHAT_FAILURE_MESSAGE);
+  }
+
+  if (!response.body) {
+    throw new Error("浏览器不支持读取流式响应。");
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let reply = "";
+  let metadata = {};
+  let done = {};
+
+  while (true) {
+    const { value, done: readerDone } = await reader.read();
+    if (readerDone) {
+      break;
+    }
+
+    buffer += decoder.decode(value, { stream: true });
+    const parts = buffer.split(/\n\n/);
+    buffer = parts.pop() || "";
+
+    parts.forEach((part) => {
+      const event = parseSseEvent(part);
+      if (!event) {
+        return;
+      }
+
+      if (event.event === "metadata") {
+        metadata = event.data || {};
+        return;
+      }
+
+      if (event.event === "chunk") {
+        const content = event.data?.content || "";
+        reply += content;
+        if (typeof onChunk === "function") {
+          onChunk(content, reply);
+        }
+        return;
+      }
+
+      if (event.event === "done") {
+        done = event.data || {};
+        return;
+      }
+
+      if (event.event === "error") {
+        throw new Error(toFriendlyError(event.data?.error));
+      }
+    });
+  }
+
+  if (buffer.trim()) {
+    const event = parseSseEvent(buffer);
+    if (event?.event === "error") {
+      throw new Error(toFriendlyError(event.data?.error));
+    }
+  }
+
+  return {
+    aborted: false,
+    reply,
+    model: done.model || metadata.model || "",
+    conversationId: done.conversation_id || metadata.conversation_id || fallbackConversationId,
+    usedTool: metadata.used_tool ?? done.used_tool ?? false,
+    toolName: metadata.tool_name ?? done.tool_name,
+    toolStatus: metadata.tool_status ?? done.tool_status,
+    toolResult: metadata.tool_result ?? done.tool_result,
+    toolError: metadata.tool_error ?? done.tool_error,
+    toolDurationMs: metadata.tool_duration_ms ?? done.tool_duration_ms,
+  };
+}
+
+function parseSseEvent(rawEvent) {
+  const lines = String(rawEvent || "").split(/\r?\n/);
+  let eventName = "message";
+  const dataLines = [];
+
+  lines.forEach((line) => {
+    if (line.startsWith("event:")) {
+      eventName = line.slice(6).trim();
+    } else if (line.startsWith("data:")) {
+      dataLines.push(line.slice(5).trimStart());
+    }
+  });
+
+  if (dataLines.length === 0) {
+    return null;
+  }
+
+  try {
+    return {
+      event: eventName,
+      data: JSON.parse(dataLines.join("\n")),
+    };
+  } catch {
+    return {
+      event: eventName,
+      data: {},
+    };
+  }
 }
 
 function abortCurrentRequest() {
   if (activeAbortController) {
     activeAbortController.abort();
+  }
+}
+
+function findPreviousUserMessage(messageIndex) {
+  for (let index = messageIndex - 1; index >= 0; index -= 1) {
+    if (messages[index]?.role === "user") {
+      return messages[index];
+    }
+  }
+
+  return null;
+}
+
+async function regenerateAgentReply(messageId) {
+  console.log("regenerateAgentReply start", messageId);
+  if (guardActionDuringLoading()) {
+    console.log("regenerateAgentReply blocked by loading");
+    return;
+  }
+
+  const targetIndex = messages.findIndex((message) => message.id === messageId);
+  const targetMessage = messages[targetIndex];
+  if (targetIndex < 0 || targetMessage?.role !== "agent" || targetMessage.type === "loading") {
+    console.warn("regenerateAgentReply target missing", messageId);
+    return;
+  }
+
+  const previousUserMessage = findPreviousUserMessage(targetIndex);
+  if (!previousUserMessage) {
+    window.alert("找不到这条 AI 回复前面的用户消息，无法重新生成。");
+    return;
+  }
+
+  const originalMessage = { ...targetMessage };
+  const loadingMessage = createMessage("agent", "Agent 正在重新生成...", "loading");
+  const requestContext = {
+    targetConversationId: conversationId,
+    targetMode: currentMode,
+    targetModel: selectedModel,
+    targetMaxContextRounds: maxContextRounds,
+    targetStreamingEnabled: streamingEnabled,
+    onChunk: (chunk, partialReply) => {
+      updateMessage(loadingMessage.id, {
+        type: "text",
+        role: "agent",
+        content: partialReply || "Agent 正在重新生成...",
+        createdAt: getCurrentTime(),
+      });
+    },
+  };
+  const shouldKeepAtBottom = shouldStickToBottom || isMessageListNearBottom();
+  const previousScrollTop = messageList.scrollTop;
+
+  messages = [
+    ...messages.slice(0, targetIndex),
+    loadingMessage,
+    ...messages.slice(targetIndex + 1),
+  ];
+  saveMessages();
+  updateConversationMeta();
+  renderMessages({ scrollToEnd: false });
+
+  if (shouldKeepAtBottom) {
+    scrollToBottom();
+  } else {
+    messageList.scrollTop = previousScrollTop;
+    updateScrollToBottomButton();
+  }
+
+  setLoading(true);
+
+  try {
+    const result = await requestAgentReply(previousUserMessage.content || "", requestContext);
+    console.log("regenerateAgentReply received result", result);
+    if (result.aborted) {
+      updateMessage(loadingMessage.id, originalMessage);
+      return;
+    }
+
+    if (result.conversationId && result.conversationId !== conversationId) {
+      replaceActiveConversationId(result.conversationId);
+    }
+
+    if (result.model) {
+      currentModelText.textContent = result.model;
+    }
+
+    updateMessage(loadingMessage.id, {
+      type: "text",
+      role: "agent",
+      content: result.reply || "Agent 没有返回文本内容。",
+      model: result.model,
+      usedTool: result.usedTool,
+      toolName: result.toolName,
+      toolStatus: result.toolStatus,
+      toolResult: result.toolResult,
+      toolError: result.toolError,
+      toolDurationMs: result.toolDurationMs,
+      createdAt: getCurrentTime(),
+    });
+  } catch (error) {
+    console.warn("regenerateAgentReply error", error);
+    updateMessage(loadingMessage.id, originalMessage);
+    window.alert(error instanceof Error ? error.message : CHAT_FAILURE_MESSAGE);
+  } finally {
+    setLoading(false);
+    messageInput.focus();
   }
 }
 
@@ -1252,6 +1842,91 @@ function toFriendlyError(errorText) {
   const knownError = FRIENDLY_ERROR_MESSAGES.find((item) => text.includes(item.match));
   return knownError ? knownError.message : text || "请求失败，请稍后重试。";
 }
+
+// Settings panel
+
+function openSettingsPanel() {
+  if (guardActionDuringLoading()) {
+    return;
+  }
+
+  syncSettingsControls();
+  settingsOverlay.hidden = false;
+  document.body.classList.add("settings-open");
+  settingsPanelFocusTarget().focus();
+}
+
+function closeSettingsPanel() {
+  settingsOverlay.hidden = true;
+  document.body.classList.remove("settings-open");
+  settingsButton.focus();
+}
+
+function settingsPanelFocusTarget() {
+  return settingsModelSelect;
+}
+
+function syncSettingsControls() {
+  settingsModelSelect.value = selectedModel;
+  settingsModeSelect.value = currentMode;
+  settingsMaxContextInput.value = String(maxContextRounds);
+  settingsStreamingToggle.checked = streamingEnabled;
+}
+
+function clearAllLocalConversations() {
+  console.log("clearAllLocalConversations start");
+  if (guardActionDuringLoading()) {
+    return;
+  }
+
+  if (!window.confirm("确定清空所有本地会话吗？此操作不可恢复。")) {
+    return;
+  }
+
+  const keysToRemove = [];
+  for (let index = 0; index < localStorage.length; index += 1) {
+    const key = localStorage.key(index);
+    if (
+      key === ACTIVE_CONVERSATION_KEY ||
+      key === CONVERSATIONS_KEY ||
+      key === SCROLL_POSITIONS_KEY ||
+      key?.startsWith(MESSAGES_KEY_PREFIX)
+    ) {
+      keysToRemove.push(key);
+    }
+  }
+
+  keysToRemove.forEach((key) => localStorage.removeItem(key));
+
+  conversationId = createConversationId();
+  messages = [];
+  conversationScrollPositions = {};
+  conversations = [
+    {
+      id: conversationId,
+      title: "新会话",
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      messageCount: 0,
+      lastMessageSummary: "",
+    },
+  ];
+
+  localStorage.setItem(ACTIVE_CONVERSATION_KEY, conversationId);
+  saveConversations();
+  saveMessages();
+  saveConversationScrollPositions();
+  conversationSearchQuery = "";
+  conversationSearchInput.value = "";
+  conversationIdText.textContent = conversationId;
+  renderConversationList();
+  renderMessages();
+  updateHeaderTitle();
+  closeSettingsPanel();
+  messageInput.focus();
+}
+
+// Conversation actions
 
 async function sendCurrentMessage() {
   console.log("sendCurrentMessage start", {
@@ -1295,7 +1970,18 @@ async function sendCurrentMessage() {
   }, THINKING_NOTICE_DELAY_MS);
 
   try {
-    const result = await requestAgentReply(userText);
+    const result = await requestAgentReply(userText, {
+      onChunk: (chunk, partialReply) => {
+        hasReceivedFirstChunk = true;
+        window.clearTimeout(thinkingTimer);
+        updateMessage(loadingMessage.id, {
+          type: "text",
+          role: "agent",
+          content: partialReply || "Agent 正在生成...",
+          createdAt: getCurrentTime(),
+        });
+      },
+    });
     console.log("sendCurrentMessage received result", result);
     if (result.aborted) {
       updateMessage(loadingMessage.id, {
@@ -1315,9 +2001,7 @@ async function sendCurrentMessage() {
     }
 
     if (result.model) {
-      latestModel = result.model;
-      localStorage.setItem(LATEST_MODEL_KEY, latestModel);
-      currentModelText.textContent = latestModel;
+      currentModelText.textContent = result.model;
     }
 
     updateMessage(loadingMessage.id, {
@@ -1327,16 +2011,19 @@ async function sendCurrentMessage() {
       model: result.model,
       usedTool: result.usedTool,
       toolName: result.toolName,
+      toolStatus: result.toolStatus,
       toolResult: result.toolResult,
+      toolError: result.toolError,
+      toolDurationMs: result.toolDurationMs,
       createdAt: getCurrentTime(),
     });
     console.log("sendCurrentMessage agent reply rendered", loadingMessage.id);
   } catch (error) {
-    console.error("sendCurrentMessage error", error);
+    console.warn("sendCurrentMessage error", error);
     updateMessage(loadingMessage.id, {
       type: "text",
       role: "error",
-      content: CHAT_FAILURE_MESSAGE,
+      content: error instanceof Error ? error.message : CHAT_FAILURE_MESSAGE,
       createdAt: getCurrentTime(),
     });
   } finally {
@@ -1366,6 +2053,8 @@ function startNewConversation() {
   saveCurrentScrollPosition();
   conversationId = createConversationId();
   removeConversationScrollPosition(conversationId);
+  conversationSearchQuery = "";
+  conversationSearchInput.value = "";
   console.log("newConversation created", conversationId);
   localStorage.setItem(ACTIVE_CONVERSATION_KEY, conversationId);
   conversations.unshift({
@@ -1374,6 +2063,7 @@ function startNewConversation() {
     createdAt: Date.now(),
     updatedAt: Date.now(),
     messageCount: 0,
+    lastMessageSummary: "",
   });
   saveConversations();
   messages = [];
@@ -1385,6 +2075,42 @@ function startNewConversation() {
   messageInput.value = "";
   autoResizeInput();
   updateInputState();
+  messageInput.focus();
+}
+
+function renameConversation(targetId) {
+  console.log("renameConversation start", targetId);
+  if (guardActionDuringLoading()) {
+    console.log("renameConversation blocked by loading", targetId);
+    return;
+  }
+
+  const target = conversations.find((item) => item.id === targetId);
+  if (!target) {
+    return;
+  }
+
+  const currentTitle = target.title || "新会话";
+  const nextTitle = window.prompt("请输入新的会话标题", currentTitle);
+  if (nextTitle === null) {
+    return;
+  }
+
+  const cleanTitle = nextTitle.replace(/\s+/g, " ").trim().slice(0, 60);
+  if (!cleanTitle || cleanTitle === currentTitle) {
+    return;
+  }
+
+  conversations = conversations.map((item) =>
+    item.id === targetId ? { ...item, title: cleanTitle } : item,
+  );
+  saveConversations();
+  renderConversationList();
+
+  if (targetId === conversationId) {
+    updateHeaderTitle();
+  }
+
   messageInput.focus();
 }
 
@@ -1422,8 +2148,7 @@ function deleteConversation(targetId) {
   }
 
   const target = conversations.find((item) => item.id === targetId);
-  const hasMessages = loadMessages(targetId).length > 0;
-  if (hasMessages && !window.confirm(`确定删除“${target?.title || "该会话"}”吗？`)) {
+  if (!window.confirm(`确定删除“${target?.title || "该会话"}”吗？此操作不可恢复。`)) {
     return;
   }
 
@@ -1440,6 +2165,7 @@ function deleteConversation(targetId) {
         createdAt: Date.now(),
         updatedAt: Date.now(),
         messageCount: 0,
+        lastMessageSummary: "",
       },
     ];
   }
@@ -1490,6 +2216,8 @@ function guardActionDuringLoading() {
   window.alert("当前正在生成回复，请先点击“停止生成”。");
   return true;
 }
+
+// Event bindings
 
 chatForm.addEventListener("submit", (event) => {
   console.log("chatForm submit start");
@@ -1548,6 +2276,56 @@ newConversationButton.addEventListener("click", () => {
   console.log("new conversation clicked");
   startNewConversation();
 });
+
+conversationSearchInput.addEventListener("input", () => {
+  conversationSearchQuery = conversationSearchInput.value;
+  renderConversationList();
+});
+
+modelSelect.addEventListener("change", () => {
+  setSelectedModel(modelSelect.value);
+  messageInput.focus();
+});
+
+themeToggleButton.addEventListener("click", () => {
+  toggleTheme();
+  messageInput.focus();
+});
+
+settingsButton.addEventListener("click", () => {
+  openSettingsPanel();
+});
+
+settingsCloseButton.addEventListener("click", () => {
+  closeSettingsPanel();
+});
+
+settingsOverlay.addEventListener("click", (event) => {
+  if (event.target === settingsOverlay) {
+    closeSettingsPanel();
+  }
+});
+
+settingsModelSelect.addEventListener("change", () => {
+  setSelectedModel(settingsModelSelect.value);
+});
+
+settingsMaxContextInput.addEventListener("change", () => {
+  setMaxContextRounds(settingsMaxContextInput.value);
+});
+
+settingsStreamingToggle.addEventListener("change", () => {
+  setStreamingEnabled(settingsStreamingToggle.checked);
+});
+
+settingsModeSelect.addEventListener("change", () => {
+  setMode(settingsModeSelect.value);
+});
+
+clearAllConversationsButton.addEventListener("click", () => {
+  clearAllLocalConversations();
+});
+
 clearConversationButton.addEventListener("click", () => {
   console.log("clear conversation clicked");
   clearCurrentConversation();
@@ -1559,4 +2337,10 @@ modeButtons.forEach((button) => {
     setMode(button.dataset.mode);
     messageInput.focus();
   });
+});
+
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && !settingsOverlay.hidden) {
+    closeSettingsPanel();
+  }
 });

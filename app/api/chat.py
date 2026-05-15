@@ -15,7 +15,7 @@ from app.services.dashscope_agent import DashScopeAgent
 
 router = APIRouter()
 logger = get_logger(__name__)
-conversation_store = ConversationStore(max_rounds=10)
+conversation_store = ConversationStore(max_rounds=30)
 agent_lock = Lock()
 cached_agent: DashScopeAgent | None = None
 cached_agent_signature: tuple[str | None, str, str, float] | None = None
@@ -69,17 +69,21 @@ def chat(
 
     conversation_id = request.conversation_id or str(uuid4())
     model_messages = build_model_messages(request, conversation_id, store)
+    requested_model = normalize_requested_model(request.model)
 
     try:
-        reply = agent.chat(messages=model_messages)
+        reply = agent.chat(messages=model_messages, model=requested_model)
         store.append_exchange(conversation_id, request.message, reply.content)
         return ChatResponse(
             reply=reply.content,
-            model=agent.model,
+            model=requested_model or agent.model,
             conversation_id=conversation_id,
             used_tool=reply.used_tool,
             tool_name=reply.tool_result.name if reply.tool_result else None,
+            tool_status=get_tool_status(reply.tool_result),
             tool_result=reply.tool_result.result if reply.tool_result else None,
+            tool_error=reply.tool_result.error if reply.tool_result else None,
+            tool_duration_ms=reply.tool_result.duration_ms if reply.tool_result else None,
         )
     except AgentError as exc:
         logger.info("Chat request failed: code=%s status=%s", exc.code, exc.status_code)
@@ -92,28 +96,35 @@ def chat(
 @router.post("/chat/stream")
 def stream_chat(
     request: ChatRequest,
-    agent: DashScopeAgent = Depends(get_agent),
+    settings: Settings = Depends(get_settings),
     store: ConversationStore = Depends(get_conversation_store),
 ) -> StreamingResponse:
     """Stream a chat response using server-sent events."""
 
     conversation_id = request.conversation_id or str(uuid4())
     model_messages = build_model_messages(request, conversation_id, store)
+    requested_model = normalize_requested_model(request.model)
 
     def event_stream():
         assistant_chunks: list[str] = []
 
         try:
+            agent = get_agent(settings)
+            stream, tool_result = agent.stream_chat_with_tool_result(
+                messages=model_messages,
+                model=requested_model,
+            )
             yield sse_event(
                 "metadata",
                 {
                     "success": True,
                     "conversation_id": conversation_id,
-                    "model": agent.model,
+                    "model": requested_model or agent.model,
+                    **tool_response_metadata(tool_result),
                 },
             )
 
-            for chunk in agent.stream_chat(messages=model_messages):
+            for chunk in stream:
                 assistant_chunks.append(chunk)
                 yield sse_event("chunk", {"content": chunk})
 
@@ -124,7 +135,8 @@ def stream_chat(
                 {
                     "success": True,
                     "conversation_id": conversation_id,
-                    "model": agent.model,
+                    "model": requested_model or agent.model,
+                    **tool_response_metadata(tool_result),
                 },
             )
         except AgentError as exc:
@@ -156,17 +168,59 @@ def build_model_messages(
 ) -> list[dict[str, str]]:
     """Build system prompt, stored history, and the current user message."""
 
+    history = store.get_messages(conversation_id)
+    if request.max_context_rounds is not None:
+        history = history[-request.max_context_rounds * 2 :] if request.max_context_rounds > 0 else []
+
     return [
         {
             "role": "system",
             "content": request.system_prompt or DEFAULT_SYSTEM_PROMPT,
         },
-        *store.get_messages(conversation_id),
+        *history,
         {
             "role": "user",
             "content": request.message,
         },
     ]
+
+
+def normalize_requested_model(model: str | None) -> str | None:
+    """Return a clean model name, or None to use the configured default model."""
+
+    if model is None:
+        return None
+
+    clean_model = model.strip()
+    return clean_model or None
+
+
+def get_tool_status(tool_result) -> str | None:
+    if tool_result is None:
+        return None
+
+    return "success" if tool_result.success else "failed"
+
+
+def tool_response_metadata(tool_result) -> dict:
+    if tool_result is None:
+        return {
+            "used_tool": False,
+            "tool_name": None,
+            "tool_status": None,
+            "tool_result": None,
+            "tool_error": None,
+            "tool_duration_ms": None,
+        }
+
+    return {
+        "used_tool": True,
+        "tool_name": tool_result.name,
+        "tool_status": get_tool_status(tool_result),
+        "tool_result": tool_result.result,
+        "tool_error": tool_result.error,
+        "tool_duration_ms": tool_result.duration_ms,
+    }
 
 
 def sse_event(event: str, data: dict) -> str:

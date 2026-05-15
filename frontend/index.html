@@ -28,6 +28,15 @@
             <span class="section-label">会话列表</span>
             <span id="conversationCountText" class="section-count">0</span>
           </div>
+          <label class="conversation-search" for="conversationSearchInput">
+            <span class="sr-only">搜索会话</span>
+            <input
+              id="conversationSearchInput"
+              type="search"
+              autocomplete="off"
+              placeholder="搜索会话标题"
+            />
+          </label>
           <div id="conversationList" class="conversation-list"></div>
         </section>
 
@@ -81,10 +90,18 @@
               <span>模型</span>
               <strong id="currentModelText">等待后端返回</strong>
             </div>
+            <label class="model-select-field" for="modelSelect">
+              <span>选择模型</span>
+              <select id="modelSelect" aria-label="选择模型"></select>
+            </label>
             <div class="status-item">
               <span>模式</span>
               <strong id="currentModeText">通用助手</strong>
             </div>
+            <button id="themeToggleButton" class="theme-toggle-button" type="button" aria-label="切换深色主题">
+              深色
+            </button>
+            <button id="settingsButton" class="ghost-button" type="button">设置</button>
             <button id="clearConversationButton" class="ghost-button" type="button">清空</button>
           </div>
         </header>
@@ -142,6 +159,56 @@
           </form>
         </footer>
       </main>
+    </div>
+
+    <div id="settingsOverlay" class="settings-overlay" hidden>
+      <section
+        class="settings-panel"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="settingsTitle"
+      >
+        <header class="settings-header">
+          <div>
+            <span class="eyebrow">Preferences</span>
+            <h2 id="settingsTitle">设置</h2>
+          </div>
+          <button id="settingsCloseButton" class="settings-close-button" type="button" aria-label="关闭设置">
+            ×
+          </button>
+        </header>
+
+        <div class="settings-body">
+          <label class="settings-field" for="settingsModelSelect">
+            <span>模型选择</span>
+            <select id="settingsModelSelect"></select>
+          </label>
+
+          <label class="settings-field" for="settingsMaxContextInput">
+            <span>最大上下文轮数</span>
+            <input id="settingsMaxContextInput" type="number" min="0" max="30" step="1" />
+          </label>
+
+          <label class="settings-toggle" for="settingsStreamingToggle">
+            <span>
+              <strong>启用流式输出</strong>
+              <small>开启后使用 /chat/stream 接口逐步显示回复</small>
+            </span>
+            <input id="settingsStreamingToggle" type="checkbox" />
+          </label>
+
+          <label class="settings-field" for="settingsModeSelect">
+            <span>当前模式选择</span>
+            <select id="settingsModeSelect"></select>
+          </label>
+        </div>
+
+        <footer class="settings-footer">
+          <button id="clearAllConversationsButton" class="danger-button" type="button">
+            清空所有本地会话
+          </button>
+        </footer>
+      </section>
     </div>
 
     <script src="/frontend/main.js" defer></script>
