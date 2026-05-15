@@ -1224,8 +1224,43 @@ button {
   white-space: pre-wrap;
 }
 
+.reference-sources {
+  margin-bottom: 9px;
+  padding: 8px 9px;
+  border: 1px solid rgba(146, 64, 14, 0.16);
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.42);
+}
+
+.reference-sources-title {
+  margin-bottom: 5px;
+  color: var(--tool-strong);
+  font-weight: 900;
+}
+
+.reference-source-list {
+  margin: 0;
+  padding-left: 18px;
+}
+
+.reference-source-list li + li {
+  margin-top: 4px;
+}
+
+.reference-source-list a {
+  color: var(--blue);
+  font-weight: 800;
+  text-decoration: none;
+  word-break: break-word;
+}
+
+.reference-source-list a:hover {
+  text-decoration: underline;
+}
+
 [data-theme="dark"] .tool-panel-detail,
-[data-theme="dark"] .tool-panel-result {
+[data-theme="dark"] .tool-panel-result,
+[data-theme="dark"] .reference-sources {
   background: rgba(255, 255, 255, 0.055);
 }
 

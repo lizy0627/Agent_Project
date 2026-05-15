@@ -843,7 +843,7 @@ function createToolPanel(message) {
   marker.setAttribute("aria-hidden", "true");
 
   const name = document.createElement("span");
-  name.textContent = message.toolName || "工具调用";
+  name.textContent = getToolPanelTitle(message);
 
   title.append(marker, name);
 
@@ -866,12 +866,112 @@ function createToolPanel(message) {
 
   panel.appendChild(details);
 
+  const sourceList = createReferenceSourceList(message);
+  if (sourceList) {
+    panel.appendChild(sourceList);
+  }
+
   const result = document.createElement("pre");
   result.className = "tool-panel-result";
   result.textContent = formatToolResult(getToolDisplayResult(message));
   panel.appendChild(result);
 
   return panel;
+}
+
+function getToolPanelTitle(message) {
+  if (message.toolName === "web_search") {
+    return "已联网搜索";
+  }
+
+  return message.toolName || "工具调用";
+}
+
+function createReferenceSourceList(message) {
+  if (message.toolName !== "web_search") {
+    return null;
+  }
+
+  const sources = extractReferenceSources(message.toolResult);
+  if (sources.length === 0) {
+    return null;
+  }
+
+  const wrapper = document.createElement("div");
+  wrapper.className = "reference-sources";
+
+  const heading = document.createElement("div");
+  heading.className = "reference-sources-title";
+  heading.textContent = "参考来源";
+  wrapper.appendChild(heading);
+
+  const list = document.createElement("ol");
+  list.className = "reference-source-list";
+
+  sources.forEach((source) => {
+    const item = document.createElement("li");
+    const link = document.createElement("a");
+    link.href = source.url;
+    link.target = "_blank";
+    link.rel = "noopener noreferrer";
+    link.textContent = source.title || source.url;
+    item.appendChild(link);
+    list.appendChild(item);
+  });
+
+  wrapper.appendChild(list);
+  return wrapper;
+}
+
+function extractReferenceSources(toolResult) {
+  const root = normalizeToolResultRoot(toolResult);
+  const candidates = [];
+
+  appendSourceCandidates(candidates, root.read_pages);
+  appendSourceCandidates(candidates, root.search_results);
+  appendSourceCandidates(candidates, root.results);
+
+  const seen = new Set();
+  return candidates.filter((source) => {
+    if (!source.url || seen.has(source.url)) {
+      return false;
+    }
+
+    seen.add(source.url);
+    return true;
+  });
+}
+
+function normalizeToolResultRoot(toolResult) {
+  if (!toolResult || typeof toolResult !== "object") {
+    return {};
+  }
+
+  if (toolResult.result && typeof toolResult.result === "object") {
+    return toolResult.result;
+  }
+
+  return toolResult;
+}
+
+function appendSourceCandidates(candidates, items) {
+  if (!Array.isArray(items)) {
+    return;
+  }
+
+  items.forEach((item) => {
+    if (!item || typeof item !== "object") {
+      return;
+    }
+
+    const url = String(item.url || "").trim();
+    if (!url || !/^https?:\/\//i.test(url)) {
+      return;
+    }
+
+    const title = String(item.title || item.url || "").trim();
+    candidates.push({ title, url });
+  });
 }
 
 function getToolDisplayResult(message) {
@@ -1491,6 +1591,7 @@ async function requestAgentReply(
     targetMaxContextRounds = maxContextRounds,
     targetStreamingEnabled = streamingEnabled,
     onChunk = null,
+    onToolMetadata = null,
   } = {},
 ) {
   console.log("requestAgentReply start", {
@@ -1523,6 +1624,7 @@ async function requestAgentReply(
           activeAbortController.signal,
           targetConversationId,
           onChunk,
+          onToolMetadata,
         )
       : await requestJsonAgentReply(
           requestBody,
@@ -1594,7 +1696,13 @@ async function requestJsonAgentReply(requestBody, signal, fallbackConversationId
   };
 }
 
-async function requestStreamingAgentReply(requestBody, signal, fallbackConversationId, onChunk) {
+async function requestStreamingAgentReply(
+  requestBody,
+  signal,
+  fallbackConversationId,
+  onChunk,
+  onToolMetadata,
+) {
   console.log("POST /chat/stream request start", requestBody);
   const response = await fetch(CHAT_STREAM_API_URL, {
     method: "POST",
@@ -1642,6 +1750,9 @@ async function requestStreamingAgentReply(requestBody, signal, fallbackConversat
 
       if (event.event === "metadata") {
         metadata = event.data || {};
+        if (typeof onToolMetadata === "function") {
+          onToolMetadata(normalizeToolMetadata(metadata));
+        }
         return;
       }
 
@@ -1656,6 +1767,9 @@ async function requestStreamingAgentReply(requestBody, signal, fallbackConversat
 
       if (event.event === "done") {
         done = event.data || {};
+        if (typeof onToolMetadata === "function") {
+          onToolMetadata(normalizeToolMetadata(done));
+        }
         return;
       }
 
@@ -1683,6 +1797,17 @@ async function requestStreamingAgentReply(requestBody, signal, fallbackConversat
     toolResult: metadata.tool_result ?? done.tool_result,
     toolError: metadata.tool_error ?? done.tool_error,
     toolDurationMs: metadata.tool_duration_ms ?? done.tool_duration_ms,
+  };
+}
+
+function normalizeToolMetadata(data = {}) {
+  return {
+    usedTool: data.used_tool,
+    toolName: data.tool_name,
+    toolStatus: data.tool_status,
+    toolResult: data.tool_result,
+    toolError: data.tool_error,
+    toolDurationMs: data.tool_duration_ms,
   };
 }
 
@@ -1760,6 +1885,14 @@ async function regenerateAgentReply(messageId) {
     targetModel: selectedModel,
     targetMaxContextRounds: maxContextRounds,
     targetStreamingEnabled: streamingEnabled,
+    onToolMetadata: (metadata) => {
+      updateMessage(loadingMessage.id, {
+        type: "loading",
+        role: "agent",
+        ...metadata,
+        createdAt: getCurrentTime(),
+      });
+    },
     onChunk: (chunk, partialReply) => {
       updateMessage(loadingMessage.id, {
         type: "text",
@@ -1971,6 +2104,14 @@ async function sendCurrentMessage() {
 
   try {
     const result = await requestAgentReply(userText, {
+      onToolMetadata: (metadata) => {
+        updateMessage(loadingMessage.id, {
+          type: "loading",
+          role: "agent",
+          ...metadata,
+          createdAt: getCurrentTime(),
+        });
+      },
       onChunk: (chunk, partialReply) => {
         hasReceivedFirstChunk = true;
         window.clearTimeout(thinkingTimer);

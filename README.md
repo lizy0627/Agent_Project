@@ -26,6 +26,8 @@
   - `get_current_time`：获取当前时间
   - `calculate`：执行安全数学计算
   - `summarize_text`：总结文本内容
+  - `web_search`：通过 Tavily Search API 进行联网搜索
+  - `web_reader`：读取搜索结果网页正文，用于多来源综合总结
 - 工具调用过程带日志，便于调试
 - 工具失败不会导致服务崩溃，会将失败信息交给模型生成最终回复
 - 统一异常处理，覆盖 API Key 缺失、鉴权失败、网络异常、模型超时等场景
@@ -57,6 +59,8 @@
 │   │   ├── calculator.py
 │   │   ├── summarize_text.py
 │   │   ├── time_tool.py
+│   │   ├── web_reader.py
+│   │   ├── web_search.py
 │   │   └── tool_manager.py
 │   └── __init__.py
 ├── frontend
@@ -122,6 +126,8 @@ DASHSCOPE_API_KEY=your_dashscope_api_key_here
 DASHSCOPE_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
 DASHSCOPE_MODEL=qwen-plus
 DASHSCOPE_TIMEOUT_SECONDS=30
+TAVILY_API_KEY=your_tavily_api_key_here
+WEB_SEARCH_PROVIDER=tavily
 ```
 
 说明：
@@ -130,6 +136,8 @@ DASHSCOPE_TIMEOUT_SECONDS=30
 - `DASHSCOPE_BASE_URL`：DashScope OpenAI 兼容模式接口地址
 - `DASHSCOPE_MODEL`：使用的模型名称，例如 `qwen-plus`
 - `DASHSCOPE_TIMEOUT_SECONDS`：模型请求超时时间，单位为秒
+- `TAVILY_API_KEY`：Tavily Search API Key，请填写自己的 Key，不要提交到 GitHub
+- `WEB_SEARCH_PROVIDER`：联网搜索提供商，当前支持 `tavily`
 
 ### 5. 启动服务
 

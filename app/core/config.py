@@ -25,6 +25,8 @@ class Settings(BaseSettings):
     dashscope_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     dashscope_model: str = "qwen-plus"
     dashscope_timeout_seconds: float = 30.0
+    tavily_api_key: str | None = None
+    web_search_provider: str = "tavily"
 
     model_config = SettingsConfigDict(
         env_file=".env",
