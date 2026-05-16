@@ -1651,6 +1651,7 @@ async function requestAgentReply(
     targetStreamingEnabled = streamingEnabled,
     onChunk = null,
     onToolMetadata = null,
+    onStatus = null,
   } = {},
 ) {
   console.log("requestAgentReply start", {
@@ -1684,6 +1685,7 @@ async function requestAgentReply(
           targetConversationId,
           onChunk,
           onToolMetadata,
+          onStatus,
         )
       : await requestJsonAgentReply(
           requestBody,
@@ -1761,6 +1763,7 @@ async function requestStreamingAgentReply(
   fallbackConversationId,
   onChunk,
   onToolMetadata,
+  onStatus,
 ) {
   console.log("POST /chat/stream request start", requestBody);
   const response = await fetch(CHAT_STREAM_API_URL, {
@@ -1799,6 +1802,14 @@ async function requestStreamingAgentReply(
       metadata = event.data || {};
       if (typeof onToolMetadata === "function") {
         onToolMetadata(normalizeToolMetadata(metadata));
+      }
+      return;
+    }
+
+    if (event.event === "status") {
+      const message = String(event.data?.message || "").trim();
+      if (message && typeof onStatus === "function") {
+        onStatus(message);
       }
       return;
     }
@@ -1964,6 +1975,17 @@ async function regenerateAgentReply(messageId) {
         metadataUpdates.content = nextStatusContent;
       }
       updateMessage(loadingMessage.id, metadataUpdates);
+    },
+    onStatus: (statusMessage) => {
+      if (hasReceivedFirstChunk || !statusMessage) {
+        return;
+      }
+      updateMessage(loadingMessage.id, {
+        type: "loading",
+        role: "agent",
+        content: statusMessage,
+        createdAt: getCurrentTime(),
+      });
     },
     onChunk: (chunk, partialReply) => {
       hasReceivedFirstChunk = true;
@@ -2234,6 +2256,17 @@ async function sendCurrentMessage() {
           metadataUpdates.content = nextStatusContent;
         }
         updateMessage(loadingMessage.id, metadataUpdates);
+      },
+      onStatus: (statusMessage) => {
+        if (hasReceivedFirstChunk || !statusMessage) {
+          return;
+        }
+        updateMessage(loadingMessage.id, {
+          type: "loading",
+          role: "agent",
+          content: statusMessage,
+          createdAt: getCurrentTime(),
+        });
       },
       onChunk: (chunk, partialReply) => {
         hasReceivedFirstChunk = true;

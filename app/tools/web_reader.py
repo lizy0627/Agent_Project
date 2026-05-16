@@ -1,6 +1,9 @@
 from html.parser import HTMLParser
 import re
+from threading import Lock
+from time import time
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 
@@ -8,6 +11,10 @@ from app.core.logger import get_logger
 
 
 logger = get_logger(__name__)
+WEB_READER_CACHE_TTL_SECONDS = 10 * 60
+WEB_READER_CACHE_MAX_SIZE = 100
+_WEB_READER_CACHE: dict[str, tuple[float, dict]] = {}
+_WEB_READER_CACHE_LOCK = Lock()
 
 
 class _ReadableHTMLParser(HTMLParser):
@@ -164,39 +171,47 @@ class WebReaderTool:
     max_content_chars = 3000
 
     def run(self, url: str) -> dict[str, Any]:
-        url = url.strip()
-        if not url:
+        original_url = url.strip()
+        if not original_url:
             raise ValueError("URL is empty.")
-        if not url.startswith(("http://", "https://")):
+        if not original_url.startswith(("http://", "https://")):
             raise ValueError("URL must start with http:// or https://.")
+
+        cache_key = self._normalize_url(original_url)
+        cached_result = self._get_cached_result(cache_key)
+        if cached_result is not None:
+            logger.info("Web reader cache hit: url=%s", cache_key)
+            return {**cached_result, "cached": True}
+
+        logger.info("Web reader cache miss: url=%s", cache_key)
 
         try:
             response = httpx.get(
-                url,
+                original_url,
                 timeout=self.timeout_seconds,
                 follow_redirects=True,
                 headers={"User-Agent": "Mozilla/5.0 DashScopeAgent/0.1"},
             )
             response.raise_for_status()
         except httpx.TimeoutException as exc:
-            logger.warning("Web page read request timed out: url=%s", url)
+            logger.warning("Web page read request timed out: url=%s", original_url)
             raise TimeoutError("Web page read request timed out after 5 seconds.") from exc
         except httpx.HTTPStatusError as exc:
             logger.warning(
                 "Web page returned HTTP error: url=%s status=%s",
-                url,
+                original_url,
                 exc.response.status_code,
             )
             raise ValueError(f"Web page returned HTTP {exc.response.status_code}.") from exc
         except httpx.RequestError as exc:
             logger.warning(
                 "Web page read request failed: url=%s error=%s",
-                url,
+                original_url,
                 exc.__class__.__name__,
             )
             raise ConnectionError("Unable to read web page.") from exc
         except Exception as exc:
-            logger.exception("Unexpected web page read error: url=%s", url)
+            logger.exception("Unexpected web page read error: url=%s", original_url)
             raise RuntimeError("Unexpected web page read error.") from exc
 
         try:
@@ -215,20 +230,23 @@ class WebReaderTool:
                 text = text[: self.max_content_chars - 3].rstrip() + "..."
             logger.info(
                 "Web page content trimmed: url=%s raw_length=%s trimmed_length=%s",
-                url,
+                original_url,
                 raw_content_length,
                 len(text),
             )
         except Exception as exc:
-            logger.exception("Unexpected web page content parsing error: url=%s", url)
+            logger.exception("Unexpected web page content parsing error: url=%s", original_url)
             raise RuntimeError("Unexpected web page content parsing error.") from exc
 
-        return {
+        result = {
             "url": str(response.url),
             "content_type": content_type,
             "content": text,
             "content_length": len(text),
+            "cached": False,
         }
+        self._set_cached_result(cache_key, result)
+        return result
 
     def _clean_text(self, text: str) -> str:
         lines = []
@@ -237,3 +255,38 @@ class WebReaderTool:
             if clean_line:
                 lines.append(clean_line)
         return "\n\n".join(lines)
+
+    def _normalize_url(self, url: str) -> str:
+        parts = urlsplit(url.strip())
+        path = parts.path or "/"
+        return urlunsplit(
+            (
+                parts.scheme.lower(),
+                parts.netloc.lower(),
+                path,
+                parts.query,
+                "",
+            )
+        )
+
+    def _get_cached_result(self, cache_key: str) -> dict[str, Any] | None:
+        now = time()
+        with _WEB_READER_CACHE_LOCK:
+            cached = _WEB_READER_CACHE.get(cache_key)
+            if cached is None:
+                return None
+
+            cached_at, result = cached
+            if now - cached_at > WEB_READER_CACHE_TTL_SECONDS:
+                logger.info("Web reader cache expired: url=%s", cache_key)
+                del _WEB_READER_CACHE[cache_key]
+                return None
+
+            return dict(result)
+
+    def _set_cached_result(self, cache_key: str, result: dict[str, Any]) -> None:
+        with _WEB_READER_CACHE_LOCK:
+            _WEB_READER_CACHE[cache_key] = (time(), dict(result))
+            while len(_WEB_READER_CACHE) > WEB_READER_CACHE_MAX_SIZE:
+                oldest_key = min(_WEB_READER_CACHE, key=lambda key: _WEB_READER_CACHE[key][0])
+                del _WEB_READER_CACHE[oldest_key]

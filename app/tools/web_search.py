@@ -1,4 +1,7 @@
+from copy import deepcopy
 import os
+from threading import Lock
+from time import time
 from typing import Any
 
 import httpx
@@ -7,6 +10,10 @@ from app.core.logger import get_logger
 
 
 logger = get_logger(__name__)
+WEB_SEARCH_CACHE_TTL_SECONDS = 3 * 60
+WEB_SEARCH_CACHE_MAX_SIZE = 100
+_WEB_SEARCH_CACHE: dict[str, tuple[float, dict]] = {}
+_WEB_SEARCH_CACHE_LOCK = Lock()
 
 
 class WebSearchTool:
@@ -39,6 +46,23 @@ class WebSearchTool:
 
         safe_max_results = min(max(int(max_results), 1), 10)
         safe_search_depth = search_depth if search_depth in {"basic", "advanced"} else "basic"
+        cache_key = self._cache_key(query, safe_max_results, safe_search_depth)
+        cached_result = self._get_cached_result(cache_key)
+        if cached_result is not None:
+            logger.info(
+                "Web search cache hit: query=%s max_results=%s search_depth=%s",
+                query[:200],
+                safe_max_results,
+                safe_search_depth,
+            )
+            return {**cached_result, "cached": True}
+
+        logger.info(
+            "Web search cache miss: query=%s max_results=%s search_depth=%s",
+            query[:200],
+            safe_max_results,
+            safe_search_depth,
+        )
 
         payload = {
             "api_key": self.api_key,
@@ -92,10 +116,13 @@ class WebSearchTool:
             if isinstance(item, dict)
         ]
 
-        return {
+        result = {
             "query": data.get("query", query),
             "results": results,
+            "cached": False,
         }
+        self._set_cached_result(cache_key, result)
+        return result
 
     def _extract_error_detail(self, response: httpx.Response) -> str:
         try:
@@ -109,3 +136,33 @@ class WebSearchTool:
                 return str(detail)
 
         return f"HTTP {response.status_code}"
+
+    def _cache_key(self, query: str, max_results: int, search_depth: str) -> str:
+        normalized_query = " ".join(query.split()).casefold()
+        return f"{normalized_query}\n{max_results}\n{search_depth}"
+
+    def _get_cached_result(self, cache_key: str) -> dict[str, Any] | None:
+        now = time()
+        with _WEB_SEARCH_CACHE_LOCK:
+            cached = _WEB_SEARCH_CACHE.get(cache_key)
+            if cached is None:
+                return None
+
+            cached_at, result = cached
+            if now - cached_at > WEB_SEARCH_CACHE_TTL_SECONDS:
+                logger.info("Web search cache expired: key=%s", self._safe_cache_key_for_log(cache_key))
+                del _WEB_SEARCH_CACHE[cache_key]
+                return None
+
+            return deepcopy(result)
+
+    def _set_cached_result(self, cache_key: str, result: dict[str, Any]) -> None:
+        with _WEB_SEARCH_CACHE_LOCK:
+            _WEB_SEARCH_CACHE[cache_key] = (time(), deepcopy(result))
+            while len(_WEB_SEARCH_CACHE) > WEB_SEARCH_CACHE_MAX_SIZE:
+                oldest_key = min(_WEB_SEARCH_CACHE, key=lambda key: _WEB_SEARCH_CACHE[key][0])
+                del _WEB_SEARCH_CACHE[oldest_key]
+
+    def _safe_cache_key_for_log(self, cache_key: str) -> str:
+        query, max_results, search_depth = cache_key.split("\n", 2)
+        return f"query={query[:200]} max_results={max_results} search_depth={search_depth}"

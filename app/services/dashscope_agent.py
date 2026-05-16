@@ -5,6 +5,7 @@ import json
 import re
 from time import perf_counter
 from typing import Any, Iterator
+from urllib.parse import urlsplit, urlunsplit
 
 from openai import (
     APIConnectionError,
@@ -32,12 +33,32 @@ from app.tools.tool_manager import ToolManager
 logger = get_logger(__name__)
 ChatMessage = dict[str, str]
 DEFAULT_WEB_SEARCH_MAX_RESULTS = 3
-DEFAULT_SEARCH_WORKFLOW_READ_TOP_K = 3
+DEFAULT_SEARCH_WORKFLOW_READ_TOP_K = 2
 MAX_SEARCH_WORKFLOW_READ_TOP_K = 3
 WEB_SEARCH_TOOL_ARGUMENTS = {"query", "max_results", "search_depth"}
 MAX_SEARCH_SUMMARY_RESULTS = 3
-MAX_PAGE_CONTENT_CHARS = 3000
-MAX_SEARCH_CONTEXT_CHARS = 9000
+MAX_PAGE_CONTENT_CHARS = 2800
+MIN_PAGE_CONTENT_CHARS = 800
+MAX_SEARCH_CONTEXT_CHARS = 8000
+MAX_SEARCH_SNIPPET_CHARS = 500
+NOISY_PAGE_KEYWORDS = (
+    "广告",
+    "推广",
+    "赞助",
+    "相关阅读",
+    "相关推荐",
+    "点击加载更多",
+    "发表评论",
+    "评论区",
+    "advertisement",
+    "advertising",
+    "sponsored",
+    "related articles",
+    "recommended",
+    "subscribe",
+    "newsletter",
+    "cookie policy",
+)
 
 
 @dataclass(frozen=True)
@@ -58,6 +79,17 @@ class AgentReply:
     @property
     def used_tool(self) -> bool:
         return self.tool_result is not None
+
+
+@dataclass(frozen=True)
+class SearchWorkflowPerformance:
+    """Timing and page-count metrics for one search workflow run."""
+
+    started_at: float
+    search_seconds: float = 0.0
+    reader_seconds: float = 0.0
+    success_pages: int = 0
+    failed_pages: int = 0
 
 
 class DashScopeAgent:
@@ -145,8 +177,17 @@ class DashScopeAgent:
 
         planned_call = self._plan_tool_call(messages)
         if planned_call and planned_call.name == "web_search":
-            reply = self._handle_search_workflow(messages, planned_call, model=model)
-            return iter([reply.content]), reply.tool_result
+            model_messages, workflow_result, performance = self._prepare_search_workflow(
+                messages,
+                planned_call,
+            )
+            logger.info("[SearchWorkflow] streaming summarize start")
+            stream = self._stream_search_workflow_summary(
+                model_messages,
+                performance,
+                model=model,
+            )
+            return stream, workflow_result
 
         tool_result = self._call_planned_tool(planned_call)
         model_messages = self._messages_with_tool_result(messages, tool_result)
@@ -230,6 +271,45 @@ class DashScopeAgent:
     ) -> AgentReply:
         """Run search, read top pages, and ask the model to synthesize an answer."""
 
+        model_messages, workflow_result, performance = self._prepare_search_workflow(
+            messages,
+            planned_call,
+        )
+        logger.info("[SearchWorkflow] llm summarize start")
+        summarize_started_at = perf_counter()
+        try:
+            reply = self._complete_chat(model_messages, model=model)
+        finally:
+            logger.info(
+                "[SearchWorkflow] llm summarize done, cost=%.2fs",
+                self._elapsed_seconds(summarize_started_at),
+            )
+        self._log_search_workflow_performance(
+            performance,
+            llm_seconds=self._elapsed_seconds(summarize_started_at),
+        )
+        return AgentReply(content=reply, tool_result=workflow_result)
+
+    def _prepare_search_workflow_messages(
+        self,
+        messages: list[ChatMessage],
+        planned_call: PlannedToolCall,
+    ) -> tuple[list[ChatMessage], ToolResult]:
+        """Run the search workflow and return model messages ready for final synthesis."""
+
+        model_messages, workflow_result, _performance = self._prepare_search_workflow(
+            messages,
+            planned_call,
+        )
+        return model_messages, workflow_result
+
+    def _prepare_search_workflow(
+        self,
+        messages: list[ChatMessage],
+        planned_call: PlannedToolCall,
+    ) -> tuple[list[ChatMessage], ToolResult, SearchWorkflowPerformance]:
+        """Prepare search context and collect performance metrics."""
+
         workflow_started_at = perf_counter()
         query = str(planned_call.arguments.get("query", self._latest_user_message(messages)))
         search_kwargs = self._web_search_tool_arguments(planned_call.arguments, query=query)
@@ -241,27 +321,42 @@ class DashScopeAgent:
             MAX_SEARCH_WORKFLOW_READ_TOP_K,
         )
         logger.info("Search workflow started: query=%s", query[:200])
+        search_started_at = perf_counter()
         search_result = self._call_search_workflow_tool("web_search", **search_kwargs)
+        search_cost = self._elapsed_seconds(search_started_at)
         workflow_step_results = [search_result]
         search_payload = search_result.result if isinstance(search_result.result, dict) else {}
         search_items = search_payload.get("results", []) if search_result.success else []
         search_result_count = len(search_items) if isinstance(search_items, list) else 0
         logger.info(
-            "Search workflow web_search finished: success=%s result_count=%s error=%s",
+            "Search workflow web_search finished: success=%s result_count=%s error=%s cost=%.2fs",
             search_result.success,
             search_result_count,
             search_result.error,
+            search_cost,
         )
 
         pages: list[dict[str, Any]] = []
+        reader_cost = 0.0
+        selected_page_count = 0
+        successful_reader_count = 0
         if isinstance(search_items, list):
             selected_items = self._select_search_items_for_reading(search_items, read_top_k)
+            selected_page_count = len(selected_items)
             logger.info(
                 "Search workflow selected pages for reading: requested=%s selected=%s",
                 read_top_k,
                 len(selected_items),
             )
+            reader_started_at = perf_counter()
             reader_pairs = self._read_search_pages_concurrently(selected_items)
+            reader_cost = self._elapsed_seconds(reader_started_at)
+            logger.info(
+                "Search workflow web_reader total finished: selected=%s returned=%s cost=%.2fs",
+                len(selected_items),
+                len(reader_pairs),
+                reader_cost,
+            )
             for item, reader_result in reader_pairs:
                 workflow_step_results.append(reader_result)
                 if not reader_result.success:
@@ -272,6 +367,7 @@ class DashScopeAgent:
                     )
                     continue
 
+                successful_reader_count += 1
                 url = str(item.get("url") or "").strip()
                 logger.info(
                     "Search workflow web_reader finished: url=%s success=%s error=%s",
@@ -311,6 +407,15 @@ class DashScopeAgent:
             "search_error": search_result.error,
             "search_results": compact_search_items,
             "read_pages": compact_pages,
+            "context_limited": self._is_search_context_limited(
+                search_result_count=search_result_count,
+                compact_search_count=len(compact_search_items),
+                raw_page_count=len(pages),
+                compact_page_count=len(compact_pages),
+            ),
+            "context_note": (
+                "搜索结果或网页正文有限；如果材料不足以支持结论，请在最终回答中明确说明。"
+            ),
         }
         context_length = len(json.dumps(workflow_payload, ensure_ascii=False))
         logger.info(
@@ -336,20 +441,43 @@ class DashScopeAgent:
             len(pages),
             sum(1 for page in pages if page.get("read_success")),
         )
-        logger.info("[SearchWorkflow] llm summarize start")
+        performance = SearchWorkflowPerformance(
+            started_at=workflow_started_at,
+            search_seconds=search_cost,
+            reader_seconds=reader_cost,
+            success_pages=successful_reader_count,
+            failed_pages=max(selected_page_count - successful_reader_count, 0),
+        )
+        return model_messages, workflow_result, performance
+
+    def _stream_search_workflow_summary(
+        self,
+        messages: list[ChatMessage],
+        performance: SearchWorkflowPerformance,
+        model: str | None = None,
+    ) -> Iterator[str]:
         summarize_started_at = perf_counter()
         try:
-            reply = self._complete_chat(model_messages, model=model)
+            yield from self._stream_complete_chat(messages, model=model)
         finally:
-            logger.info(
-                "[SearchWorkflow] llm summarize done, cost=%.2fs",
-                self._elapsed_seconds(summarize_started_at),
-            )
+            llm_seconds = self._elapsed_seconds(summarize_started_at)
+            logger.info("[SearchWorkflow] streaming summarize done, cost=%.2fs", llm_seconds)
+            self._log_search_workflow_performance(performance, llm_seconds=llm_seconds)
+
+    def _log_search_workflow_performance(
+        self,
+        performance: SearchWorkflowPerformance,
+        llm_seconds: float,
+    ) -> None:
         logger.info(
-            "[SearchWorkflow] workflow done, cost=%.2fs",
-            self._elapsed_seconds(workflow_started_at),
+            "[SearchWorkflow] total=%.2fs search=%.2fs reader=%.2fs llm=%.2fs success_pages=%s failed_pages=%s",
+            self._elapsed_seconds(performance.started_at),
+            performance.search_seconds,
+            performance.reader_seconds,
+            llm_seconds,
+            performance.success_pages,
+            performance.failed_pages,
         )
-        return AgentReply(content=reply, tool_result=workflow_result)
 
     def _call_search_workflow_tool(self, name: str, **kwargs: Any) -> ToolResult:
         started_at = perf_counter()
@@ -445,15 +573,44 @@ class DashScopeAgent:
         search_items: list[Any],
         read_top_k: int,
     ) -> list[dict[str, Any]]:
-        valid_items = [
-            item
-            for item in search_items
-            if isinstance(item, dict) and self._is_valid_web_url(str(item.get("url") or "").strip())
-        ]
+        valid_items = self._dedupe_search_items_by_url(search_items)
         return sorted(valid_items, key=self._search_score, reverse=True)[:read_top_k]
 
     def _is_valid_web_url(self, url: str) -> bool:
-        return url.startswith(("http://", "https://"))
+        return url.lower().startswith(("http://", "https://"))
+
+    def _normalize_url_for_dedupe(self, url: str) -> str:
+        clean_url = url.strip()
+        if not clean_url:
+            return ""
+        try:
+            parts = urlsplit(clean_url)
+        except ValueError:
+            return clean_url.lower()
+        path = parts.path or "/"
+        return urlunsplit(
+            (
+                parts.scheme.lower(),
+                parts.netloc.lower(),
+                path.rstrip("/") or "/",
+                parts.query,
+                "",
+            )
+        )
+
+    def _dedupe_search_items_by_url(self, search_items: list[Any]) -> list[dict[str, Any]]:
+        best_by_url: dict[str, dict[str, Any]] = {}
+        for item in search_items:
+            if not isinstance(item, dict):
+                continue
+            url = str(item.get("url") or "").strip()
+            if not self._is_valid_web_url(url):
+                continue
+            normalized_url = self._normalize_url_for_dedupe(url)
+            existing = best_by_url.get(normalized_url)
+            if existing is None or self._search_score(item) > self._search_score(existing):
+                best_by_url[normalized_url] = item
+        return list(best_by_url.values())
 
     def _search_score(self, item: dict[str, Any]) -> float:
         try:
@@ -480,59 +637,36 @@ class DashScopeAgent:
         compact_search_items = self._compact_search_results(search_items)
         compact_pages = self._compact_pages(pages)
 
-        while compact_pages and self._workflow_context_length(
+        while self._workflow_context_length(
             query,
             search_success,
             search_error,
             compact_search_items,
             compact_pages,
         ) > max_context_chars:
-            compact_pages.pop()
-
-        while compact_search_items and self._workflow_context_length(
-            query,
-            search_success,
-            search_error,
-            compact_search_items,
-            compact_pages,
-        ) > max_context_chars:
-            compact_search_items.pop()
-
-        if self._workflow_context_length(
-            query,
-            search_success,
-            search_error,
-            compact_search_items,
-            compact_pages,
-        ) > max_context_chars:
-            compact_pages = self._trim_page_contents_to_budget(
-                query,
-                search_success,
-                search_error,
-                compact_search_items,
-                compact_pages,
-                max_context_chars,
-            )
+            if self._trim_longest_page_content(compact_pages):
+                continue
+            if compact_pages:
+                compact_pages.pop()
+                continue
+            if compact_search_items:
+                compact_search_items.pop()
+                continue
+            break
 
         return compact_search_items, compact_pages
 
     def _compact_search_results(self, search_items: list[Any]) -> list[dict[str, Any]]:
-        valid_items = [
-            item
-            for item in search_items
-            if isinstance(item, dict) and self._is_valid_web_url(str(item.get("url") or "").strip())
-        ]
+        valid_items = self._dedupe_search_items_by_url(search_items)
         compact_items: list[dict[str, Any]] = []
         for item in sorted(valid_items, key=self._search_score, reverse=True)[:MAX_SEARCH_SUMMARY_RESULTS]:
+            snippet = self._compact_search_snippet(item)
             compact_items.append(
                 {
                     "title": item.get("title", ""),
                     "url": item.get("url", ""),
-                    "content": self._truncate_text(
-                        str(item.get("content") or item.get("snippet") or ""),
-                        500,
-                    ),
-                    "snippet": self._truncate_text(str(item.get("snippet") or item.get("content") or ""), 500),
+                    "content": snippet,
+                    "snippet": snippet,
                     "score": item.get("score"),
                 }
             )
@@ -540,44 +674,105 @@ class DashScopeAgent:
 
     def _compact_pages(self, pages: list[dict[str, Any]]) -> list[dict[str, Any]]:
         compact_pages: list[dict[str, Any]] = []
+        seen_urls: set[str] = set()
         for page in sorted(pages, key=self._search_score, reverse=True):
+            if not page.get("read_success"):
+                continue
+            url = str(page.get("url") or "").strip()
+            normalized_url = self._normalize_url_for_dedupe(url)
+            if not normalized_url or normalized_url in seen_urls:
+                continue
+            content = self._extract_leading_page_context(str(page.get("content") or ""))
+            if not content:
+                continue
+            seen_urls.add(normalized_url)
             compact_pages.append(
                 {
                     "title": page.get("title", ""),
-                    "url": page.get("url", ""),
-                    "search_snippet": self._truncate_text(str(page.get("search_snippet") or ""), 500),
+                    "url": url,
+                    "search_snippet": self._truncate_text(
+                        self._remove_noisy_text(str(page.get("search_snippet") or "")),
+                        MAX_SEARCH_SNIPPET_CHARS,
+                    ),
                     "score": page.get("score"),
-                    "read_success": page.get("read_success"),
-                    "read_error": page.get("read_error"),
-                    "content": self._truncate_text(str(page.get("content") or ""), MAX_PAGE_CONTENT_CHARS),
+                    "content": content,
                 }
             )
         return compact_pages
 
-    def _trim_page_contents_to_budget(
-        self,
-        query: str,
-        search_success: bool,
-        search_error: str | None,
-        search_items: list[dict[str, Any]],
-        pages: list[dict[str, Any]],
-        max_context_chars: int,
-    ) -> list[dict[str, Any]]:
-        trimmed_pages = [dict(page) for page in pages]
-        while trimmed_pages and self._workflow_context_length(
-            query,
-            search_success,
-            search_error,
-            search_items,
-            trimmed_pages,
-        ) > max_context_chars:
-            longest_page = max(trimmed_pages, key=lambda page: len(str(page.get("content") or "")))
-            content = str(longest_page.get("content") or "")
-            if len(content) <= 500:
-                trimmed_pages.pop()
+    def _compact_search_snippet(self, item: dict[str, Any]) -> str:
+        text = str(item.get("content") or item.get("snippet") or "")
+        return self._truncate_text(self._remove_noisy_text(text), MAX_SEARCH_SNIPPET_CHARS)
+
+    def _extract_leading_page_context(self, content: str) -> str:
+        clean_content = content.strip()
+        if not clean_content:
+            return ""
+
+        paragraphs: list[str] = []
+        seen: set[str] = set()
+        for raw_paragraph in re.split(r"\n{2,}|\r\n{2,}", clean_content):
+            paragraph = " ".join(raw_paragraph.split())
+            if not paragraph:
                 continue
-            longest_page["content"] = self._truncate_text(content, max(len(content) - 500, 500))
-        return trimmed_pages
+            if self._looks_like_noisy_text(paragraph):
+                continue
+            normalized = paragraph.casefold()
+            if normalized in seen:
+                continue
+            seen.add(normalized)
+            paragraphs.append(paragraph)
+            if len(" ".join(paragraphs)) >= MAX_PAGE_CONTENT_CHARS:
+                break
+
+        return self._truncate_text("\n\n".join(paragraphs), MAX_PAGE_CONTENT_CHARS)
+
+    def _remove_noisy_text(self, text: str) -> str:
+        cleaned_parts = [
+            part
+            for part in (" ".join(chunk.split()) for chunk in re.split(r"\n+|。|；|;", text))
+            if part and not self._looks_like_noisy_text(part)
+        ]
+        return " ".join(cleaned_parts)
+
+    def _looks_like_noisy_text(self, text: str) -> bool:
+        lowered = text.lower()
+        if any(keyword in lowered for keyword in NOISY_PAGE_KEYWORDS):
+            return True
+        if len(text) <= 20 and re.search(r"(登录|注册|分享|收藏|评论|subscribe|sign in)", lowered):
+            return True
+        return False
+
+    def _trim_longest_page_content(self, pages: list[dict[str, Any]]) -> bool:
+        trim_candidates = [
+            page
+            for page in pages
+            if len(str(page.get("content") or "")) > MIN_PAGE_CONTENT_CHARS
+        ]
+        if not trim_candidates:
+            return False
+
+        longest_page = max(trim_candidates, key=lambda page: len(str(page.get("content") or "")))
+        content = str(longest_page.get("content") or "")
+        longest_page["content"] = self._truncate_text(
+            content,
+            max(len(content) - 500, MIN_PAGE_CONTENT_CHARS),
+        )
+        return True
+
+    def _is_search_context_limited(
+        self,
+        search_result_count: int,
+        compact_search_count: int,
+        raw_page_count: int,
+        compact_page_count: int,
+    ) -> bool:
+        return (
+            search_result_count == 0
+            or compact_search_count < search_result_count
+            or compact_page_count == 0
+            or compact_page_count < raw_page_count
+        )
 
     def _workflow_context_length(
         self,
@@ -593,6 +788,10 @@ class DashScopeAgent:
             "search_error": search_error,
             "search_results": search_items,
             "read_pages": pages,
+            "context_limited": False,
+            "context_note": (
+                "搜索结果或网页正文有限；如果材料不足以支持结论，请在最终回答中明确说明。"
+            ),
         }
         return len(json.dumps(payload, ensure_ascii=False))
 
@@ -706,16 +905,16 @@ class DashScopeAgent:
             "error": tool_result.error,
         }
         search_system_prompt = (
-            "你是一个严谨的联网研究助手。你已经获得 Tavily 搜索摘要和前 3 个网页的正文摘录。"
+            "你是一个严谨的联网研究助手。你已经获得 Tavily 搜索摘要和前几个网页的正文摘录。"
             "请只基于这些材料回答用户最初的问题，不要编造材料中没有的信息。"
             "需要对多个来源进行交叉总结，合并重复信息，并说明材料中的差异或不确定性。"
-            "如果搜索或网页读取信息不足，要明确说明哪些结论无法确认。"
+            "如果 JSON 中 context_limited 为 true，或搜索、网页读取信息不足，要明确说明哪些结论无法确认。"
             "最终回答必须使用中文，并包含以下四个部分："
             "一、结论；二、关键要点；三、详细解释；四、参考来源。"
             "参考来源必须使用 Markdown 链接格式：[标题](URL)。"
         )
         tool_context = (
-            "已完成多步骤联网搜索工作流：用户问题 -> Tavily 搜索 -> 读取前 3 个网页 -> 汇总材料。"
+            "已完成多步骤联网搜索工作流：用户问题 -> Tavily 搜索 -> 读取前几个网页 -> 汇总材料。"
             "请基于下面 JSON 中的搜索摘要和网页正文生成最终回答。\n"
             f"{json.dumps(payload, ensure_ascii=False)}"
         )
