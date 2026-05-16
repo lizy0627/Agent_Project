@@ -82,6 +82,59 @@ MODELSCOPE_DEFAULT_TOOL_CANDIDATES = (
     "search_model",
     "model_search",
 )
+MODELSCOPE_QUERY_NOISE_PHRASES = (
+    "相关模型",
+    "模型",
+    "搜索",
+    "帮我",
+    "魔搭",
+    "关于",
+)
+
+
+def extract_search_keyword(query: str) -> str:
+    """Extract the likely ModelScope search keyword from a Chinese request."""
+
+    cleaned = " ".join(str(query or "").strip().split())
+    if not cleaned:
+        return ""
+
+    patterns = (
+        r"搜索\s*(?P<keyword>.+?)(?:相关模型|模型)?(?:[。！？?!，,；;]|$)",
+        r"找\s*(?P<keyword>.+?)(?:相关模型|模型)(?:[。！？?!，,；;]|$)",
+        r"关于\s*(?P<keyword>.+?)(?:相关模型|模型)?(?:[。！？?!，,；;]|$)",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, cleaned, flags=re.IGNORECASE)
+        if match:
+            keyword = match.group("keyword").strip()
+            if keyword:
+                return keyword
+
+    return cleaned
+
+
+def normalize_query(query: str) -> str:
+    """Normalize a ModelScope search query before sending it to MCP."""
+
+    normalized = str(query or "").strip()
+    if not normalized:
+        return ""
+
+    normalized = re.sub(
+        r"\bqwen\s*-\s*(\d+)\b",
+        lambda match: f"Qwen{match.group(1)}",
+        normalized,
+        flags=re.IGNORECASE,
+    )
+    for phrase in MODELSCOPE_QUERY_NOISE_PHRASES:
+        normalized = normalized.replace(phrase, "")
+
+    normalized = re.sub(r"(?i)\bmodelscope\b", "", normalized)
+    normalized = re.sub(r"^[请麻烦帮忙我想要查找一下在上有关的\s]+", "", normalized)
+    normalized = re.sub(r"[。！？?!，,；;：:\s]+$", "", normalized)
+    normalized = " ".join(normalized.split())
+    return normalized.strip()
 
 
 @dataclass(frozen=True)
@@ -287,6 +340,56 @@ class DashScopeAgent:
             return None
 
         logger.info("Tool call planned: name=%s", planned_call.name)
+        if self._is_modelscope_mcp_call(planned_call):
+            return self._call_modelscope_mcp_tool(planned_call)
+
+        return self.tool_manager.call(planned_call.name, **planned_call.arguments)
+
+    def _is_modelscope_mcp_call(self, planned_call: PlannedToolCall) -> bool:
+        return (
+            planned_call.name == "mcp_tool"
+            and str(planned_call.arguments.get("server_name") or "").strip().lower() == "modelscope"
+        )
+
+    def _call_modelscope_mcp_tool(self, planned_call: PlannedToolCall) -> ToolResult:
+        original_query = str(planned_call.arguments.get("original_query") or "")
+        rewritten_query = str(planned_call.arguments.get("rewritten_query") or "")
+        mcp_arguments = planned_call.arguments.get("arguments")
+        base_mcp_arguments = mcp_arguments if isinstance(mcp_arguments, dict) else {}
+        fallback_queries = self._modelscope_query_fallbacks(rewritten_query)
+        if not fallback_queries:
+            fallback_queries = [rewritten_query or original_query]
+
+        logger.info("原问题: %s", original_query)
+        logger.info("重写后: %s", rewritten_query)
+
+        last_result: ToolResult | None = None
+        final_query = fallback_queries[0]
+        for index, query in enumerate(fallback_queries):
+            query_arguments = self._with_mcp_query_arguments(base_mcp_arguments, query)
+            call_arguments = {
+                key: value
+                for key, value in planned_call.arguments.items()
+                if key not in {"arguments", "original_query", "rewritten_query"}
+            }
+            call_arguments["arguments"] = query_arguments
+            last_result = self.tool_manager.call(planned_call.name, **call_arguments)
+            final_query = query
+
+            if not self._is_empty_modelscope_mcp_result(last_result):
+                break
+            if index < len(fallback_queries) - 1:
+                logger.info("ModelScope MCP result empty, fallback query: %s", fallback_queries[index + 1])
+
+        logger.info("降级后: %s", final_query)
+        if last_result is not None:
+            return self._with_modelscope_query_metadata(
+                last_result,
+                original_query=original_query,
+                rewritten_query=rewritten_query,
+                final_query=final_query,
+            )
+
         return self.tool_manager.call(planned_call.name, **planned_call.arguments)
 
     def _handle_search_workflow(
@@ -997,13 +1100,16 @@ class DashScopeAgent:
         if not tool_name:
             tool_name = MODELSCOPE_DEFAULT_TOOL_CANDIDATES[0]
 
-        arguments = self._build_mcp_tool_arguments(user_message, tool)
+        rewritten_query = normalize_query(extract_search_keyword(user_message)) or normalize_query(user_message)
+        arguments = self._build_mcp_tool_arguments(user_message, tool, rewritten_query)
         return PlannedToolCall(
             name="mcp_tool",
             arguments={
                 "server_name": server_name,
                 "tool_name": tool_name,
                 "arguments": arguments,
+                "original_query": user_message,
+                "rewritten_query": rewritten_query,
             },
         )
 
@@ -1069,17 +1175,23 @@ class DashScopeAgent:
     def _category_score(self, searchable: str, category_keywords: tuple[str, ...]) -> int:
         return 10 if any(keyword in searchable for keyword in category_keywords) else 0
 
-    def _build_mcp_tool_arguments(self, user_message: str, tool: dict[str, Any]) -> dict[str, Any]:
+    def _build_mcp_tool_arguments(
+        self,
+        user_message: str,
+        tool: dict[str, Any],
+        rewritten_query: str | None = None,
+    ) -> dict[str, Any]:
         input_schema = tool.get("inputSchema") or tool.get("input_schema") or {}
         properties = input_schema.get("properties", {}) if isinstance(input_schema, dict) else {}
+        query = rewritten_query or normalize_query(extract_search_keyword(user_message)) or user_message
         if not isinstance(properties, dict) or not properties:
-            return {"query": user_message}
+            return {"query": query}
 
         arguments: dict[str, Any] = {}
         for property_name, property_schema in properties.items():
             lowered_name = str(property_name).lower()
             if self._looks_like_query_argument(lowered_name):
-                arguments[property_name] = user_message
+                arguments[property_name] = query
                 continue
             if self._looks_like_limit_argument(lowered_name):
                 arguments[property_name] = 5
@@ -1093,11 +1205,129 @@ class DashScopeAgent:
         if isinstance(required, list):
             for property_name in required:
                 if property_name not in arguments:
-                    arguments[property_name] = user_message
+                    arguments[property_name] = query
 
         if not arguments:
-            arguments["query"] = user_message
+            arguments["query"] = query
         return arguments
+
+    def _with_mcp_query_arguments(self, arguments: dict[str, Any], query: str) -> dict[str, Any]:
+        updated = dict(arguments)
+        query_keys = [
+            key
+            for key in updated
+            if self._looks_like_query_argument(str(key).lower())
+        ]
+        if not query_keys:
+            updated["query"] = query
+            return updated
+
+        for key in query_keys:
+            updated[key] = query
+        return updated
+
+    def _modelscope_query_fallbacks(self, query: str) -> list[str]:
+        normalized = normalize_query(query)
+        candidates = [normalized] if normalized else []
+        if normalized.lower() == "qwen3":
+            candidates.extend(["Qwen", "Qwen2"])
+        return self._dedupe_nonempty(candidates)
+
+    def _dedupe_nonempty(self, values: list[str]) -> list[str]:
+        seen: set[str] = set()
+        deduped: list[str] = []
+        for value in values:
+            cleaned = value.strip()
+            if not cleaned:
+                continue
+            key = cleaned.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(cleaned)
+        return deduped
+
+    def _with_modelscope_query_metadata(
+        self,
+        tool_result: ToolResult,
+        original_query: str,
+        rewritten_query: str,
+        final_query: str,
+    ) -> ToolResult:
+        if isinstance(tool_result.result, dict):
+            result = dict(tool_result.result)
+            result["query_rewrite"] = {
+                "original": original_query,
+                "rewritten": rewritten_query,
+                "final": final_query,
+            }
+        else:
+            result = tool_result.result
+
+        return ToolResult(
+            name=tool_result.name,
+            success=tool_result.success,
+            result=result,
+            error=tool_result.error,
+            duration_ms=tool_result.duration_ms,
+        )
+
+    def _is_empty_modelscope_mcp_result(self, tool_result: ToolResult) -> bool:
+        if not tool_result.success:
+            return False
+        if isinstance(tool_result.result, dict) and tool_result.result.get("success") is False:
+            return False
+
+        status = self._modelscope_collection_status(tool_result.result)
+        return status is False
+
+    def _modelscope_collection_status(self, value: Any, from_collection_key: bool = False) -> bool | None:
+        parsed_value = self._parse_json_if_possible(value)
+        if parsed_value is not value:
+            return self._modelscope_collection_status(parsed_value, from_collection_key=from_collection_key)
+
+        if isinstance(value, dict):
+            for key in ("result", "results", "models", "model_list", "items"):
+                if key in value:
+                    status = self._modelscope_collection_status(value[key], from_collection_key=True)
+                    if status is not None:
+                        return status
+
+            for key in ("structuredContent", "structured_content", "data", "content", "text"):
+                if key in value:
+                    status = self._modelscope_collection_status(value[key])
+                    if status is not None:
+                        return status
+            return None
+
+        if isinstance(value, list):
+            if not value:
+                return False
+
+            child_statuses = [
+                self._modelscope_collection_status(item)
+                for item in value
+            ]
+            if any(status is True for status in child_statuses):
+                return True
+            if any(status is False for status in child_statuses):
+                return False
+            return True if from_collection_key else None
+
+        return None
+
+    def _parse_json_if_possible(self, value: Any) -> Any:
+        if not isinstance(value, str):
+            return value
+
+        stripped = value.strip()
+        if not stripped or stripped[0] not in "[{":
+            return value
+
+        try:
+            return json.loads(stripped)
+        except json.JSONDecodeError:
+            return value
 
     def _looks_like_query_argument(self, name: str) -> bool:
         query_keywords = ("query", "keyword", "keywords", "search", "q", "text", "name")
