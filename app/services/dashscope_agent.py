@@ -25,6 +25,7 @@ from app.core.errors import (
     UnknownAgentError,
 )
 from app.core.logger import get_logger
+from app.mcp.manager import MCPManager
 from app.tools import create_default_tool_manager
 from app.tools.base import ToolResult
 from app.tools.tool_manager import ToolManager
@@ -59,6 +60,27 @@ NOISY_PAGE_KEYWORDS = (
     "subscribe",
     "newsletter",
     "cookie policy",
+)
+MODELSCOPE_MCP_KEYWORDS = (
+    "魔搭",
+    "modelscope",
+    "模型",
+    "数据集",
+    "dataset",
+    "创空间",
+    "论文",
+    "paper",
+    "mcp服务",
+    "mcp 服务",
+    "qwen",
+    "通义千问",
+)
+MODELSCOPE_DEFAULT_TOOL_CANDIDATES = (
+    "search",
+    "modelscope_search",
+    "search_models",
+    "search_model",
+    "model_search",
 )
 
 
@@ -101,6 +123,7 @@ class DashScopeAgent:
         if not settings.dashscope_api_key:
             raise ApiKeyMissingError()
 
+        self.settings = settings
         self.client = OpenAI(
             api_key=settings.dashscope_api_key,
             base_url=settings.dashscope_base_url,
@@ -110,6 +133,7 @@ class DashScopeAgent:
         self.tool_manager = tool_manager or create_default_tool_manager(
             tavily_api_key=settings.tavily_api_key,
             web_search_provider=settings.web_search_provider,
+            mcp_enabled=settings.mcp_enabled,
         )
 
     def chat(self, messages: list[ChatMessage], model: str | None = None) -> AgentReply:
@@ -868,6 +892,10 @@ class DashScopeAgent:
                 arguments={"text": text_to_summarize},
             )
 
+        modelscope_mcp_call = self._plan_modelscope_mcp_tool(user_message)
+        if modelscope_mcp_call:
+            return modelscope_mcp_call
+
         if self._looks_like_search_request(user_message):
             return PlannedToolCall(
                 name="web_search",
@@ -920,6 +948,30 @@ class DashScopeAgent:
                 },
             ]
 
+        if tool_result.name == "mcp_tool":
+            mcp_system_prompt = (
+                "你正在基于 MCP 工具返回的结构化结果回答用户问题。必须遵守："
+                "1. 将工具结果整理成自然语言，不要直接复述 JSON；"
+                "2. 只基于 MCP 工具结果和用户问题回答，不编造工具结果中没有的信息；"
+                "3. 如果 MCP 调用失败，请友好说明失败原因，并建议检查 MCP Server 是否已启动、地址是否正确；"
+                "4. 最终回答使用中文，结构清晰。"
+            )
+            tool_context = (
+                "已先执行 MCP 工具调用。请根据下面的 JSON 工具结果回答用户最初的问题。\n"
+                f"{json.dumps(payload, ensure_ascii=False)}"
+            )
+            return [
+                *messages,
+                {
+                    "role": "system",
+                    "content": mcp_system_prompt,
+                },
+                {
+                    "role": "user",
+                    "content": tool_context,
+                },
+            ]
+
         tool_context = (
             "已先执行本地工具调用。请基于工具结果回答用户最初的问题；"
             "如果工具失败，请说明失败原因并给出可行的下一步。\n"
@@ -932,6 +984,137 @@ class DashScopeAgent:
                 "content": tool_context,
             },
         ]
+
+    def _plan_modelscope_mcp_tool(self, user_message: str) -> PlannedToolCall | None:
+        if not self.settings.mcp_enabled:
+            return None
+        if not self._looks_like_modelscope_mcp_request(user_message):
+            return None
+
+        server_name = self.settings.mcp_default_server or "modelscope"
+        tool = self._select_modelscope_tool(user_message, server_name)
+        tool_name = str(tool.get("name") or "").strip()
+        if not tool_name:
+            tool_name = MODELSCOPE_DEFAULT_TOOL_CANDIDATES[0]
+
+        arguments = self._build_mcp_tool_arguments(user_message, tool)
+        return PlannedToolCall(
+            name="mcp_tool",
+            arguments={
+                "server_name": server_name,
+                "tool_name": tool_name,
+                "arguments": arguments,
+            },
+        )
+
+    def _looks_like_modelscope_mcp_request(self, message: str) -> bool:
+        lowered = message.lower()
+        return any(keyword.lower() in lowered for keyword in MODELSCOPE_MCP_KEYWORDS)
+
+    def _select_modelscope_tool(self, user_message: str, server_name: str) -> dict[str, Any]:
+        try:
+            manager = MCPManager(
+                timeout_seconds=self.settings.mcp_timeout_seconds,
+                modelscope_url=self.settings.modelscope_mcp_url,
+            )
+            list_result = manager.client.list_tools(server_name)
+        except Exception as exc:
+            logger.warning("ModelScope MCP list_tools planning failed: %s", exc)
+            return {"name": MODELSCOPE_DEFAULT_TOOL_CANDIDATES[0]}
+
+        if not list_result.get("success"):
+            logger.warning("ModelScope MCP list_tools failed: error=%s", list_result.get("error"))
+            return {"name": MODELSCOPE_DEFAULT_TOOL_CANDIDATES[0]}
+
+        tools = (list_result.get("data") or {}).get("tools", [])
+        if not isinstance(tools, list) or not tools:
+            logger.warning("ModelScope MCP server returned no tools during planning")
+            return {"name": MODELSCOPE_DEFAULT_TOOL_CANDIDATES[0]}
+
+        selected_tool = max(
+            [tool for tool in tools if isinstance(tool, dict)],
+            key=lambda tool: self._modelscope_tool_score(user_message, tool),
+            default={},
+        )
+        logger.info(
+            "ModelScope MCP tool selected: tool=%s",
+            selected_tool.get("name") if isinstance(selected_tool, dict) else "",
+        )
+        return selected_tool if isinstance(selected_tool, dict) else {}
+
+    def _modelscope_tool_score(self, user_message: str, tool: dict[str, Any]) -> int:
+        lowered_message = user_message.lower()
+        tool_name = str(tool.get("name") or "").lower()
+        description = str(tool.get("description") or "").lower()
+        searchable = f"{tool_name} {description}"
+        score = 0
+
+        if "search" in searchable or "搜索" in searchable:
+            score += 20
+        if any(candidate in tool_name for candidate in MODELSCOPE_DEFAULT_TOOL_CANDIDATES):
+            score += 12
+        if any(keyword in lowered_message for keyword in ("模型", "model", "qwen", "通义千问")):
+            score += self._category_score(searchable, ("model", "模型"))
+        if any(keyword in lowered_message for keyword in ("数据集", "dataset")):
+            score += self._category_score(searchable, ("dataset", "数据集"))
+        if any(keyword in lowered_message for keyword in ("创空间", "space", "studio")):
+            score += self._category_score(searchable, ("space", "创空间", "studio"))
+        if any(keyword in lowered_message for keyword in ("论文", "paper")):
+            score += self._category_score(searchable, ("paper", "论文"))
+        if "mcp" in lowered_message:
+            score += self._category_score(searchable, ("mcp", "服务"))
+
+        return score
+
+    def _category_score(self, searchable: str, category_keywords: tuple[str, ...]) -> int:
+        return 10 if any(keyword in searchable for keyword in category_keywords) else 0
+
+    def _build_mcp_tool_arguments(self, user_message: str, tool: dict[str, Any]) -> dict[str, Any]:
+        input_schema = tool.get("inputSchema") or tool.get("input_schema") or {}
+        properties = input_schema.get("properties", {}) if isinstance(input_schema, dict) else {}
+        if not isinstance(properties, dict) or not properties:
+            return {"query": user_message}
+
+        arguments: dict[str, Any] = {}
+        for property_name, property_schema in properties.items():
+            lowered_name = str(property_name).lower()
+            if self._looks_like_query_argument(lowered_name):
+                arguments[property_name] = user_message
+                continue
+            if self._looks_like_limit_argument(lowered_name):
+                arguments[property_name] = 5
+                continue
+
+            default_value = self._schema_default_value(property_schema)
+            if default_value is not None:
+                arguments[property_name] = default_value
+
+        required = input_schema.get("required", []) if isinstance(input_schema, dict) else []
+        if isinstance(required, list):
+            for property_name in required:
+                if property_name not in arguments:
+                    arguments[property_name] = user_message
+
+        if not arguments:
+            arguments["query"] = user_message
+        return arguments
+
+    def _looks_like_query_argument(self, name: str) -> bool:
+        query_keywords = ("query", "keyword", "keywords", "search", "q", "text", "name")
+        return any(keyword in name for keyword in query_keywords)
+
+    def _looks_like_limit_argument(self, name: str) -> bool:
+        limit_keywords = ("limit", "count", "size", "page_size", "max_results", "top_k")
+        return any(keyword in name for keyword in limit_keywords)
+
+    def _schema_default_value(self, schema: Any) -> Any:
+        if not isinstance(schema, dict):
+            return None
+        if "default" in schema:
+            return schema["default"]
+        if "enum" in schema and isinstance(schema["enum"], list) and schema["enum"]:
+            return schema["enum"][0]
+        return None
 
     def _messages_with_search_workflow_result(
         self,

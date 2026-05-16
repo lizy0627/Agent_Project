@@ -11,7 +11,7 @@
 - **配置管理**：Pydantic Settings + `.env`
 - **前端实现**：原生 HTML、CSS、JavaScript
 - **会话管理**：后端内存会话历史 + 前端 `localStorage`
-- **工具系统**：自定义 `ToolManager`，支持工具注册、调用、日志和异常隔离
+- **工具系统**：自定义 `ToolManager`，支持本地工具和 MCP 工具注册、调用、日志和异常隔离
 - **运行服务**：Uvicorn
 
 ## 功能列表
@@ -28,6 +28,8 @@
   - `summarize_text`：总结文本内容
   - `web_search`：通过 Tavily Search API 进行联网搜索
   - `web_reader`：读取搜索结果网页正文，用于多来源综合总结
+  - `mcp_tool`：调用已配置 MCP Server 暴露的工具
+- 支持通过 `app/mcp/servers.json` 配置多个 MCP Server，默认包含 ModelScope MCP Server
 - 联网搜索工作流默认搜索 3 条结果，并读取前 2 个网页正文用于最终总结
 - 工具调用过程带日志，便于调试
 - 工具失败不会导致服务崩溃，会将失败信息交给模型生成最终回复
@@ -47,6 +49,12 @@
 │   │   ├── config.py
 │   │   ├── errors.py
 │   │   └── logger.py
+│   ├── mcp
+│   │   ├── __init__.py
+│   │   ├── client.py
+│   │   ├── config.py
+│   │   ├── manager.py
+│   │   └── servers.json
 │   ├── schemas
 │   │   ├── __init__.py
 │   │   └── chat.py
@@ -58,6 +66,7 @@
 │   │   ├── __init__.py
 │   │   ├── base.py
 │   │   ├── calculator.py
+│   │   ├── mcp_tool.py
 │   │   ├── summarize_text.py
 │   │   ├── time_tool.py
 │   │   ├── web_reader.py
@@ -68,6 +77,9 @@
 │   ├── index.html
 │   ├── main.js
 │   └── style.css
+├── scripts
+│   ├── test_mcp_connection.py
+│   └── test_mcp_tool_call.py
 ├── .env.example
 ├── .gitignore
 ├── main.py
@@ -129,6 +141,11 @@ DASHSCOPE_MODEL=qwen-plus
 DASHSCOPE_TIMEOUT_SECONDS=30
 TAVILY_API_KEY=your_tavily_api_key_here
 WEB_SEARCH_PROVIDER=tavily
+MCP_ENABLED=true
+MCP_DEFAULT_SERVER=modelscope
+MODELSCOPE_API_TOKEN=
+MODELSCOPE_MCP_URL=http://127.0.0.1:8001/mcp
+MCP_TIMEOUT_SECONDS=20
 ```
 
 说明：
@@ -139,6 +156,11 @@ WEB_SEARCH_PROVIDER=tavily
 - `DASHSCOPE_TIMEOUT_SECONDS`：模型请求超时时间，单位为秒
 - `TAVILY_API_KEY`：Tavily Search API Key，请填写自己的 Key，不要提交到 GitHub
 - `WEB_SEARCH_PROVIDER`：联网搜索提供商，当前支持 `tavily`
+- `MCP_ENABLED`：是否启用 MCP 工具层
+- `MCP_DEFAULT_SERVER`：默认 MCP Server，初始值为 `modelscope`
+- `MODELSCOPE_API_TOKEN`：ModelScope 访问令牌，按你启动 ModelScope MCP Server 的方式配置
+- `MODELSCOPE_MCP_URL`：ModelScope MCP Server 的 Streamable HTTP 地址
+- `MCP_TIMEOUT_SECONDS`：MCP 连接和工具调用超时时间，单位为秒
 
 ### 5. 启动服务
 
@@ -201,6 +223,113 @@ curl -X POST "http://127.0.0.1:8000/chat" \
 6. 工具异常会被捕获并写入日志，不会中断整个服务
 
 这种设计便于后续扩展更多工具，例如网页搜索、数据库查询、文件分析、代码执行沙箱等。
+
+## MCP 工具接入
+
+MCP（Model Context Protocol）是一套让 Agent 以统一协议连接外部工具和数据源的标准。接入 MCP 后，本项目可以在保留原有 `ToolManager` 的基础上，把外部 MCP Server 暴露的能力包装成一个普通工具 `mcp_tool`，继续沿用现有的工具调用、日志和异常隔离流程。
+
+本项目适合接入 MCP 的原因：
+
+- 已经有轻量级规则规划器，可以根据用户问题决定是否调用工具
+- 已经有统一 `ToolManager`，MCP 只需要作为新工具层接入
+- `/chat` 和 `/chat/stream` 都会把工具结果加入模型上下文，再由 DashScope 生成自然语言回复
+- 未来可以继续加入 amap、filesystem、github、database、browser 等 MCP Server
+
+默认 MCP 配置位于 `app/mcp/servers.json`：
+
+```json
+{
+  "modelscope": {
+    "name": "ModelScope MCP Server",
+    "transport": "http",
+    "url": "http://127.0.0.1:8001/mcp",
+    "enabled": true,
+    "description": "用于搜索魔搭模型、数据集、创空间、论文和 MCP 服务"
+  }
+}
+```
+
+`.env` 中可以覆盖 ModelScope MCP 地址：
+
+```env
+MCP_ENABLED=true
+MCP_DEFAULT_SERVER=modelscope
+MODELSCOPE_API_TOKEN=
+MODELSCOPE_MCP_URL=http://127.0.0.1:8001/mcp
+MCP_TIMEOUT_SECONDS=20
+```
+
+### 启动 ModelScope MCP Server
+
+请先按 ModelScope MCP Server 官方文档在本地启动服务。官方示例支持 Streamable HTTP transport，可以用下面的方式把端口改成本项目默认的 `8001`：
+
+```bash
+export MODELSCOPE_API_TOKEN="your-modelscope-token"
+uv run modelscope-mcp-server --transport http --port 8001
+```
+
+Windows PowerShell:
+
+```powershell
+$env:MODELSCOPE_API_TOKEN="your-modelscope-token"
+uv run modelscope-mcp-server --transport http --port 8001
+```
+
+启动后确认它监听：
+
+```text
+http://127.0.0.1:8001/mcp
+```
+
+如果你的服务地址不同，修改 `.env` 中的 `MODELSCOPE_MCP_URL`，或修改 `app/mcp/servers.json` 中 `modelscope.url`。ModelScope 官方 README 中的默认 HTTP URL 是 `http://127.0.0.1:8000/mcp/`，本项目为了避免和 FastAPI 主服务冲突，默认使用 `8001`。
+
+### 测试 MCP 连接
+
+启动 ModelScope MCP Server 后，在项目根目录运行：
+
+```bash
+python scripts/test_mcp_connection.py
+```
+
+脚本会连接 `http://127.0.0.1:8001/mcp` 并打印工具列表。
+
+测试一次真实工具调用：
+
+```bash
+python scripts/test_mcp_tool_call.py
+```
+
+脚本会以“搜索 Qwen3 相关模型”为示例，自动选择 ModelScope MCP 中最匹配的搜索工具，并输出原始工具结果。
+
+### 在聊天页面使用
+
+启动后端和 ModelScope MCP Server 后，打开 <http://127.0.0.1:8000/ui>，输入类似问题：
+
+```text
+搜索 Qwen3 相关模型
+帮我查一下 ModelScope 上有哪些通义千问相关数据集
+找几篇 Qwen 相关论文
+```
+
+当问题包含“魔搭、ModelScope、模型、数据集、dataset、创空间、论文、paper、MCP服务、Qwen、通义千问”等关键词时，Agent 会优先尝试调用 `modelscope` MCP Server。若 MCP 调用失败，回复会提示检查 MCP Server 是否启动、地址是否正确。
+
+### 添加新的 MCP Server
+
+在 `app/mcp/servers.json` 中添加新的服务配置即可，例如：
+
+```json
+{
+  "github": {
+    "name": "GitHub MCP Server",
+    "transport": "http",
+    "url": "http://127.0.0.1:8002/mcp",
+    "enabled": true,
+    "description": "用于查询 GitHub 仓库、Issue 和 Pull Request"
+  }
+}
+```
+
+新增后可以通过 `MCPManager.list_all_tools()` 查看所有工具，通过 `MCPManager.call_tool(server_name, tool_name, arguments)` 调用指定工具。若要让聊天自动触发新 Server，可以在 `app/services/dashscope_agent.py` 的规则规划器中补充关键词和工具选择逻辑。
 
 ## 界面截图
 

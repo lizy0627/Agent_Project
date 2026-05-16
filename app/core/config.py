@@ -27,6 +27,11 @@ class Settings(BaseSettings):
     dashscope_timeout_seconds: float = 30.0
     tavily_api_key: str | None = None
     web_search_provider: str = "tavily"
+    mcp_enabled: bool = True
+    mcp_default_server: str = "modelscope"
+    modelscope_api_token: str | None = None
+    modelscope_mcp_url: str = "http://127.0.0.1:8001/mcp"
+    mcp_timeout_seconds: int = 20
 
     model_config = SettingsConfigDict(
         env_file=".env",

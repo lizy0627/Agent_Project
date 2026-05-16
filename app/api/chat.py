@@ -18,7 +18,7 @@ logger = get_logger(__name__)
 conversation_store = ConversationStore(max_rounds=30)
 agent_lock = Lock()
 cached_agent: DashScopeAgent | None = None
-cached_agent_signature: tuple[str | None, str, str, float, str | None, str] | None = None
+cached_agent_signature: tuple[str | None, str, str, float, str | None, str, bool, str, int] | None = None
 DEFAULT_SYSTEM_PROMPT = "\u4f60\u662f\u4e00\u4e2a\u7b80\u6d01\u3001\u53ef\u9760\u7684\u4e2d\u6587 AI \u52a9\u624b\u3002"
 WEB_SEARCH_STATUS_SEARCHING = "正在联网搜索..."
 WEB_SEARCH_STATUS_ORGANIZING = "正在搜索并整理资料..."
@@ -69,6 +69,9 @@ def get_agent(settings: Settings = Depends(get_settings)) -> DashScopeAgent:
         settings.dashscope_timeout_seconds,
         settings.tavily_api_key,
         settings.web_search_provider,
+        settings.mcp_enabled,
+        settings.modelscope_mcp_url,
+        settings.mcp_timeout_seconds,
     )
     with agent_lock:
         if cached_agent is None or cached_agent_signature != signature:

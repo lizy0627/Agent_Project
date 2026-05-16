@@ -1,0 +1,9 @@
+{
+  "modelscope": {
+    "name": "ModelScope MCP Server",
+    "transport": "http",
+    "url": "http://127.0.0.1:8001/mcp",
+    "enabled": true,
+    "description": "用于搜索魔搭模型、数据集、创空间、论文和 MCP 服务"
+  }
+}
