@@ -220,10 +220,19 @@ class DashScopeAgent:
     ) -> AgentReply:
         """Run search, read top pages, and ask the model to synthesize an answer."""
 
+        query = str(planned_call.arguments.get("query", self._latest_user_message(messages)))
+        logger.info("Search workflow started: query=%s", query[:200])
         search_result = self._call_search_workflow_tool("web_search", **planned_call.arguments)
         workflow_step_results = [search_result]
         search_payload = search_result.result if isinstance(search_result.result, dict) else {}
         search_items = search_payload.get("results", []) if search_result.success else []
+        search_result_count = len(search_items) if isinstance(search_items, list) else 0
+        logger.info(
+            "Search workflow web_search finished: success=%s result_count=%s error=%s",
+            search_result.success,
+            search_result_count,
+            search_result.error,
+        )
 
         pages: list[dict[str, Any]] = []
         if isinstance(search_items, list):
@@ -237,6 +246,12 @@ class DashScopeAgent:
 
                 reader_result = self._call_search_workflow_tool("web_reader", url=url)
                 workflow_step_results.append(reader_result)
+                logger.info(
+                    "Search workflow web_reader finished: url=%s success=%s error=%s",
+                    url,
+                    reader_result.success,
+                    reader_result.error,
+                )
                 page_content = ""
                 final_url = url
                 if reader_result.success and isinstance(reader_result.result, dict):
@@ -256,7 +271,7 @@ class DashScopeAgent:
                 )
 
         workflow_payload = {
-            "query": planned_call.arguments.get("query", self._latest_user_message(messages)),
+            "query": query,
             "search_success": search_result.success,
             "search_error": search_result.error,
             "search_results": search_items,
@@ -271,6 +286,12 @@ class DashScopeAgent:
             duration_ms=workflow_duration_ms,
         )
         model_messages = self._messages_with_search_workflow_result(messages, workflow_result)
+        logger.info(
+            "Search workflow summary prepared: search_success=%s read_pages=%s successful_reads=%s",
+            search_result.success,
+            len(pages),
+            sum(1 for page in pages if page.get("read_success")),
+        )
         reply = self._complete_chat(model_messages, model=model)
         return AgentReply(content=reply, tool_result=workflow_result)
 
@@ -315,7 +336,11 @@ class DashScopeAgent:
         if self._looks_like_search_request(user_message):
             return PlannedToolCall(
                 name="web_search",
-                arguments={"query": user_message, "max_results": 5},
+                arguments={
+                    "query": user_message,
+                    "max_results": 5,
+                    "search_depth": "basic",
+                },
             )
 
         return None
@@ -336,12 +361,13 @@ class DashScopeAgent:
         }
         if tool_result.name == "web_search":
             search_system_prompt = (
-                "你正在基于联网搜索结果回答用户问题。必须遵守："
-                "1. 只基于搜索结果回答，不编造搜索结果中没有的信息；"
-                "2. 对多个来源进行交叉总结，合并重复信息，指出关键信息差异；"
-                "3. 如果搜索结果不足、冲突或无法支持结论，要明确说明信息不足；"
-                "4. 使用中文分点回答，结构清晰；"
-                "5. 最后列出“参考来源”，来源格式必须是 [标题](URL)。"
+                "你正在基于 web_search 返回的 Tavily 搜索结果回答用户问题。必须遵守："
+                "1. 将搜索结果整理成自然语言回答，不要直接输出或复述 JSON；"
+                "2. 只基于搜索结果回答，不编造搜索结果中没有的信息；"
+                "3. 对多个来源进行交叉总结，合并重复信息，指出关键信息差异；"
+                "4. 如果搜索结果不足、冲突或无法支持结论，要明确说明信息不足；"
+                "5. 使用中文分点总结，结构清晰；"
+                "6. 最后列出“参考来源”，来源格式必须是 [标题](URL)。"
             )
             tool_context = (
                 "已先执行 web_search 联网搜索工具。请根据下面的 JSON 搜索结果回答用户最初的问题。\n"
@@ -510,13 +536,9 @@ class DashScopeAgent:
         if lowered in casual_phrases:
             return False
 
-        strong_keywords = (
-            "联网搜索",
-            "网络搜索",
-            "网上搜索",
+        chinese_keywords = (
             "搜索",
             "查一下",
-            "帮我查",
             "联网",
             "最新",
             "新闻",
@@ -525,19 +547,29 @@ class DashScopeAgent:
             "最近",
             "价格",
             "github",
-            "项目",
             "论文",
             "教程",
+        )
+        english_keywords = (
             "search",
             "latest",
             "news",
             "current",
-            "today",
             "recent",
+            "github",
             "website",
             "official",
             "price",
         )
+        extra_search_keywords = (
+            "联网搜索",
+            "网络搜索",
+            "网上搜索",
+            "帮我查",
+            "项目",
+            "today",
+        )
+        strong_keywords = chinese_keywords + english_keywords + extra_search_keywords
         if any(keyword in lowered for keyword in strong_keywords):
             return True
 

@@ -16,6 +16,6 @@ def create_default_tool_manager(
     manager.register(CurrentTimeTool())
     manager.register(CalculateTool())
     manager.register(SummarizeTextTool())
-    manager.register(WebSearchTool(api_key=tavily_api_key, provider=web_search_provider))
+    manager.register(WebSearchTool())
     manager.register(WebReaderTool())
     return manager

@@ -892,7 +892,7 @@ function createReferenceSourceList(message) {
     return null;
   }
 
-  const sources = extractReferenceSources(message.toolResult);
+  const sources = extractReferenceSources(message.toolResult, message.content);
   if (sources.length === 0) {
     return null;
   }
@@ -923,13 +923,14 @@ function createReferenceSourceList(message) {
   return wrapper;
 }
 
-function extractReferenceSources(toolResult) {
+function extractReferenceSources(toolResult, content = "") {
   const root = normalizeToolResultRoot(toolResult);
   const candidates = [];
 
   appendSourceCandidates(candidates, root.read_pages);
   appendSourceCandidates(candidates, root.search_results);
   appendSourceCandidates(candidates, root.results);
+  appendMarkdownSourceCandidates(candidates, content);
 
   const seen = new Set();
   return candidates.filter((source) => {
@@ -972,6 +973,18 @@ function appendSourceCandidates(candidates, items) {
     const title = String(item.title || item.url || "").trim();
     candidates.push({ title, url });
   });
+}
+
+function appendMarkdownSourceCandidates(candidates, content) {
+  const pattern = /\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g;
+  let match;
+
+  while ((match = pattern.exec(String(content || ""))) !== null) {
+    candidates.push({
+      title: match[1].trim(),
+      url: match[2].trim(),
+    });
+  }
 }
 
 function getToolDisplayResult(message) {
@@ -1731,6 +1744,40 @@ async function requestStreamingAgentReply(
   let reply = "";
   let metadata = {};
   let done = {};
+  const handleStreamEvent = (event) => {
+    if (!event) {
+      return;
+    }
+
+    if (event.event === "metadata") {
+      metadata = event.data || {};
+      if (typeof onToolMetadata === "function") {
+        onToolMetadata(normalizeToolMetadata(metadata));
+      }
+      return;
+    }
+
+    if (event.event === "chunk") {
+      const content = event.data?.content || "";
+      reply += content;
+      if (typeof onChunk === "function") {
+        onChunk(content, reply);
+      }
+      return;
+    }
+
+    if (event.event === "done") {
+      done = event.data || {};
+      if (typeof onToolMetadata === "function") {
+        onToolMetadata(normalizeToolMetadata(done));
+      }
+      return;
+    }
+
+    if (event.event === "error") {
+      throw new Error(toFriendlyError(event.data?.error));
+    }
+  };
 
   while (true) {
     const { value, done: readerDone } = await reader.read();
@@ -1743,47 +1790,12 @@ async function requestStreamingAgentReply(
     buffer = parts.pop() || "";
 
     parts.forEach((part) => {
-      const event = parseSseEvent(part);
-      if (!event) {
-        return;
-      }
-
-      if (event.event === "metadata") {
-        metadata = event.data || {};
-        if (typeof onToolMetadata === "function") {
-          onToolMetadata(normalizeToolMetadata(metadata));
-        }
-        return;
-      }
-
-      if (event.event === "chunk") {
-        const content = event.data?.content || "";
-        reply += content;
-        if (typeof onChunk === "function") {
-          onChunk(content, reply);
-        }
-        return;
-      }
-
-      if (event.event === "done") {
-        done = event.data || {};
-        if (typeof onToolMetadata === "function") {
-          onToolMetadata(normalizeToolMetadata(done));
-        }
-        return;
-      }
-
-      if (event.event === "error") {
-        throw new Error(toFriendlyError(event.data?.error));
-      }
+      handleStreamEvent(parseSseEvent(part));
     });
   }
 
   if (buffer.trim()) {
-    const event = parseSseEvent(buffer);
-    if (event?.event === "error") {
-      throw new Error(toFriendlyError(event.data?.error));
-    }
+    handleStreamEvent(parseSseEvent(buffer));
   }
 
   return {
@@ -1791,12 +1803,12 @@ async function requestStreamingAgentReply(
     reply,
     model: done.model || metadata.model || "",
     conversationId: done.conversation_id || metadata.conversation_id || fallbackConversationId,
-    usedTool: metadata.used_tool ?? done.used_tool ?? false,
-    toolName: metadata.tool_name ?? done.tool_name,
-    toolStatus: metadata.tool_status ?? done.tool_status,
-    toolResult: metadata.tool_result ?? done.tool_result,
-    toolError: metadata.tool_error ?? done.tool_error,
-    toolDurationMs: metadata.tool_duration_ms ?? done.tool_duration_ms,
+    usedTool: done.used_tool ?? metadata.used_tool ?? false,
+    toolName: done.tool_name ?? metadata.tool_name,
+    toolStatus: done.tool_status ?? metadata.tool_status,
+    toolResult: done.tool_result ?? metadata.tool_result,
+    toolError: done.tool_error ?? metadata.tool_error,
+    toolDurationMs: done.tool_duration_ms ?? metadata.tool_duration_ms,
   };
 }
 
