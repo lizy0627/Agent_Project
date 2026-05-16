@@ -22,6 +22,11 @@ const AUTO_SCROLL_THRESHOLD_PX = 200;
 const WEB_SEARCH_STATUS_SEARCHING = "正在联网搜索...";
 const WEB_SEARCH_STATUS_ORGANIZING = "正在搜索并整理资料...";
 const WEB_SEARCH_STATUS_DONE = "已联网搜索";
+const WEB_SEARCH_STATUS_MESSAGES = new Set([
+  WEB_SEARCH_STATUS_SEARCHING,
+  WEB_SEARCH_STATUS_ORGANIZING,
+  WEB_SEARCH_STATUS_DONE,
+]);
 const CHAT_FAILURE_MESSAGE = "请求失败，请检查后端服务或 API Key";
 const DEFAULT_MODE = "通用助手";
 const DEFAULT_THEME = "light";
@@ -1544,6 +1549,11 @@ function getToolStatusContent(metadata) {
   return null;
 }
 
+function normalizeStreamStatusMessage(message) {
+  const normalized = String(message || "").trim();
+  return WEB_SEARCH_STATUS_MESSAGES.has(normalized) ? normalized : "";
+}
+
 // Input state
 
 function maybeRenameConversation(text) {
@@ -1807,7 +1817,7 @@ async function requestStreamingAgentReply(
     }
 
     if (event.event === "status") {
-      const message = String(event.data?.message || "").trim();
+      const message = normalizeStreamStatusMessage(event.data?.message);
       if (message && typeof onStatus === "function") {
         onStatus(message);
       }
@@ -1952,6 +1962,22 @@ async function regenerateAgentReply(messageId) {
   const loadingMessage = createMessage("agent", initialLoadingText, "loading");
   let hasReceivedFirstChunk = false;
   let searchStatusTimer = null;
+  const updateLoadingStatus = (statusMessage) => {
+    const normalizedStatus = normalizeStreamStatusMessage(statusMessage);
+    if (hasReceivedFirstChunk || !normalizedStatus) {
+      return;
+    }
+    if (searchStatusTimer) {
+      window.clearTimeout(searchStatusTimer);
+      searchStatusTimer = null;
+    }
+    updateMessage(loadingMessage.id, {
+      type: "loading",
+      role: "agent",
+      content: normalizedStatus,
+      createdAt: getCurrentTime(),
+    });
+  };
   const requestContext = {
     targetConversationId: conversationId,
     targetMode: currentMode,
@@ -1977,15 +2003,7 @@ async function regenerateAgentReply(messageId) {
       updateMessage(loadingMessage.id, metadataUpdates);
     },
     onStatus: (statusMessage) => {
-      if (hasReceivedFirstChunk || !statusMessage) {
-        return;
-      }
-      updateMessage(loadingMessage.id, {
-        type: "loading",
-        role: "agent",
-        content: statusMessage,
-        createdAt: getCurrentTime(),
-      });
+      updateLoadingStatus(statusMessage);
     },
     onChunk: (chunk, partialReply) => {
       hasReceivedFirstChunk = true;
@@ -2214,6 +2232,22 @@ async function sendCurrentMessage() {
 
   let hasReceivedFirstChunk = false;
   let searchStatusTimer = null;
+  const updateLoadingStatus = (statusMessage) => {
+    const normalizedStatus = normalizeStreamStatusMessage(statusMessage);
+    if (hasReceivedFirstChunk || !normalizedStatus) {
+      return;
+    }
+    if (searchStatusTimer) {
+      window.clearTimeout(searchStatusTimer);
+      searchStatusTimer = null;
+    }
+    updateMessage(loadingMessage.id, {
+      type: "loading",
+      role: "agent",
+      content: normalizedStatus,
+      createdAt: getCurrentTime(),
+    });
+  };
   if (likelyWebSearch && streamingEnabled) {
     searchStatusTimer = window.setTimeout(() => {
       if (!hasReceivedFirstChunk) {
@@ -2258,15 +2292,7 @@ async function sendCurrentMessage() {
         updateMessage(loadingMessage.id, metadataUpdates);
       },
       onStatus: (statusMessage) => {
-        if (hasReceivedFirstChunk || !statusMessage) {
-          return;
-        }
-        updateMessage(loadingMessage.id, {
-          type: "loading",
-          role: "agent",
-          content: statusMessage,
-          createdAt: getCurrentTime(),
-        });
+        updateLoadingStatus(statusMessage);
       },
       onChunk: (chunk, partialReply) => {
         hasReceivedFirstChunk = true;

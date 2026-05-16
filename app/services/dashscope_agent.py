@@ -34,10 +34,11 @@ logger = get_logger(__name__)
 ChatMessage = dict[str, str]
 DEFAULT_WEB_SEARCH_MAX_RESULTS = 3
 DEFAULT_SEARCH_WORKFLOW_READ_TOP_K = 2
-MAX_SEARCH_WORKFLOW_READ_TOP_K = 3
+MAX_SEARCH_WORKFLOW_READ_TOP_K = 2
 WEB_SEARCH_TOOL_ARGUMENTS = {"query", "max_results", "search_depth"}
 MAX_SEARCH_SUMMARY_RESULTS = 3
-MAX_PAGE_CONTENT_CHARS = 2800
+MAX_PAGE_SUMMARY_RESULTS = 2
+MAX_PAGE_CONTENT_CHARS = 2500
 MIN_PAGE_CONTENT_CHARS = 800
 MAX_SEARCH_CONTEXT_CHARS = 8000
 MAX_SEARCH_SNIPPET_CHARS = 500
@@ -90,6 +91,7 @@ class SearchWorkflowPerformance:
     reader_seconds: float = 0.0
     success_pages: int = 0
     failed_pages: int = 0
+    cache_hit_count: int = 0
 
 
 class DashScopeAgent:
@@ -311,8 +313,10 @@ class DashScopeAgent:
         """Prepare search context and collect performance metrics."""
 
         workflow_started_at = perf_counter()
-        query = str(planned_call.arguments.get("query", self._latest_user_message(messages)))
+        user_message = self._latest_user_message(messages)
+        query = str(planned_call.arguments.get("query", user_message))
         search_kwargs = self._web_search_tool_arguments(planned_call.arguments, query=query)
+        should_read_pages = self._should_read_web_pages(user_message or query)
         read_top_k = min(
             self._positive_int(
                 planned_call.arguments.get("read_top_k"),
@@ -325,6 +329,7 @@ class DashScopeAgent:
         search_result = self._call_search_workflow_tool("web_search", **search_kwargs)
         search_cost = self._elapsed_seconds(search_started_at)
         workflow_step_results = [search_result]
+        cache_hit_count = 1 if self._is_cache_hit(search_result) else 0
         search_payload = search_result.result if isinstance(search_result.result, dict) else {}
         search_items = search_payload.get("results", []) if search_result.success else []
         search_result_count = len(search_items) if isinstance(search_items, list) else 0
@@ -340,7 +345,12 @@ class DashScopeAgent:
         reader_cost = 0.0
         selected_page_count = 0
         successful_reader_count = 0
-        if isinstance(search_items, list):
+        if should_read_pages:
+            logger.info("[SearchWorkflow] read web pages because deep analysis query")
+        else:
+            logger.info("[SearchWorkflow] skip web_reader because simple search query")
+
+        if should_read_pages and isinstance(search_items, list):
             selected_items = self._select_search_items_for_reading(search_items, read_top_k)
             selected_page_count = len(selected_items)
             logger.info(
@@ -359,6 +369,8 @@ class DashScopeAgent:
             )
             for item, reader_result in reader_pairs:
                 workflow_step_results.append(reader_result)
+                if self._is_cache_hit(reader_result):
+                    cache_hit_count += 1
                 if not reader_result.success:
                     logger.warning(
                         "Search workflow web_reader failed, skipped: url=%s error=%s",
@@ -400,6 +412,7 @@ class DashScopeAgent:
             search_items=search_items if isinstance(search_items, list) else [],
             pages=pages,
             max_context_chars=MAX_SEARCH_CONTEXT_CHARS,
+            web_pages_read=should_read_pages,
         )
         workflow_payload = {
             "query": query,
@@ -407,14 +420,16 @@ class DashScopeAgent:
             "search_error": search_result.error,
             "search_results": compact_search_items,
             "read_pages": compact_pages,
+            "web_pages_read": should_read_pages,
             "context_limited": self._is_search_context_limited(
                 search_result_count=search_result_count,
                 compact_search_count=len(compact_search_items),
                 raw_page_count=len(pages),
                 compact_page_count=len(compact_pages),
+                web_pages_read=should_read_pages,
             ),
             "context_note": (
-                "搜索结果或网页正文有限；如果材料不足以支持结论，请在最终回答中明确说明。"
+                "搜索结果有限；如果材料不足以支持结论，请在最终回答中明确说明。"
             ),
         }
         context_length = len(json.dumps(workflow_payload, ensure_ascii=False))
@@ -447,6 +462,7 @@ class DashScopeAgent:
             reader_seconds=reader_cost,
             success_pages=successful_reader_count,
             failed_pages=max(selected_page_count - successful_reader_count, 0),
+            cache_hit_count=cache_hit_count,
         )
         return model_messages, workflow_result, performance
 
@@ -470,13 +486,17 @@ class DashScopeAgent:
         llm_seconds: float,
     ) -> None:
         logger.info(
-            "[SearchWorkflow] total=%.2fs search=%.2fs reader=%.2fs llm=%.2fs success_pages=%s failed_pages=%s",
+            (
+                "[SearchWorkflow] total=%.2fs search=%.2fs reader=%.2fs llm=%.2fs "
+                "success_pages=%s failed_pages=%s cache_hits=%s"
+            ),
             self._elapsed_seconds(performance.started_at),
             performance.search_seconds,
             performance.reader_seconds,
             llm_seconds,
             performance.success_pages,
             performance.failed_pages,
+            performance.cache_hit_count,
         )
 
     def _call_search_workflow_tool(self, name: str, **kwargs: Any) -> ToolResult:
@@ -556,6 +576,9 @@ class DashScopeAgent:
     def _sum_tool_durations(self, results: list[ToolResult]) -> float:
         return round(sum(result.duration_ms or 0 for result in results), 2)
 
+    def _is_cache_hit(self, result: ToolResult) -> bool:
+        return isinstance(result.result, dict) and result.result.get("cached") is True
+
     def _elapsed_seconds(self, started_at: float) -> float:
         return round(perf_counter() - started_at, 2)
 
@@ -565,6 +588,10 @@ class DashScopeAgent:
         }
         tool_arguments["query"] = query
         tool_arguments.setdefault("max_results", DEFAULT_WEB_SEARCH_MAX_RESULTS)
+        tool_arguments["max_results"] = min(
+            self._positive_int(tool_arguments.get("max_results"), DEFAULT_WEB_SEARCH_MAX_RESULTS),
+            MAX_SEARCH_SUMMARY_RESULTS,
+        )
         tool_arguments.setdefault("search_depth", "basic")
         return tool_arguments
 
@@ -633,6 +660,7 @@ class DashScopeAgent:
         search_items: list[Any],
         pages: list[dict[str, Any]],
         max_context_chars: int,
+        web_pages_read: bool,
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         compact_search_items = self._compact_search_results(search_items)
         compact_pages = self._compact_pages(pages)
@@ -643,6 +671,7 @@ class DashScopeAgent:
             search_error,
             compact_search_items,
             compact_pages,
+            web_pages_read,
         ) > max_context_chars:
             if self._trim_longest_page_content(compact_pages):
                 continue
@@ -676,6 +705,8 @@ class DashScopeAgent:
         compact_pages: list[dict[str, Any]] = []
         seen_urls: set[str] = set()
         for page in sorted(pages, key=self._search_score, reverse=True):
+            if len(compact_pages) >= MAX_PAGE_SUMMARY_RESULTS:
+                break
             if not page.get("read_success"):
                 continue
             url = str(page.get("url") or "").strip()
@@ -766,12 +797,19 @@ class DashScopeAgent:
         compact_search_count: int,
         raw_page_count: int,
         compact_page_count: int,
+        web_pages_read: bool,
     ) -> bool:
         return (
             search_result_count == 0
             or compact_search_count < search_result_count
-            or compact_page_count == 0
-            or compact_page_count < raw_page_count
+            or (
+                web_pages_read
+                and (
+                    raw_page_count == 0
+                    or compact_page_count == 0
+                    or compact_page_count < raw_page_count
+                )
+            )
         )
 
     def _workflow_context_length(
@@ -781,6 +819,7 @@ class DashScopeAgent:
         search_error: str | None,
         search_items: list[dict[str, Any]],
         pages: list[dict[str, Any]],
+        web_pages_read: bool,
     ) -> int:
         payload = {
             "query": query,
@@ -788,9 +827,10 @@ class DashScopeAgent:
             "search_error": search_error,
             "search_results": search_items,
             "read_pages": pages,
+            "web_pages_read": web_pages_read,
             "context_limited": False,
             "context_note": (
-                "搜索结果或网页正文有限；如果材料不足以支持结论，请在最终回答中明确说明。"
+                "搜索结果有限；如果材料不足以支持结论，请在最终回答中明确说明。"
             ),
         }
         return len(json.dumps(payload, ensure_ascii=False))
@@ -905,17 +945,19 @@ class DashScopeAgent:
             "error": tool_result.error,
         }
         search_system_prompt = (
-            "你是一个严谨的联网研究助手。你已经获得 Tavily 搜索摘要和前几个网页的正文摘录。"
+            "你是一个严谨的联网研究助手。你已经获得 Tavily 搜索摘要；"
+            "对需要深度分析的问题，JSON 中还可能包含前几个网页的正文摘录。"
             "请只基于这些材料回答用户最初的问题，不要编造材料中没有的信息。"
             "需要对多个来源进行交叉总结，合并重复信息，并说明材料中的差异或不确定性。"
+            "如果 JSON 中 read_pages 为空，请只基于 search_results 中的 title、url、content/snippet 总结。"
             "如果 JSON 中 context_limited 为 true，或搜索、网页读取信息不足，要明确说明哪些结论无法确认。"
             "最终回答必须使用中文，并包含以下四个部分："
             "一、结论；二、关键要点；三、详细解释；四、参考来源。"
             "参考来源必须使用 Markdown 链接格式：[标题](URL)。"
         )
         tool_context = (
-            "已完成多步骤联网搜索工作流：用户问题 -> Tavily 搜索 -> 读取前几个网页 -> 汇总材料。"
-            "请基于下面 JSON 中的搜索摘要和网页正文生成最终回答。\n"
+            "已完成联网搜索工作流：用户问题 -> Tavily 搜索 -> 按需读取网页 -> 汇总材料。"
+            "请基于下面 JSON 中的搜索摘要和可用网页正文生成最终回答。\n"
             f"{json.dumps(payload, ensure_ascii=False)}"
         )
         return [
@@ -1084,6 +1126,67 @@ class DashScopeAgent:
             return False
 
         return self._has_external_subject_hint(lowered)
+
+    def _should_read_web_pages(self, message: str) -> bool:
+        """Return True when search snippets are unlikely to be enough."""
+
+        lowered = message.lower().strip()
+        if not lowered:
+            return False
+
+        if re.search(r"https?://\S+|www\.\S+|\b[a-z0-9][a-z0-9.-]*\.[a-z]{2,}(?:/\S*)?", lowered):
+            return True
+
+        deep_analysis_keywords = (
+            "详细分析",
+            "详细解析",
+            "深入",
+            "深度",
+            "deep analysis",
+            "in-depth",
+            "in depth",
+        )
+        if any(keyword in lowered for keyword in deep_analysis_keywords):
+            return True
+
+        article_summary_keywords = (
+            "总结这篇文章",
+            "总结这篇",
+            "总结文章",
+            "summarize this article",
+        )
+        if any(keyword in lowered for keyword in article_summary_keywords):
+            return True
+
+        github_project_keywords = (
+            "github项目",
+            "github 项目",
+            "github仓库",
+            "github 仓库",
+            "github repo",
+            "github repository",
+        )
+        if any(keyword in lowered for keyword in github_project_keywords):
+            return True
+        if "github" in lowered and any(
+            keyword in lowered for keyword in ("分析", "解析", "项目", "仓库", "源码", "repo", "repository")
+        ):
+            return True
+
+        organize_keywords = ("整理", "汇总", "收集", "梳理", "归纳", "compile", "collect")
+        technical_material_keywords = (
+            "技术资料",
+            "技术文档",
+            "论文",
+            "教程",
+            "paper",
+            "papers",
+            "tutorial",
+            "tutorials",
+        )
+        return any(keyword in lowered for keyword in organize_keywords) and any(
+            keyword in lowered for keyword in technical_material_keywords
+        )
 
     def _has_external_subject_hint(self, lowered_message: str) -> bool:
         external_subject_keywords = (

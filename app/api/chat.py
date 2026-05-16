@@ -1,5 +1,4 @@
 import json
-import re
 from threading import Lock
 from uuid import uuid4
 
@@ -23,6 +22,39 @@ cached_agent_signature: tuple[str | None, str, str, float, str | None, str] | No
 DEFAULT_SYSTEM_PROMPT = "\u4f60\u662f\u4e00\u4e2a\u7b80\u6d01\u3001\u53ef\u9760\u7684\u4e2d\u6587 AI \u52a9\u624b\u3002"
 WEB_SEARCH_STATUS_SEARCHING = "正在联网搜索..."
 WEB_SEARCH_STATUS_ORGANIZING = "正在搜索并整理资料..."
+SEARCH_INTENT_KEYWORDS = (
+    "搜索",
+    "查一下",
+    "联网",
+    "最新",
+    "新闻",
+    "资料",
+    "官网",
+    "最近",
+    "价格",
+    "github",
+    "论文",
+    "教程",
+    "search",
+    "latest",
+    "news",
+    "current",
+    "recent",
+    "website",
+    "official",
+    "price",
+)
+PLAIN_TIME_KEYWORDS = (
+    "几点",
+    "时间",
+    "日期",
+    "今天几号",
+    "现在几点",
+    "current time",
+    "what time",
+    "today's date",
+    "today date",
+)
 
 
 def get_agent(settings: Settings = Depends(get_settings)) -> DashScopeAgent:
@@ -109,7 +141,7 @@ def stream_chat(
     conversation_id = request.conversation_id or str(uuid4())
     model_messages = build_model_messages(request, conversation_id, store)
     requested_model = normalize_requested_model(request.model)
-    likely_web_search = looks_like_web_search_request(request.message)
+    likely_web_search = _looks_like_search_request(request.message)
 
     def event_stream():
         assistant_chunks: list[str] = []
@@ -207,115 +239,30 @@ def normalize_requested_model(model: str | None) -> str | None:
     return clean_model or None
 
 
-def looks_like_web_search_request(message: str) -> bool:
-    """Lightweight mirror of the agent search intent check for early stream status."""
+def _looks_like_search_request(message: str) -> bool:
+    """Return True when a message likely needs web search status immediately."""
 
     clean_message = message.strip()
     if not clean_message:
         return False
 
     lowered = clean_message.lower()
-    casual_phrases = {
-        "你好",
-        "您好",
-        "在吗",
-        "谢谢",
-        "你是谁",
-        "hello",
-        "hi",
-        "thanks",
-        "thank you",
-        "who are you",
-        "how are you",
-    }
-    if lowered in casual_phrases:
+    if _looks_like_plain_time_request(lowered):
         return False
 
-    strong_keywords = (
-        "搜索",
-        "查一下",
-        "联网",
-        "最新",
-        "新闻",
-        "资料",
-        "官网",
-        "最近",
-        "价格",
-        "论文",
-        "教程",
-        "联网搜索",
-        "网络搜索",
-        "网上搜索",
-        "帮我查",
-        "项目",
-        "github",
-        "search",
-        "latest",
-        "news",
-        "current",
-        "recent",
-        "website",
-        "official",
-        "price",
-        "today",
-    )
-    if any(keyword in lowered for keyword in strong_keywords):
-        return True
+    return any(keyword in lowered for keyword in SEARCH_INTENT_KEYWORDS)
 
-    ambiguous_keywords = ("今天", "现在", "是什么", "怎么样")
-    if not any(keyword in lowered for keyword in ambiguous_keywords):
+
+def _looks_like_plain_time_request(lowered_message: str) -> bool:
+    """Avoid showing web-search status for simple time/date tool requests."""
+
+    if not any(keyword in lowered_message for keyword in PLAIN_TIME_KEYWORDS):
         return False
 
-    external_subject_keywords = (
-        "公司",
-        "产品",
-        "品牌",
-        "平台",
-        "官网",
-        "网站",
-        "app",
-        "软件",
-        "版本",
-        "发布",
-        "更新",
-        "技术",
-        "api",
-        "模型",
-        "价格",
-        "股价",
-        "github",
-        "项目",
-        "论文",
-        "教程",
-        "文档",
-        "资料",
-        "新闻",
-        "天气",
-        "汇率",
-        "股票",
-        "基金",
-        "国家",
-        "城市",
-        "地区",
-        "总统",
-        "政策",
-        "赛事",
-        "榜单",
-        "招聘",
-        "fastapi",
-        "python",
-        "javascript",
-        "typescript",
-        "react",
-        "vue",
-        "openai",
-        "dashscope",
-        "tavily",
+    non_time_search_keywords = tuple(
+        keyword for keyword in SEARCH_INTENT_KEYWORDS if keyword not in {"current", "recent"}
     )
-    if any(keyword in lowered for keyword in external_subject_keywords):
-        return True
-
-    return bool(re.search(r"[a-z0-9][a-z0-9_.-]{1,}", lowered))
+    return not any(keyword in lowered_message for keyword in non_time_search_keywords)
 
 
 def get_tool_status(tool_result) -> str | None:
