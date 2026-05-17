@@ -1,32 +1,24 @@
-from dataclasses import dataclass
 import json
+import os
+import re
 from pathlib import Path
 from typing import Any
 
+from app.core.config import BASE_DIR, get_settings
 from app.core.logger import get_logger
+from app.mcp.schema import MCPServerConfig
 
 
 logger = get_logger(__name__)
 DEFAULT_SERVERS_FILE = Path(__file__).with_name("servers.json")
-
-
-@dataclass(frozen=True)
-class MCPServerConfig:
-    """Configuration for one MCP server."""
-
-    key: str
-    name: str
-    transport: str
-    url: str
-    enabled: bool = True
-    description: str = ""
+ENV_PATTERN = re.compile(r"\$\{(?P<braced>[A-Za-z_][A-Za-z0-9_]*)\}|\$(?P<plain>[A-Za-z_][A-Za-z0-9_]*)")
 
 
 def load_server_configs(
     servers_file: Path | None = None,
     modelscope_url: str | None = None,
 ) -> dict[str, MCPServerConfig]:
-    """Load MCP server definitions from servers.json."""
+    """Load MCP server definitions from servers.json without connecting to them."""
 
     config_file = servers_file or DEFAULT_SERVERS_FILE
     if not config_file.exists():
@@ -34,7 +26,7 @@ def load_server_configs(
         return {}
 
     try:
-        raw_configs = json.loads(config_file.read_text(encoding="utf-8"))
+        raw_configs = json.loads(config_file.read_text(encoding="utf-8-sig"))
     except Exception:
         logger.exception("Failed to read MCP servers config: %s", config_file)
         return {}
@@ -43,48 +35,79 @@ def load_server_configs(
         logger.warning("MCP servers config must be a JSON object: %s", config_file)
         return {}
 
+    env_values = _load_env_values()
+    settings = get_settings()
+    resolved_modelscope_url = (
+        modelscope_url
+        or env_values.get("MODELSCOPE_MCP_URL")
+        or settings.modelscope_mcp_url
+    )
+
     configs: dict[str, MCPServerConfig] = {}
     for key, raw_config in raw_configs.items():
         if not isinstance(raw_config, dict):
             logger.warning("Skip invalid MCP server config: key=%s", key)
             continue
 
-        url = str(raw_config.get("url") or "").strip()
-        if key == "modelscope" and modelscope_url:
-            url = modelscope_url
+        expanded_config = _expand_env_values(raw_config, env_values)
+        if key == "modelscope" and resolved_modelscope_url:
+            expanded_config["url"] = resolved_modelscope_url
 
-        config = _build_server_config(key, raw_config, url)
-        if config is None:
+        try:
+            config = MCPServerConfig(key=key, **expanded_config)
+        except Exception:
+            logger.exception("Skip invalid MCP server config: key=%s", key)
             continue
+
+        if config.transport in {"http", "sse"} and not config.url:
+            logger.warning(
+                "Remote MCP server has no url configured: key=%s transport=%s",
+                key,
+                config.transport,
+            )
 
         configs[key] = config
 
     return configs
 
 
-def _build_server_config(
-    key: str,
-    raw_config: dict[str, Any],
-    url: str,
-) -> MCPServerConfig | None:
-    transport = str(raw_config.get("transport") or "http").strip().lower()
-    if transport != "http":
-        logger.warning(
-            "Skip unsupported MCP server transport: key=%s transport=%s",
-            key,
-            transport,
+def _load_env_values() -> dict[str, str]:
+    """Read .env plus process environment; process env wins."""
+
+    values: dict[str, str] = {}
+    env_file = BASE_DIR / ".env"
+    if env_file.exists():
+        try:
+            for line in env_file.read_text(encoding="utf-8-sig").splitlines():
+                stripped = line.strip()
+                if not stripped or stripped.startswith("#") or "=" not in stripped:
+                    continue
+                key, value = stripped.split("=", 1)
+                values[key.strip()] = _unquote(value.strip())
+        except Exception:
+            logger.exception("Failed to read .env for MCP config expansion")
+
+    values.update({key: value for key, value in os.environ.items()})
+    return values
+
+
+def _unquote(value: str) -> str:
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+        return value[1:-1]
+    return value
+
+
+def _expand_env_values(value: Any, env_values: dict[str, str]) -> Any:
+    if isinstance(value, str):
+        return ENV_PATTERN.sub(
+            lambda match: env_values.get(match.group("braced") or match.group("plain") or "", ""),
+            value,
         )
-        return None
-
-    if not url:
-        logger.warning("Skip MCP server without url: key=%s", key)
-        return None
-
-    return MCPServerConfig(
-        key=key,
-        name=str(raw_config.get("name") or key),
-        transport=transport,
-        url=url,
-        enabled=bool(raw_config.get("enabled", True)),
-        description=str(raw_config.get("description") or ""),
-    )
+    if isinstance(value, list):
+        return [_expand_env_values(item, env_values) for item in value]
+    if isinstance(value, dict):
+        return {
+            str(key): _expand_env_values(item, env_values)
+            for key, item in value.items()
+        }
+    return value

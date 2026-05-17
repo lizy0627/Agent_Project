@@ -54,6 +54,8 @@
 │   │   ├── client.py
 │   │   ├── config.py
 │   │   ├── manager.py
+│   │   ├── router.py
+│   │   ├── schema.py
 │   │   └── servers.json
 │   ├── schemas
 │   │   ├── __init__.py
@@ -78,7 +80,10 @@
 │   ├── main.js
 │   └── style.css
 ├── scripts
+│   ├── add_mcp_server.py
+│   ├── list_mcp_tools.py
 │   ├── test_mcp_connection.py
+│   ├── test_mcp_server.py
 │   └── test_mcp_tool_call.py
 ├── .env.example
 ├── .gitignore
@@ -296,10 +301,10 @@ python scripts/test_mcp_connection.py
 测试一次真实工具调用：
 
 ```bash
-python scripts/test_mcp_tool_call.py
+python scripts/test_mcp_tool_call.py --server modelscope --tool search_models --arguments "{\"query\":\"Qwen\"}"
 ```
 
-脚本会以“搜索 Qwen3 相关模型”为示例，自动选择 ModelScope MCP 中最匹配的搜索工具，并输出原始工具结果。
+工具名请以 `python scripts/test_mcp_server.py --server modelscope` 或 `python scripts/list_mcp_tools.py` 输出为准。
 
 ### 在聊天页面使用
 
@@ -329,7 +334,88 @@ python scripts/test_mcp_tool_call.py
 }
 ```
 
-新增后可以通过 `MCPManager.list_all_tools()` 查看所有工具，通过 `MCPManager.call_tool(server_name, tool_name, arguments)` 调用指定工具。若要让聊天自动触发新 Server，可以在 `app/services/dashscope_agent.py` 的规则规划器中补充关键词和工具选择逻辑。
+新增后可以通过 `MCPManager.list_all_tools()` 查看所有工具，通过 `MCPManager.call_tool(server_name, tool_name, arguments)` 调用指定工具。聊天侧会先用 server 的 `keywords` 初筛，再根据工具名称、描述和 `input_schema` 自动选择工具，不需要为每个 MCP Server 修改 `dashscope_agent.py`。
+
+## 如何接入新的魔搭社区 MCP 工具
+
+1. 在魔搭社区找到需要接入的 MCP 工具。
+2. 复制该 MCP 工具的启动命令，并尽量使用 Streamable HTTP transport。
+3. 启动新的 MCP Server，例如监听 `http://127.0.0.1:8002/mcp`。
+4. 将 server 信息加入 `app/mcp/servers.json`，或使用脚本添加：
+
+```cmd
+python scripts/add_mcp_server.py ^
+  --id amap ^
+  --name "Amap MCP Server" ^
+  --url http://127.0.0.1:8002/mcp ^
+  --keywords 地图,路线,天气,导航 ^
+  --description "高德地图相关 MCP 工具"
+```
+
+5. 测试连接并查看工具：
+
+```cmd
+python scripts/test_mcp_server.py --server amap
+python scripts/list_mcp_tools.py
+```
+
+6. 指定工具做一次真实调用：
+
+```cmd
+python scripts/test_mcp_tool_call.py ^
+  --server modelscope ^
+  --tool search_models ^
+  --arguments "{\"query\":\"Qwen\"}"
+```
+
+7. 启动 Agent 项目，在前端聊天页面测试自然语言提问。
+
+`servers.json` 支持多个 MCP Server。推荐格式：
+
+```json
+{
+  "modelscope": {
+    "name": "ModelScope MCP Server",
+    "transport": "http",
+    "url": "http://127.0.0.1:8001/mcp",
+    "enabled": true,
+    "keywords": ["魔搭", "ModelScope", "模型", "数据集", "论文", "创空间", "Qwen", "通义千问"],
+    "description": "用于搜索魔搭模型、数据集、论文、创空间和 MCP 服务",
+    "timeout_seconds": 20,
+    "command": null,
+    "args": [],
+    "env": {
+      "MODELSCOPE_API_TOKEN": "${MODELSCOPE_API_TOKEN}"
+    },
+    "headers": {},
+    "category": "model-community"
+  }
+}
+```
+
+不要把 token 写死在代码或 JSON 明文里；需要密钥时放入 `.env`，再用 `${ENV_NAME}` 引用。
+
+完整启动流程如下。
+
+第一个 CMD，启动 ModelScope MCP Server：
+
+```cmd
+uvx modelscope-mcp-server --transport http --port 8001
+```
+
+第二个 CMD，启动 Agent 项目：
+
+```cmd
+cd /d D:\Agent
+.venv\Scripts\activate
+uvicorn main:app --reload
+```
+
+访问：
+
+```text
+http://127.0.0.1:8000/ui
+```
 
 ## 界面截图
 

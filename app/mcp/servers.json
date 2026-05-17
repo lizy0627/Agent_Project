@@ -4,6 +4,45 @@
     "transport": "http",
     "url": "http://127.0.0.1:8001/mcp",
     "enabled": true,
-    "description": "用于搜索魔搭模型、数据集、创空间、论文和 MCP 服务"
+    "keywords": [
+      "魔搭",
+      "ModelScope",
+      "模型",
+      "数据集",
+      "论文",
+      "创空间",
+      "Qwen",
+      "通义千问"
+    ],
+    "description": "用于搜索魔搭模型、数据集、论文、创空间和 MCP 服务",
+    "timeout_seconds": 20,
+    "command": null,
+    "args": [],
+    "env": {
+      "MODELSCOPE_API_TOKEN": "${MODELSCOPE_API_TOKEN}"
+    },
+    "headers": {},
+    "category": "model-community"
+  },
+  "fetch": {
+    "name": "Fetch MCP",
+    "transport": "sse",
+    "url": "https://mcp-fetch.api-inference.modelscope.net/sse",
+    "enabled": true,
+    "keywords": [
+      "网页",
+      "网站",
+      "抓取",
+      "读取网页",
+      "总结网页",
+      "文章"
+    ],
+    "description": "网页抓取和读取工具",
+    "timeout_seconds": 60,
+    "command": null,
+    "args": [],
+    "env": {},
+    "headers": {},
+    "category": "web"
   }
 }

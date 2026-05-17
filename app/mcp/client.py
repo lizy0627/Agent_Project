@@ -1,124 +1,175 @@
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
-from datetime import timedelta
+import inspect
+from time import perf_counter
 from typing import Any
 
 import httpx
 
 from app.core.logger import get_logger
-from app.mcp.config import MCPServerConfig
+from app.mcp.schema import MCPCallResult, MCPServerConfig
 
 
 logger = get_logger(__name__)
 
 
 class MCPClient:
-    """Thin Streamable HTTP client wrapper around the MCP Python SDK."""
+    """Remote MCP client wrapper around the Python MCP SDK."""
 
     def __init__(
         self,
-        servers: dict[str, MCPServerConfig],
+        servers: dict[str, MCPServerConfig] | None = None,
         timeout_seconds: int = 20,
     ) -> None:
-        self.servers = servers
+        self.servers = servers or {}
         self.timeout_seconds = max(int(timeout_seconds), 1)
 
-    def list_tools(self, server_name: str) -> dict[str, Any]:
-        """Return tools exposed by one MCP server."""
-
+    def list_tools(self, server: MCPServerConfig | str) -> dict[str, Any]:
+        config = self._resolve_server(server)
+        server_name = config.key if config else str(server)
         return self._run_with_timeout(
-            self._list_tools(server_name),
+            self._list_tools(config, server_name),
             server_name=server_name,
             tool_name="list_tools",
+            arguments={},
+            timeout_seconds=self._effective_timeout(config),
         )
 
     def call_tool(
         self,
-        server_name: str,
+        server: MCPServerConfig | str,
         tool_name: str,
         arguments: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """Call one tool on one MCP server."""
-
+        config = self._resolve_server(server)
+        server_name = config.key if config else str(server)
+        call_arguments = arguments or {}
         return self._run_with_timeout(
-            self._call_tool(server_name, tool_name, arguments or {}),
+            self._call_tool(config, server_name, tool_name, call_arguments),
             server_name=server_name,
             tool_name=tool_name,
+            arguments=call_arguments,
+            timeout_seconds=self._effective_timeout(config),
         )
 
-    async def _list_tools(self, server_name: str) -> dict[str, Any]:
-        config = self._get_enabled_server(server_name)
+    async def _list_tools(
+        self,
+        config: MCPServerConfig | None,
+        server_name: str,
+    ) -> dict[str, Any]:
+        started_at = perf_counter()
         if config is None:
-            return self._failure(server_name, "list_tools", f"MCP server is not enabled: {server_name}")
+            return self._failure(server_name, "list_tools", {}, "MCP server is not configured.", started_at)
+        if not self._is_remote_transport_enabled(config):
+            return self._failure(
+                server_name,
+                "list_tools",
+                {},
+                f"MCP server is disabled or unsupported: {server_name}",
+                started_at,
+            )
 
         try:
-            logger.info("MCP list_tools started: server=%s url=%s", server_name, config.url)
+            logger.info(
+                "MCP list_tools started: server_name=%s transport=%s url=%s",
+                server_name,
+                config.transport,
+                config.url,
+            )
             reachable_error = await self._check_server_reachable(config)
             if reachable_error:
-                return self._failure(server_name, "list_tools", reachable_error)
+                return self._failure(server_name, "list_tools", {}, reachable_error, started_at)
 
             async with self._open_session(config) as session:
                 result = await session.list_tools()
 
-            tools = [
-                self._serialize_data(tool)
-                for tool in getattr(result, "tools", [])
-            ]
-            logger.info("MCP list_tools succeeded: server=%s count=%s", server_name, len(tools))
-            return self._success(server_name, "list_tools", {"tools": tools})
+            tools = [self._serialize_data(tool) for tool in getattr(result, "tools", [])]
+            return self._success(server_name, "list_tools", {}, {"tools": tools}, started_at)
         except Exception as exc:
-            logger.exception("MCP list_tools failed: server=%s", server_name)
-            return self._failure(server_name, "list_tools", str(exc))
+            logger.exception("MCP list_tools failed: server_name=%s url=%s", server_name, config.url)
+            return self._failure(server_name, "list_tools", {}, str(exc), started_at)
 
     async def _call_tool(
         self,
+        config: MCPServerConfig | None,
         server_name: str,
         tool_name: str,
         arguments: dict[str, Any],
     ) -> dict[str, Any]:
-        config = self._get_enabled_server(server_name)
+        started_at = perf_counter()
         if config is None:
-            return self._failure(server_name, tool_name, f"MCP server is not enabled: {server_name}")
+            return self._failure(server_name, tool_name, arguments, "MCP server is not configured.", started_at)
+        if not self._is_remote_transport_enabled(config):
+            return self._failure(
+                server_name,
+                tool_name,
+                arguments,
+                f"MCP server is disabled or unsupported: {server_name}",
+                started_at,
+            )
 
         try:
             logger.info(
-                "MCP call_tool started: server=%s tool=%s args=%s",
+                "MCP call_tool started: server_name=%s transport=%s url=%s tool_name=%s arguments=%s",
                 server_name,
+                config.transport,
+                config.url,
                 tool_name,
                 self._safe_log_args(arguments),
             )
             reachable_error = await self._check_server_reachable(config)
             if reachable_error:
-                return self._failure(server_name, tool_name, reachable_error)
+                return self._failure(server_name, tool_name, arguments, reachable_error, started_at)
 
             async with self._open_session(config) as session:
                 result = await session.call_tool(tool_name, arguments=arguments)
 
-            data = self._serialize_data(result)
-            logger.info("MCP call_tool succeeded: server=%s tool=%s", server_name, tool_name)
-            return self._success(server_name, tool_name, data)
+            return self._success(server_name, tool_name, arguments, self._serialize_data(result), started_at)
         except Exception as exc:
-            logger.exception("MCP call_tool failed: server=%s tool=%s", server_name, tool_name)
-            return self._failure(server_name, tool_name, str(exc))
+            logger.exception(
+                "MCP call_tool failed: server_name=%s url=%s tool_name=%s",
+                server_name,
+                config.url,
+                tool_name,
+            )
+            return self._failure(server_name, tool_name, arguments, str(exc), started_at)
 
-    def _get_enabled_server(self, server_name: str) -> MCPServerConfig | None:
-        config = self.servers.get(server_name)
+    def _resolve_server(self, server: MCPServerConfig | str) -> MCPServerConfig | None:
+        if isinstance(server, MCPServerConfig):
+            return server
+        config = self.servers.get(server)
         if config is None:
-            logger.warning("MCP server is not configured: server=%s", server_name)
-            return None
-        if not config.enabled:
-            logger.warning("MCP server is disabled: server=%s", server_name)
-            return None
+            logger.warning("MCP server is not configured: server_name=%s", server)
         return config
+
+    def _is_remote_transport_enabled(self, config: MCPServerConfig) -> bool:
+        if not config.enabled:
+            logger.warning("MCP server is disabled: server_name=%s", config.key)
+            return False
+        if config.transport not in {"http", "sse"}:
+            logger.warning(
+                "MCP server transport is unsupported: server_name=%s transport=%s",
+                config.key,
+                config.transport,
+            )
+            return False
+        if not config.url:
+            logger.warning("MCP server url is empty: server_name=%s", config.key)
+            return False
+        return True
 
     def _run_with_timeout(
         self,
         coroutine: Any,
         server_name: str,
         tool_name: str,
+        arguments: dict[str, Any],
+        timeout_seconds: int,
     ) -> dict[str, Any]:
+        started_at = perf_counter()
+
         async def runner() -> dict[str, Any]:
-            return await asyncio.wait_for(coroutine, timeout=self.timeout_seconds)
+            return await asyncio.wait_for(coroutine, timeout=timeout_seconds)
 
         try:
             loop = asyncio.get_running_loop()
@@ -127,66 +178,107 @@ class MCPClient:
 
         try:
             if loop and loop.is_running():
-                # Current FastAPI routes are sync, but scripts/tests may run inside a loop.
                 with ThreadPoolExecutor(max_workers=1) as executor:
                     return executor.submit(lambda: asyncio.run(runner())).result()
             return asyncio.run(runner())
-        except TimeoutError:
-            logger.warning(
-                "MCP request timed out: server=%s tool=%s timeout_seconds=%s",
-                server_name,
-                tool_name,
-                self.timeout_seconds,
-            )
-            return self._failure(server_name, tool_name, "MCP request timed out.")
+        except (asyncio.TimeoutError, TimeoutError):
+            error = f"MCP request timed out after {timeout_seconds}s."
+            return self._failure(server_name, tool_name, arguments, error, started_at)
         except asyncio.CancelledError:
-            logger.warning("MCP request was cancelled: server=%s tool=%s", server_name, tool_name)
-            return self._failure(server_name, tool_name, "MCP request was cancelled.")
+            return self._failure(server_name, tool_name, arguments, "MCP request was cancelled.", started_at)
         except Exception as exc:
-            logger.exception("MCP request failed: server=%s tool=%s", server_name, tool_name)
-            return self._failure(server_name, tool_name, str(exc))
+            logger.exception("MCP request failed: server_name=%s tool_name=%s", server_name, tool_name)
+            return self._failure(server_name, tool_name, arguments, str(exc), started_at)
 
     def _open_session(self, config: MCPServerConfig) -> Any:
-        return _StreamableHTTPSession(config.url, timeout_seconds=self.timeout_seconds)
+        return _RemoteMCPSession(
+            transport=config.transport,
+            url=str(config.url or ""),
+            headers=config.headers,
+            timeout_seconds=self._effective_timeout(config),
+        )
 
     async def _check_server_reachable(self, config: MCPServerConfig) -> str | None:
         try:
-            async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
-                # HEAD verifies that the HTTP endpoint is reachable without opening an SSE stream.
-                await client.head(config.url)
+            async with httpx.AsyncClient(
+                timeout=self._effective_timeout(config),
+                headers=config.headers or None,
+            ) as client:
+                await client.head(str(config.url))
         except httpx.ConnectError:
-            logger.warning("MCP server is unreachable: server=%s url=%s", config.key, config.url)
+            logger.warning("MCP server is unreachable: server_name=%s url=%s", config.key, config.url)
             return (
                 f"Cannot connect to MCP server `{config.key}` at {config.url}. "
                 "Please check whether the MCP Server is running."
             )
         except httpx.TimeoutException:
-            logger.warning("MCP server reachability check timed out: server=%s", config.key)
+            logger.warning("MCP server reachability check timed out: server_name=%s", config.key)
             return (
                 f"MCP server `{config.key}` reachability check timed out. "
                 "Please check the server address and network."
             )
         except Exception as exc:
-            logger.info("MCP server reachability check returned non-fatal error: %s", exc)
+            logger.info("MCP reachability check returned non-fatal error: %s", exc)
         return None
 
-    def _success(self, server_name: str, tool_name: str, data: Any) -> dict[str, Any]:
-        return {
-            "success": True,
-            "server": server_name,
-            "tool": tool_name,
-            "data": data,
-            "error": "",
-        }
+    def _success(
+        self,
+        server_name: str,
+        tool_name: str,
+        arguments: dict[str, Any],
+        data: Any,
+        started_at: float,
+    ) -> dict[str, Any]:
+        elapsed_ms = self._elapsed_ms(started_at)
+        logger.info(
+            "MCP request succeeded: server_name=%s tool_name=%s elapsed_ms=%s",
+            server_name,
+            tool_name,
+            elapsed_ms,
+        )
+        return MCPCallResult(
+            success=True,
+            server_name=server_name,
+            tool_name=tool_name,
+            arguments=arguments,
+            data=data,
+            elapsed_ms=elapsed_ms,
+        ).model_dump(mode="json")
 
-    def _failure(self, server_name: str, tool_name: str, error: str) -> dict[str, Any]:
-        return {
-            "success": False,
-            "server": server_name,
-            "tool": tool_name,
-            "data": None,
-            "error": error,
-        }
+    def _failure(
+        self,
+        server_name: str,
+        tool_name: str,
+        arguments: dict[str, Any],
+        error: str,
+        started_at: float,
+    ) -> dict[str, Any]:
+        elapsed_ms = self._elapsed_ms(started_at)
+        logger.warning(
+            "MCP request failed: server_name=%s tool_name=%s arguments=%s elapsed_ms=%s error=%s",
+            server_name,
+            tool_name,
+            self._safe_log_args(arguments),
+            elapsed_ms,
+            error,
+        )
+        return MCPCallResult(
+            success=False,
+            server_name=server_name,
+            tool_name=tool_name,
+            arguments=arguments,
+            data=None,
+            error=error,
+            elapsed_ms=elapsed_ms,
+        ).model_dump(mode="json")
+
+    def _effective_timeout(self, config: MCPServerConfig | None) -> int:
+        if config and config.timeout_seconds:
+            return max(int(config.timeout_seconds), 1)
+        return self.timeout_seconds
+
+    def _elapsed_ms(self, started_at: float) -> float:
+        return round((perf_counter() - started_at) * 1000, 2)
 
     def _serialize_data(self, data: Any) -> Any:
         if hasattr(data, "model_dump"):
@@ -198,46 +290,57 @@ class MCPClient:
         return data
 
     def _safe_log_args(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        sensitive = ("token", "key", "secret", "authorization", "password")
         safe_args: dict[str, Any] = {}
         for key, value in arguments.items():
-            if isinstance(value, str) and len(value) > 200:
+            lowered_key = str(key).lower()
+            if any(marker in lowered_key for marker in sensitive):
+                safe_args[key] = "***"
+            elif isinstance(value, str) and len(value) > 200:
                 safe_args[key] = f"{value[:200]}..."
             else:
                 safe_args[key] = value
         return safe_args
 
 
-class _StreamableHTTPSession:
-    """Async context manager that initializes one short-lived MCP session."""
+class _RemoteMCPSession:
+    """Async context manager that initializes one short-lived remote MCP session."""
 
-    def __init__(self, url: str, timeout_seconds: int) -> None:
+    def __init__(
+        self,
+        transport: str,
+        url: str,
+        headers: dict[str, str],
+        timeout_seconds: int,
+    ) -> None:
+        self.transport = transport
         self.url = url
+        self.headers = headers
         self.timeout_seconds = timeout_seconds
+        self._http_client: httpx.AsyncClient | None = None
         self._client_context: Any = None
         self._session_context: Any = None
 
     async def __aenter__(self) -> Any:
         try:
             from mcp import ClientSession
-            try:
-                from mcp.client.streamable_http import streamable_http_client as streamable_client
-            except ImportError:
-                from mcp.client.streamable_http import streamablehttp_client as streamable_client
+            from mcp.client.sse import sse_client
+            from mcp.client.streamable_http import streamablehttp_client
         except ImportError as exc:
             raise RuntimeError(
                 "MCP Python SDK is not installed. Run `pip install -r requirements.txt`."
             ) from exc
 
-        timeout = timedelta(seconds=self.timeout_seconds)
+        if self.transport == "http":
+            self._client_context = self._create_streamable_http_context(streamablehttp_client)
+        elif self.transport == "sse":
+            self._client_context = self._create_sse_context(sse_client)
+        else:
+            raise ValueError(f"Unsupported MCP transport: {self.transport}")
+
         try:
-            self._client_context = streamable_client(self.url, timeout=timeout)
-        except TypeError as exc:
-            if "timeout" not in str(exc):
-                raise
-            logger.info("MCP SDK streamable HTTP client does not accept timeout; using outer timeout")
-            self._client_context = streamable_client(self.url)
-        try:
-            read_stream, write_stream, _get_session_id = await self._client_context.__aenter__()
+            streams = await self._client_context.__aenter__()
+            read_stream, write_stream = streams[0], streams[1]
             self._session_context = ClientSession(read_stream, write_stream)
             session = await self._session_context.__aenter__()
             await session.initialize()
@@ -254,3 +357,28 @@ class _StreamableHTTPSession:
                 await self._client_context.__aexit__(exc_type, exc, traceback)
         except Exception as close_error:
             logger.warning("MCP session close failed: %s", close_error)
+        finally:
+            if self._http_client is not None:
+                await self._http_client.aclose()
+
+    def _create_streamable_http_context(self, streamablehttp_client: Any) -> Any:
+        parameters = inspect.signature(streamablehttp_client).parameters
+        if "http_client" in parameters:
+            self._http_client = httpx.AsyncClient(timeout=self.timeout_seconds, headers=self.headers or None)
+            return streamablehttp_client(self.url, http_client=self._http_client)
+
+        kwargs: dict[str, Any] = {}
+        if "headers" in parameters:
+            kwargs["headers"] = self.headers or None
+        if "timeout" in parameters:
+            kwargs["timeout"] = self.timeout_seconds
+        return streamablehttp_client(self.url, **kwargs)
+
+    def _create_sse_context(self, sse_client: Any) -> Any:
+        parameters = inspect.signature(sse_client).parameters
+        kwargs: dict[str, Any] = {}
+        if "headers" in parameters:
+            kwargs["headers"] = self.headers or None
+        if "timeout" in parameters:
+            kwargs["timeout"] = self.timeout_seconds
+        return sse_client(self.url, **kwargs)

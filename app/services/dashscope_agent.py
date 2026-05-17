@@ -26,6 +26,7 @@ from app.core.errors import (
 )
 from app.core.logger import get_logger
 from app.mcp.manager import MCPManager
+from app.mcp.router import MCPRouter
 from app.tools import create_default_tool_manager
 from app.tools.base import ToolResult
 from app.tools.tool_manager import ToolManager
@@ -188,6 +189,11 @@ class DashScopeAgent:
             web_search_provider=settings.web_search_provider,
             mcp_enabled=settings.mcp_enabled,
         )
+        self.mcp_manager = MCPManager(
+            timeout_seconds=settings.mcp_timeout_seconds,
+            modelscope_url=settings.modelscope_mcp_url,
+        )
+        self.mcp_router = MCPRouter(self.mcp_manager)
 
     def chat(self, messages: list[ChatMessage], model: str | None = None) -> AgentReply:
         """Send a chat request with complete context and return model text."""
@@ -340,10 +346,72 @@ class DashScopeAgent:
             return None
 
         logger.info("Tool call planned: name=%s", planned_call.name)
-        if self._is_modelscope_mcp_call(planned_call):
-            return self._call_modelscope_mcp_tool(planned_call)
+        if planned_call.name == "mcp_tool":
+            return self._call_mcp_tool(planned_call)
 
         return self.tool_manager.call(planned_call.name, **planned_call.arguments)
+
+    def _call_mcp_tool(self, planned_call: PlannedToolCall) -> ToolResult:
+        original_query = str(planned_call.arguments.get("original_query") or "")
+        rewritten_query = str(planned_call.arguments.get("rewritten_query") or "")
+        fallback_queries = planned_call.arguments.get("query_fallbacks")
+        if not isinstance(fallback_queries, list) or not fallback_queries:
+            fallback_queries = [rewritten_query or original_query]
+
+        mcp_arguments = planned_call.arguments.get("arguments")
+        base_mcp_arguments = mcp_arguments if isinstance(mcp_arguments, dict) else {}
+        call_base = {
+            key: value
+            for key, value in planned_call.arguments.items()
+            if key not in {
+                "arguments",
+                "original_query",
+                "rewritten_query",
+                "query_fallbacks",
+                "route_reason",
+            }
+        }
+
+        last_result: ToolResult | None = None
+        final_query = str(fallback_queries[0] or "")
+        for index, query in enumerate(fallback_queries):
+            query_text = str(query or "").strip()
+            call_arguments = dict(call_base)
+            call_arguments["arguments"] = self._with_mcp_query_arguments(base_mcp_arguments, query_text)
+            last_result = self.tool_manager.call(planned_call.name, **call_arguments)
+            last_result = self._normalize_mcp_tool_result(last_result)
+            final_query = query_text
+
+            if not self._is_empty_mcp_result(last_result):
+                break
+            if index < len(fallback_queries) - 1:
+                logger.info("MCP result empty, fallback query: %s", fallback_queries[index + 1])
+
+        if last_result is None:
+            last_result = self.tool_manager.call(planned_call.name, **planned_call.arguments)
+            last_result = self._normalize_mcp_tool_result(last_result)
+
+        return self._with_mcp_query_metadata(
+            last_result,
+            original_query=original_query,
+            rewritten_query=rewritten_query,
+            final_query=final_query,
+            route_reason=str(planned_call.arguments.get("route_reason") or ""),
+        )
+
+    def _normalize_mcp_tool_result(self, tool_result: ToolResult) -> ToolResult:
+        if tool_result.name != "mcp_tool" or not isinstance(tool_result.result, dict):
+            return tool_result
+        if tool_result.result.get("success") is not False:
+            return tool_result
+
+        return ToolResult(
+            name=tool_result.name,
+            success=False,
+            result=tool_result.result,
+            error=str(tool_result.result.get("error") or "MCP tool call failed."),
+            duration_ms=tool_result.duration_ms,
+        )
 
     def _is_modelscope_mcp_call(self, planned_call: PlannedToolCall) -> bool:
         return (
@@ -995,9 +1063,9 @@ class DashScopeAgent:
                 arguments={"text": text_to_summarize},
             )
 
-        modelscope_mcp_call = self._plan_modelscope_mcp_tool(user_message)
-        if modelscope_mcp_call:
-            return modelscope_mcp_call
+        mcp_call = self._plan_mcp_tool(user_message)
+        if mcp_call:
+            return mcp_call
 
         if self._looks_like_search_request(user_message):
             return PlannedToolCall(
@@ -1087,6 +1155,27 @@ class DashScopeAgent:
                 "content": tool_context,
             },
         ]
+
+    def _plan_mcp_tool(self, user_message: str) -> PlannedToolCall | None:
+        if not self.settings.mcp_enabled:
+            return None
+
+        route = self.mcp_router.route(user_message)
+        if not route:
+            return None
+
+        return PlannedToolCall(
+            name="mcp_tool",
+            arguments={
+                "server_name": route["server_name"],
+                "tool_name": route["tool_name"],
+                "arguments": route.get("arguments") or {},
+                "original_query": route.get("original_query") or user_message,
+                "rewritten_query": route.get("rewritten_query") or "",
+                "query_fallbacks": route.get("query_fallbacks") or [],
+                "route_reason": route.get("reason") or "",
+            },
+        )
 
     def _plan_modelscope_mcp_tool(self, user_message: str) -> PlannedToolCall | None:
         if not self.settings.mcp_enabled:
@@ -1256,6 +1345,10 @@ class DashScopeAgent:
     ) -> ToolResult:
         if isinstance(tool_result.result, dict):
             result = dict(tool_result.result)
+            server_name = str(result.get("server_name") or "")
+            server = self.mcp_manager.get_server(server_name) if server_name else None
+            if server and server.url:
+                result["server_url"] = server.url
             result["query_rewrite"] = {
                 "original": original_query,
                 "rewritten": rewritten_query,
@@ -1271,6 +1364,46 @@ class DashScopeAgent:
             error=tool_result.error,
             duration_ms=tool_result.duration_ms,
         )
+
+    def _with_mcp_query_metadata(
+        self,
+        tool_result: ToolResult,
+        original_query: str,
+        rewritten_query: str,
+        final_query: str,
+        route_reason: str,
+    ) -> ToolResult:
+        if isinstance(tool_result.result, dict):
+            result = dict(tool_result.result)
+            server_name = str(result.get("server_name") or "")
+            server = self.mcp_manager.get_server(server_name) if server_name else None
+            if server and server.url:
+                result["server_url"] = server.url
+            result["query_rewrite"] = {
+                "original": original_query,
+                "rewritten": rewritten_query,
+                "final": final_query,
+            }
+            if route_reason:
+                result["route_reason"] = route_reason
+        else:
+            result = tool_result.result
+
+        return ToolResult(
+            name=tool_result.name,
+            success=tool_result.success,
+            result=result,
+            error=tool_result.error,
+            duration_ms=tool_result.duration_ms,
+        )
+
+    def _is_empty_mcp_result(self, tool_result: ToolResult) -> bool:
+        if not tool_result.success:
+            return False
+        if isinstance(tool_result.result, dict) and tool_result.result.get("success") is False:
+            return False
+        status = self._modelscope_collection_status(tool_result.result)
+        return status is False
 
     def _is_empty_modelscope_mcp_result(self, tool_result: ToolResult) -> bool:
         if not tool_result.success:
