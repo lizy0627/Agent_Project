@@ -27,7 +27,7 @@
   "fetch": {
     "name": "Fetch MCP",
     "transport": "sse",
-    "url": "https://mcp-fetch.api-inference.modelscope.net/sse",
+    "url": "https://mcp.api-inference.modelscope.net/519ddd65e9fd4b/sse",
     "enabled": true,
     "keywords": [
       "网页",

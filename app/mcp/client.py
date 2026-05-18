@@ -11,6 +11,11 @@ from app.mcp.schema import MCPCallResult, MCPServerConfig
 
 
 logger = get_logger(__name__)
+MCP_SDK_NOT_INSTALLED_ERROR = "MCP Python SDK is not installed. Run `pip install -r requirements.txt`."
+
+
+class MCPMissingSDKError(RuntimeError):
+    """Raised only when importing the MCP Python SDK fails."""
 
 
 class MCPClient:
@@ -30,6 +35,8 @@ class MCPClient:
         return self._run_with_timeout(
             self._list_tools(config, server_name),
             server_name=server_name,
+            url=str(config.url) if config else "",
+            transport=str(config.transport) if config else "",
             tool_name="list_tools",
             arguments={},
             timeout_seconds=self._effective_timeout(config),
@@ -47,6 +54,8 @@ class MCPClient:
         return self._run_with_timeout(
             self._call_tool(config, server_name, tool_name, call_arguments),
             server_name=server_name,
+            url=str(config.url) if config else "",
+            transport=str(config.transport) if config else "",
             tool_name=tool_name,
             arguments=call_arguments,
             timeout_seconds=self._effective_timeout(config),
@@ -76,7 +85,7 @@ class MCPClient:
                 config.transport,
                 config.url,
             )
-            reachable_error = await self._check_server_reachable(config)
+            reachable_error = await self._check_server_reachable(config, tool_name="list_tools")
             if reachable_error:
                 return self._failure(server_name, "list_tools", {}, reachable_error, started_at)
 
@@ -86,8 +95,14 @@ class MCPClient:
             tools = [self._serialize_data(tool) for tool in getattr(result, "tools", [])]
             return self._success(server_name, "list_tools", {}, {"tools": tools}, started_at)
         except Exception as exc:
-            logger.exception("MCP list_tools failed: server_name=%s url=%s", server_name, config.url)
-            return self._failure(server_name, "list_tools", {}, str(exc), started_at)
+            logger.exception(
+                "MCP list_tools failed: server_name=%s transport=%s url=%s tool_name=%s",
+                server_name,
+                config.transport,
+                config.url,
+                "list_tools",
+            )
+            return self._failure(server_name, "list_tools", {}, self._format_exception(exc), started_at)
 
     async def _call_tool(
         self,
@@ -117,7 +132,7 @@ class MCPClient:
                 tool_name,
                 self._safe_log_args(arguments),
             )
-            reachable_error = await self._check_server_reachable(config)
+            reachable_error = await self._check_server_reachable(config, tool_name=tool_name)
             if reachable_error:
                 return self._failure(server_name, tool_name, arguments, reachable_error, started_at)
 
@@ -127,12 +142,14 @@ class MCPClient:
             return self._success(server_name, tool_name, arguments, self._serialize_data(result), started_at)
         except Exception as exc:
             logger.exception(
-                "MCP call_tool failed: server_name=%s url=%s tool_name=%s",
+                "MCP call_tool failed: server_name=%s transport=%s url=%s tool_name=%s arguments=%s",
                 server_name,
+                config.transport,
                 config.url,
                 tool_name,
+                self._safe_log_args(arguments),
             )
-            return self._failure(server_name, tool_name, arguments, str(exc), started_at)
+            return self._failure(server_name, tool_name, arguments, self._format_exception(exc), started_at)
 
     def _resolve_server(self, server: MCPServerConfig | str) -> MCPServerConfig | None:
         if isinstance(server, MCPServerConfig):
@@ -162,6 +179,8 @@ class MCPClient:
         self,
         coroutine: Any,
         server_name: str,
+        url: str,
+        transport: str,
         tool_name: str,
         arguments: dict[str, Any],
         timeout_seconds: int,
@@ -183,12 +202,35 @@ class MCPClient:
             return asyncio.run(runner())
         except (asyncio.TimeoutError, TimeoutError):
             error = f"MCP request timed out after {timeout_seconds}s."
+            logger.exception(
+                "MCP request timed out: server_name=%s transport=%s url=%s tool_name=%s arguments=%s",
+                server_name,
+                transport,
+                url,
+                tool_name,
+                self._safe_log_args(arguments),
+            )
             return self._failure(server_name, tool_name, arguments, error, started_at)
         except asyncio.CancelledError:
+            logger.exception(
+                "MCP request cancelled: server_name=%s transport=%s url=%s tool_name=%s arguments=%s",
+                server_name,
+                transport,
+                url,
+                tool_name,
+                self._safe_log_args(arguments),
+            )
             return self._failure(server_name, tool_name, arguments, "MCP request was cancelled.", started_at)
         except Exception as exc:
-            logger.exception("MCP request failed: server_name=%s tool_name=%s", server_name, tool_name)
-            return self._failure(server_name, tool_name, arguments, str(exc), started_at)
+            logger.exception(
+                "MCP request failed: server_name=%s transport=%s url=%s tool_name=%s arguments=%s",
+                server_name,
+                transport,
+                url,
+                tool_name,
+                self._safe_log_args(arguments),
+            )
+            return self._failure(server_name, tool_name, arguments, self._format_exception(exc), started_at)
 
     def _open_session(self, config: MCPServerConfig) -> Any:
         return _RemoteMCPSession(
@@ -198,27 +240,56 @@ class MCPClient:
             timeout_seconds=self._effective_timeout(config),
         )
 
-    async def _check_server_reachable(self, config: MCPServerConfig) -> str | None:
+    async def _check_server_reachable(self, config: MCPServerConfig, tool_name: str) -> str | None:
         try:
+            method = "GET" if config.transport == "sse" else "HEAD"
+            headers = {"Accept": "text/event-stream"} if config.transport == "sse" else None
             async with httpx.AsyncClient(
                 timeout=self._effective_timeout(config),
                 headers=config.headers or None,
             ) as client:
-                await client.head(str(config.url))
-        except httpx.ConnectError:
-            logger.warning("MCP server is unreachable: server_name=%s url=%s", config.key, config.url)
-            return (
-                f"Cannot connect to MCP server `{config.key}` at {config.url}. "
-                "Please check whether the MCP Server is running."
+                async with client.stream(
+                    method,
+                    str(config.url),
+                    headers=headers,
+                ) as response:
+                    response.raise_for_status()
+        except httpx.ConnectError as exc:
+            logger.exception(
+                "MCP server is unreachable: server_name=%s transport=%s url=%s tool_name=%s",
+                config.key,
+                config.transport,
+                config.url,
+                tool_name,
             )
-        except httpx.TimeoutException:
-            logger.warning("MCP server reachability check timed out: server_name=%s", config.key)
-            return (
-                f"MCP server `{config.key}` reachability check timed out. "
-                "Please check the server address and network."
+            return self._format_exception(exc)
+        except httpx.TimeoutException as exc:
+            logger.exception(
+                "MCP server reachability check timed out: server_name=%s transport=%s url=%s tool_name=%s",
+                config.key,
+                config.transport,
+                config.url,
+                tool_name,
             )
-        except Exception as exc:
-            logger.info("MCP reachability check returned non-fatal error: %s", exc)
+            return self._format_exception(exc)
+        except httpx.HTTPStatusError as exc:
+            logger.exception(
+                "MCP server returned HTTP status error: server_name=%s transport=%s url=%s tool_name=%s status_code=%s",
+                config.key,
+                config.transport,
+                config.url,
+                tool_name,
+                exc.response.status_code,
+            )
+            return self._format_exception(exc)
+        except Exception:
+            logger.exception(
+                "MCP reachability check returned non-fatal error: server_name=%s transport=%s url=%s tool_name=%s",
+                config.key,
+                config.transport,
+                config.url,
+                tool_name,
+            )
         return None
 
     def _success(
@@ -302,6 +373,29 @@ class MCPClient:
                 safe_args[key] = value
         return safe_args
 
+    def _format_exception(self, exc: BaseException) -> str:
+        if isinstance(exc, MCPMissingSDKError):
+            return MCP_SDK_NOT_INSTALLED_ERROR
+
+        if isinstance(exc, httpx.HTTPStatusError):
+            request_url = exc.request.url if exc.request is not None else ""
+            response_url = exc.response.url if exc.response is not None else request_url
+            status_code = exc.response.status_code if exc.response is not None else "unknown"
+            reason = exc.response.reason_phrase if exc.response is not None else ""
+            return (
+                f"HTTPStatusError: status_code={status_code} "
+                f"url={response_url} reason={reason}".strip()
+            )
+
+        if isinstance(exc, BaseExceptionGroup):
+            child_errors = "; ".join(self._format_exception(child) for child in exc.exceptions)
+            return f"{exc.__class__.__name__}: {exc}; nested=[{child_errors}]"
+
+        message = str(exc).strip()
+        if message:
+            return f"{exc.__class__.__name__}: {message}"
+        return exc.__class__.__name__
+
 
 class _RemoteMCPSession:
     """Async context manager that initializes one short-lived remote MCP session."""
@@ -327,9 +421,7 @@ class _RemoteMCPSession:
             from mcp.client.sse import sse_client
             from mcp.client.streamable_http import streamablehttp_client
         except ImportError as exc:
-            raise RuntimeError(
-                "MCP Python SDK is not installed. Run `pip install -r requirements.txt`."
-            ) from exc
+            raise MCPMissingSDKError(MCP_SDK_NOT_INSTALLED_ERROR) from exc
 
         if self.transport == "http":
             self._client_context = self._create_streamable_http_context(streamablehttp_client)

@@ -35,6 +35,17 @@ QUERY_NOISE_WORDS = (
 )
 QUERY_ARGUMENT_HINTS = ("query", "keyword", "search", "q", "name", "text")
 LIMIT_ARGUMENT_HINTS = ("limit", "count", "size", "max_results", "top_k", "num")
+FETCH_REQUEST_KEYWORDS = (
+    "fetch",
+    "抓取",
+    "读取网页",
+    "网页",
+    "网站",
+    "url",
+    "http://",
+    "https://",
+)
+FETCH_MAX_LENGTH = 2000
 
 
 @dataclass(frozen=True)
@@ -69,6 +80,10 @@ class MCPRouter:
         message = str(user_input or "").strip()
         if not message:
             return None
+
+        fetch_route = self._route_fetch_request(message)
+        if fetch_route:
+            return fetch_route.to_dict()
 
         candidates = self._candidate_servers(message)
         if not candidates:
@@ -136,6 +151,44 @@ class MCPRouter:
     def should_use_mcp(self, user_input: str) -> bool:
         return bool(self._candidate_servers(user_input))
 
+    def _route_fetch_request(self, message: str) -> MCPRoute | None:
+        if not _looks_like_fetch_request(message):
+            return None
+
+        server = self.manager.get_server("fetch")
+        if server is None or not server.enabled:
+            return None
+
+        url = extract_url(message)
+        rewritten_query = url or rewrite_query(message)
+        tools = self.manager.list_tools(server.key)
+        selected_tool = _find_tool(tools, "fetch")
+        tool_name = "fetch"
+        if selected_tool:
+            arguments = self._build_fetch_arguments(rewritten_query, selected_tool)
+            reason = "Fetch request matched fetch server and fetch tool."
+        else:
+            arguments = {"url": rewritten_query, "max_length": FETCH_MAX_LENGTH}
+            reason = "Fetch request matched fetch server; tool discovery unavailable, using fetch fallback."
+
+        route = MCPRoute(
+            server_name=server.key,
+            tool_name=tool_name,
+            arguments=arguments,
+            reason=reason,
+            original_query=message,
+            rewritten_query=rewritten_query,
+            query_fallbacks=[rewritten_query] if rewritten_query else [],
+        )
+        logger.info(
+            "MCP fetch route selected: server_name=%s tool_name=%s arguments=%s reason=%s",
+            route.server_name,
+            route.tool_name,
+            route.arguments,
+            route.reason,
+        )
+        return route
+
     def _candidate_servers(self, message: str) -> list[tuple[MCPServerConfig, int]]:
         lowered = message.lower()
         candidates: list[tuple[MCPServerConfig, int]] = []
@@ -161,6 +214,8 @@ class MCPRouter:
                     score += 2
             if server.key == "modelscope" and any(word.lower() in lowered for word in MODELSCOPE_PRIORITY_WORDS):
                 score += 50
+            if server.key == "fetch" and _looks_like_fetch_request(message):
+                score += 100
             if score > 0:
                 candidates.append((server, score))
 
@@ -231,6 +286,25 @@ class MCPRouter:
 
         return arguments or {"query": query}
 
+    def _build_fetch_arguments(self, url: str, tool: dict[str, Any]) -> dict[str, Any]:
+        input_schema = tool.get("input_schema") or tool.get("inputSchema") or {}
+        properties = input_schema.get("properties", {}) if isinstance(input_schema, dict) else {}
+        arguments = {"url": url, "max_length": FETCH_MAX_LENGTH}
+
+        if not isinstance(properties, dict) or not properties:
+            return arguments
+
+        for property_name, property_schema in properties.items():
+            lowered_name = str(property_name).lower()
+            if lowered_name == "url" or "url" in lowered_name:
+                arguments[property_name] = url
+            elif lowered_name == "max_length" or lowered_name == "maxlength":
+                arguments[property_name] = FETCH_MAX_LENGTH
+            elif any(hint in lowered_name for hint in LIMIT_ARGUMENT_HINTS):
+                arguments[property_name] = _schema_default(property_schema, FETCH_MAX_LENGTH)
+
+        return arguments
+
 
 def rewrite_query(user_input: str) -> str:
     """Extract the search phrase and normalize common ModelScope aliases."""
@@ -250,6 +324,13 @@ def rewrite_query(user_input: str) -> str:
     return query.strip() or str(user_input or "").strip()
 
 
+def extract_url(text: str) -> str:
+    match = re.search(r"https?://[^\s<>\]）)，。！？；;\"']+", str(text or ""), flags=re.I)
+    if not match:
+        return ""
+    return match.group(0).rstrip(".,!?;:，。！？；：)")
+
+
 def query_fallbacks(query: str) -> list[str]:
     normalized = rewrite_query(query)
     candidates = [normalized] if normalized else []
@@ -262,6 +343,8 @@ def query_fallbacks(query: str) -> list[str]:
 
 
 def _fallback_tool_name(server_name: str, message: str) -> str:
+    if server_name == "fetch":
+        return "fetch"
     if server_name != "modelscope":
         return "search"
 
@@ -310,6 +393,19 @@ def _category_keywords(message: str) -> tuple[str, ...]:
 
 def _keyword_score(searchable: str, keywords: tuple[str, ...] | list[str], weight: int) -> int:
     return sum(weight for keyword in keywords if keyword and keyword.lower() in searchable)
+
+
+def _looks_like_fetch_request(message: str) -> bool:
+    lowered = str(message or "").lower()
+    return any(keyword.lower() in lowered for keyword in FETCH_REQUEST_KEYWORDS)
+
+
+def _find_tool(tools: list[dict[str, Any]], tool_name: str) -> dict[str, Any] | None:
+    expected = tool_name.casefold()
+    for tool in tools:
+        if str(tool.get("name") or tool.get("tool_name") or "").strip().casefold() == expected:
+            return tool
+    return None
 
 
 def _schema_default(schema: Any, fallback: Any) -> Any:

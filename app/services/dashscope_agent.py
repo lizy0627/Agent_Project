@@ -341,15 +341,31 @@ class DashScopeAgent:
         return self._call_planned_tool(planned_call)
 
     def _call_planned_tool(self, planned_call: PlannedToolCall | None) -> ToolResult | None:
+        logger.info(
+            "EXEC_TOOL=%s ARGS=%s",
+            planned_call.name if planned_call else None,
+            planned_call.arguments if planned_call else None,
+        )
         if planned_call is None:
             logger.info("No tool call needed for current user message")
             return None
 
-        logger.info("Tool call planned: name=%s", planned_call.name)
+        logger.info(
+            "Executing planned tool: name=%s arguments=%s",
+            planned_call.name,
+            planned_call.arguments,
+        )
         if planned_call.name == "mcp_tool":
             return self._call_mcp_tool(planned_call)
 
         return self.tool_manager.call(planned_call.name, **planned_call.arguments)
+
+    def _log_planned_tool(self, planned_call: PlannedToolCall) -> None:
+        logger.info(
+            "PLANNED_TOOL=%s ARGS=%s",
+            planned_call.name,
+            planned_call.arguments,
+        )
 
     def _call_mcp_tool(self, planned_call: PlannedToolCall) -> ToolResult:
         original_query = str(planned_call.arguments.get("original_query") or "")
@@ -1040,35 +1056,41 @@ class DashScopeAgent:
 
     def _plan_tool_call(self, messages: list[ChatMessage]) -> PlannedToolCall | None:
         user_message = self._latest_user_message(messages)
+        logger.info("USER=%s", user_message)
+        logger.info("USER_MESSAGE=%s", user_message)
         if not user_message:
             return None
 
+        planned_call: PlannedToolCall | None = None
         if self._looks_like_time_request(user_message):
-            return PlannedToolCall(
+            planned_call = PlannedToolCall(
                 name="get_current_time",
                 arguments={"timezone": "Asia/Shanghai"},
             )
+        else:
+            expression = self._extract_calculation_expression(user_message)
+            if expression:
+                planned_call = PlannedToolCall(
+                    name="calculate",
+                    arguments={"expression": expression},
+                )
 
-        expression = self._extract_calculation_expression(user_message)
-        if expression:
-            return PlannedToolCall(
-                name="calculate",
-                arguments={"expression": expression},
-            )
+        if planned_call is None:
+            mcp_call = self._plan_mcp_tool(user_message)
+            logger.info("ROUTE=%s", mcp_call)
+            if mcp_call:
+                planned_call = mcp_call
 
-        text_to_summarize = self._extract_text_to_summarize(user_message)
-        if text_to_summarize:
-            return PlannedToolCall(
-                name="summarize_text",
-                arguments={"text": text_to_summarize},
-            )
+        if planned_call is None:
+            text_to_summarize = self._extract_text_to_summarize(user_message)
+            if text_to_summarize:
+                planned_call = PlannedToolCall(
+                    name="summarize_text",
+                    arguments={"text": text_to_summarize},
+                )
 
-        mcp_call = self._plan_mcp_tool(user_message)
-        if mcp_call:
-            return mcp_call
-
-        if self._looks_like_search_request(user_message):
-            return PlannedToolCall(
+        if planned_call is None and self._looks_like_search_request(user_message):
+            planned_call = PlannedToolCall(
                 name="web_search",
                 arguments={
                     "query": user_message,
@@ -1077,7 +1099,10 @@ class DashScopeAgent:
                 },
             )
 
-        return None
+        if planned_call:
+            logger.info("SELECTED=%s", planned_call.name)
+            self._log_planned_tool(planned_call)
+        return planned_call
 
     def _messages_with_tool_result(
         self,
@@ -1164,7 +1189,7 @@ class DashScopeAgent:
         if not route:
             return None
 
-        return PlannedToolCall(
+        planned_call = PlannedToolCall(
             name="mcp_tool",
             arguments={
                 "server_name": route["server_name"],
@@ -1176,6 +1201,8 @@ class DashScopeAgent:
                 "route_reason": route.get("reason") or "",
             },
         )
+        self._log_planned_tool(planned_call)
+        return planned_call
 
     def _plan_modelscope_mcp_tool(self, user_message: str) -> PlannedToolCall | None:
         if not self.settings.mcp_enabled:
@@ -1191,7 +1218,7 @@ class DashScopeAgent:
 
         rewritten_query = normalize_query(extract_search_keyword(user_message)) or normalize_query(user_message)
         arguments = self._build_mcp_tool_arguments(user_message, tool, rewritten_query)
-        return PlannedToolCall(
+        planned_call = PlannedToolCall(
             name="mcp_tool",
             arguments={
                 "server_name": server_name,
@@ -1201,6 +1228,8 @@ class DashScopeAgent:
                 "rewritten_query": rewritten_query,
             },
         )
+        self._log_planned_tool(planned_call)
+        return planned_call
 
     def _looks_like_modelscope_mcp_request(self, message: str) -> bool:
         lowered = message.lower()
@@ -1302,6 +1331,16 @@ class DashScopeAgent:
 
     def _with_mcp_query_arguments(self, arguments: dict[str, Any], query: str) -> dict[str, Any]:
         updated = dict(arguments)
+        url_keys = [
+            key
+            for key in updated
+            if "url" in str(key).lower()
+        ]
+        if url_keys:
+            for key in url_keys:
+                updated[key] = query
+            return updated
+
         query_keys = [
             key
             for key in updated
