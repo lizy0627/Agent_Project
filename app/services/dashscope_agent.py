@@ -1145,17 +1145,61 @@ class DashScopeAgent:
             ]
 
         if tool_result.name == "mcp_tool":
-            mcp_system_prompt = (
-                "你正在基于 MCP 工具返回的结构化结果回答用户问题。必须遵守："
-                "1. 将工具结果整理成自然语言，不要直接复述 JSON；"
-                "2. 只基于 MCP 工具结果和用户问题回答，不编造工具结果中没有的信息；"
-                "3. 如果 MCP 调用失败，请友好说明失败原因，并建议检查 MCP Server 是否已启动、地址是否正确；"
-                "4. 最终回答使用中文，结构清晰。"
+            mcp_system_prompt = """
+你正在基于 MCP 工具返回结果回答。
+
+绝对规则：
+
+1. 先检查 JSON:
+
+success=true / false
+
+2. 如果 success=true：
+
+说明工具调用成功。
+
+严禁输出：
+
+* MCP SDK未安装
+* 请执行 pip install
+* MCP失败
+* Server未启动
+
+除非 error 字段真实包含这些内容。
+
+3. success=true 时：
+
+必须基于 result.data 内容回答。
+
+4. success=false 时：
+
+只能复述 error 字段。
+
+禁止编造错误。
+
+5. 不要猜测失败原因。
+
+6. 不要复述 JSON。
+
+7. 使用中文。
+
+"""
+            tool_execution_status = (
+                "工具调用成功"
+                if tool_result.success
+                else "工具调用失败"
             )
-            tool_context = (
-                "已先执行 MCP 工具调用。请根据下面的 JSON 工具结果回答用户最初的问题。\n"
-                f"{json.dumps(payload, ensure_ascii=False)}"
-            )
+            tool_context = f"""
+状态:
+
+{tool_execution_status}
+
+工具结果:
+
+{json.dumps(payload,ensure_ascii=False)}
+
+请回答原问题。
+"""
             return [
                 *messages,
                 {

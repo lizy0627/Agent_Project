@@ -44,5 +44,29 @@
     "env": {},
     "headers": {},
     "category": "web"
+  },
+  "tavily": {
+    "name": "Tavily MCP",
+    "transport": "sse",
+    "url": "https://mcp.api-inference.modelscope.net/cb0009a2091541/sse",
+    "enabled": true,
+    "keywords": [
+      "搜索",
+      "联网",
+      "新闻",
+      "网页",
+      "查一下",
+      "今日",
+      "AI新闻",
+      "实时",
+      "Tavily"
+    ],
+    "description": "联网搜索、网页检索、实时新闻工具",
+    "timeout_seconds": 60,
+    "command": null,
+    "args": [],
+    "env": {},
+    "headers": {},
+    "category": "search"
   }
 }

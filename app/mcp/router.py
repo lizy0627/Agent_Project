@@ -46,6 +46,35 @@ FETCH_REQUEST_KEYWORDS = (
     "https://",
 )
 FETCH_MAX_LENGTH = 2000
+TAVILY_SERVER_NAME = "tavily"
+TAVILY_REQUEST_KEYWORDS = (
+    "搜索",
+    "联网",
+    "新闻",
+    "查一下",
+    "今日",
+    "AI新闻",
+    "热点",
+    "实时",
+    "Tavily",
+)
+TAVILY_TOOL_CANDIDATES = ("search", "tavily_search", "web_search")
+TAVILY_QUERY_NOISE_WORDS = (
+    "请使用",
+    "使用",
+    "请用",
+    "用",
+    "Tavily",
+    "tavily",
+    "搜索",
+    "联网",
+    "查一下",
+    "查询",
+    "查找",
+    "检索",
+    "帮我",
+    "麻烦",
+)
 
 
 @dataclass(frozen=True)
@@ -80,6 +109,10 @@ class MCPRouter:
         message = str(user_input or "").strip()
         if not message:
             return None
+
+        tavily_route = self._route_tavily_request(message)
+        if tavily_route:
+            return tavily_route.to_dict()
 
         fetch_route = self._route_fetch_request(message)
         if fetch_route:
@@ -186,6 +219,43 @@ class MCPRouter:
             route.tool_name,
             route.arguments,
             route.reason,
+        )
+        return route
+
+    def _route_tavily_request(self, message: str) -> MCPRoute | None:
+        if not _looks_like_tavily_request(message):
+            return None
+
+        server_name = TAVILY_SERVER_NAME
+        server = self.manager.get_server(server_name)
+        if server is None or not server.enabled:
+            return None
+
+        tools = self.manager.list_tools(server.key)
+        selected_tool = _find_first_tool(tools, TAVILY_TOOL_CANDIDATES)
+        tool_name = str(selected_tool.get("name") or "") if selected_tool else TAVILY_TOOL_CANDIDATES[0]
+        query = extract_tavily_query(message)
+        reason = "Tavily request matched realtime search keywords."
+        if not selected_tool:
+            reason = (
+                "Tavily request matched realtime search keywords; "
+                "tool discovery unavailable, using search fallback."
+            )
+
+        route = MCPRoute(
+            server_name=server.key,
+            tool_name=tool_name,
+            arguments={"query": query},
+            reason=reason,
+            original_query=message,
+            rewritten_query=query,
+            query_fallbacks=[query] if query else [],
+        )
+        logger.info(
+            "Tavily route selected: server=%s tool=%s query=%s",
+            server_name,
+            tool_name,
+            query,
         )
         return route
 
@@ -331,6 +401,19 @@ def extract_url(text: str) -> str:
     return match.group(0).rstrip(".,!?;:，。！？；：)")
 
 
+def extract_tavily_query(text: str) -> str:
+    query = " ".join(str(text or "").strip().split())
+    if not query:
+        return ""
+
+    for word in TAVILY_QUERY_NOISE_WORDS:
+        query = re.sub(re.escape(word), " ", query, flags=re.I)
+
+    query = re.sub(r"[，。！？?！:：；;]+", " ", query)
+    query = " ".join(query.split())
+    return query.strip() or str(text or "").strip()
+
+
 def query_fallbacks(query: str) -> list[str]:
     normalized = rewrite_query(query)
     candidates = [normalized] if normalized else []
@@ -400,12 +483,30 @@ def _looks_like_fetch_request(message: str) -> bool:
     return any(keyword.lower() in lowered for keyword in FETCH_REQUEST_KEYWORDS)
 
 
+def _looks_like_tavily_request(message: str) -> bool:
+    lowered = str(message or "").lower()
+    return any(keyword.lower() in lowered for keyword in TAVILY_REQUEST_KEYWORDS)
+
+
 def _find_tool(tools: list[dict[str, Any]], tool_name: str) -> dict[str, Any] | None:
-    expected = tool_name.casefold()
+    expected = _normalize_tool_name(tool_name)
     for tool in tools:
-        if str(tool.get("name") or tool.get("tool_name") or "").strip().casefold() == expected:
+        actual = str(tool.get("name") or tool.get("tool_name") or "").strip()
+        if _normalize_tool_name(actual) == expected:
             return tool
     return None
+
+
+def _find_first_tool(tools: list[dict[str, Any]], tool_names: tuple[str, ...]) -> dict[str, Any] | None:
+    for tool_name in tool_names:
+        tool = _find_tool(tools, tool_name)
+        if tool:
+            return tool
+    return None
+
+
+def _normalize_tool_name(tool_name: str) -> str:
+    return str(tool_name or "").strip().replace("-", "_").casefold()
 
 
 def _schema_default(schema: Any, fallback: Any) -> Any:
