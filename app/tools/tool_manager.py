@@ -6,6 +6,16 @@ from app.tools.base import Tool, ToolResult
 
 
 logger = get_logger(__name__)
+SENSITIVE_LOG_KEYS = {
+    "api_key",
+    "token",
+    "password",
+    "secret",
+    "authorization",
+    "access_key",
+}
+MAX_LOG_VALUE_LENGTH = 200
+MASKED_LOG_VALUE = "***"
 
 
 class ToolManager:
@@ -58,11 +68,31 @@ class ToolManager:
     def _safe_log_args(self, kwargs: dict[str, Any]) -> dict[str, Any]:
         safe_args: dict[str, Any] = {}
         for key, value in kwargs.items():
-            if isinstance(value, str) and len(value) > 200:
-                safe_args[key] = f"{value[:200]}..."
-            else:
-                safe_args[key] = value
+            safe_args[key] = self._safe_log_value(key, value)
         return safe_args
+
+    def _safe_log_value(self, key: str, value: Any) -> Any:
+        if self._is_sensitive_log_key(key):
+            return MASKED_LOG_VALUE
+        return self._truncate_log_value(value)
+
+    def _is_sensitive_log_key(self, key: str) -> bool:
+        normalized_key = key.strip().lower()
+        return normalized_key in SENSITIVE_LOG_KEYS
+
+    def _truncate_log_value(self, value: Any) -> Any:
+        if isinstance(value, dict):
+            return {
+                nested_key: self._safe_log_value(str(nested_key), nested_value)
+                for nested_key, nested_value in value.items()
+            }
+        if isinstance(value, list):
+            return [self._truncate_log_value(item) for item in value]
+        if isinstance(value, tuple):
+            return tuple(self._truncate_log_value(item) for item in value)
+        if isinstance(value, str) and len(value) > MAX_LOG_VALUE_LENGTH:
+            return f"{value[:MAX_LOG_VALUE_LENGTH]}..."
+        return value
 
     def _elapsed_ms(self, started_at: float) -> float:
         return round((perf_counter() - started_at) * 1000, 2)

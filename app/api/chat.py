@@ -9,16 +9,18 @@ from app.core.config import Settings, get_settings
 from app.core.errors import AgentError, UnknownAgentError
 from app.core.logger import get_logger
 from app.schemas.chat import ChatRequest, ChatResponse, ErrorResponse
-from app.services.conversation_store import ConversationStore
+from app.services.conversation_store import ConversationStoreProtocol, create_conversation_store
 from app.services.dashscope_agent import DashScopeAgent
 
 
 router = APIRouter()
 logger = get_logger(__name__)
-conversation_store = ConversationStore(max_rounds=30)
 agent_lock = Lock()
+store_lock = Lock()
 cached_agent: DashScopeAgent | None = None
 cached_agent_signature: tuple[str | None, str, str, float, str | None, str, bool, str, int] | None = None
+cached_conversation_store: ConversationStoreProtocol | None = None
+cached_conversation_store_signature: tuple[str, str, int] | None = None
 DEFAULT_SYSTEM_PROMPT = "\u4f60\u662f\u4e00\u4e2a\u7b80\u6d01\u3001\u53ef\u9760\u7684\u4e2d\u6587 AI \u52a9\u624b\u3002"
 WEB_SEARCH_STATUS_SEARCHING = "正在联网搜索..."
 WEB_SEARCH_STATUS_ORGANIZING = "正在搜索并整理资料..."
@@ -86,10 +88,33 @@ def get_agent(settings: Settings = Depends(get_settings)) -> DashScopeAgent:
         return cached_agent
 
 
-def get_conversation_store() -> ConversationStore:
-    """Return the in-memory conversation store singleton."""
+def get_conversation_store(settings: Settings = Depends(get_settings)) -> ConversationStoreProtocol:
+    """Return the configured conversation store singleton."""
 
-    return conversation_store
+    global cached_conversation_store, cached_conversation_store_signature
+
+    max_rounds = 30
+    signature = (
+        settings.conversation_store,
+        str(settings.conversation_db_path),
+        max_rounds,
+    )
+    with store_lock:
+        if cached_conversation_store is None or cached_conversation_store_signature != signature:
+            cached_conversation_store = create_conversation_store(
+                store_type=settings.conversation_store,
+                db_path=settings.conversation_db_path,
+                max_rounds=max_rounds,
+            )
+            cached_conversation_store_signature = signature
+            logger.info(
+                "Conversation store initialized: type=%s db_path=%s max_rounds=%s",
+                settings.conversation_store,
+                settings.conversation_db_path,
+                max_rounds,
+            )
+
+        return cached_conversation_store
 
 
 @router.get("/")
@@ -103,7 +128,7 @@ def health_check() -> dict[str, str]:
 def chat(
     request: ChatRequest,
     agent: DashScopeAgent = Depends(get_agent),
-    store: ConversationStore = Depends(get_conversation_store),
+    store: ConversationStoreProtocol = Depends(get_conversation_store),
 ) -> ChatResponse | JSONResponse:
     """Send a user message to the agent and return its reply."""
 
@@ -137,7 +162,7 @@ def chat(
 def stream_chat(
     request: ChatRequest,
     settings: Settings = Depends(get_settings),
-    store: ConversationStore = Depends(get_conversation_store),
+    store: ConversationStoreProtocol = Depends(get_conversation_store),
 ) -> StreamingResponse:
     """Stream a chat response using server-sent events."""
 
@@ -211,7 +236,7 @@ def stream_chat(
 def build_model_messages(
     request: ChatRequest,
     conversation_id: str,
-    store: ConversationStore,
+    store: ConversationStoreProtocol,
 ) -> list[dict[str, str]]:
     """Build system prompt, stored history, and the current user message."""
 

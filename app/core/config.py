@@ -1,7 +1,9 @@
 from functools import lru_cache
 from pathlib import Path
+from typing import Annotated
 
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import Field, field_validator
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
 BASE_DIR = Path(__file__).resolve().parents[2]
@@ -15,7 +17,11 @@ HOST = "127.0.0.1"
 PORT = 8000
 FRONTEND_URL = f"http://{HOST}:{PORT}/ui"
 
-CORS_ALLOW_ORIGINS = ["*"]
+DEFAULT_CORS_ALLOW_ORIGINS = [
+    "http://127.0.0.1:8000",
+    "http://localhost:8000",
+]
+CORS_ALLOW_ORIGINS = DEFAULT_CORS_ALLOW_ORIGINS
 
 
 class Settings(BaseSettings):
@@ -27,11 +33,29 @@ class Settings(BaseSettings):
     dashscope_timeout_seconds: float = 30.0
     tavily_api_key: str | None = None
     web_search_provider: str = "tavily"
+    conversation_store: str = "memory"
+    conversation_db_path: Path = BASE_DIR / "data" / "conversations.db"
+    auto_open_browser: bool = True
     mcp_enabled: bool = True
     mcp_default_server: str = "modelscope"
     modelscope_api_token: str | None = None
     modelscope_mcp_url: str = "http://127.0.0.1:8001/mcp"
     mcp_timeout_seconds: int = 20
+    cors_allow_origins: Annotated[list[str], NoDecode] = Field(
+        default_factory=lambda: DEFAULT_CORS_ALLOW_ORIGINS.copy(),
+    )
+
+    @field_validator("cors_allow_origins", mode="before")
+    @classmethod
+    def parse_cors_allow_origins(cls, value):
+        """Support comma-separated CORS origins in .env."""
+
+        if value is None:
+            return DEFAULT_CORS_ALLOW_ORIGINS.copy()
+        if isinstance(value, str):
+            origins = [origin.strip() for origin in value.split(",") if origin.strip()]
+            return origins or DEFAULT_CORS_ALLOW_ORIGINS.copy()
+        return value
 
     model_config = SettingsConfigDict(
         env_file=".env",

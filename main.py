@@ -8,16 +8,16 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 import uvicorn
 
-from app.api.chat import router as chat_router
+from app.api.chat import get_conversation_store, router as chat_router
 from app.core.config import (
     APP_DESCRIPTION,
     APP_TITLE,
     APP_VERSION,
-    CORS_ALLOW_ORIGINS,
     FRONTEND_DIR,
     FRONTEND_URL,
     HOST,
     PORT,
+    get_settings,
 )
 from app.core.errors import AgentError, UnknownAgentError
 from app.core.logger import get_logger, setup_logging
@@ -44,6 +44,8 @@ def frontend_page() -> Response:
 def create_app() -> FastAPI:
     """Create the FastAPI application and register routes/static files."""
 
+    settings = get_settings()
+    get_conversation_store(settings)
     app = FastAPI(
         title=APP_TITLE,
         description=APP_DESCRIPTION,
@@ -52,7 +54,7 @@ def create_app() -> FastAPI:
 
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=CORS_ALLOW_ORIGINS,
+        allow_origins=settings.cors_allow_origins,
         allow_credentials=False,
         allow_methods=["*"],
         allow_headers=["*"],
@@ -121,5 +123,7 @@ def open_browser() -> None:
 
 
 if __name__ == "__main__":
-    Timer(1.0, open_browser).start()
+    settings = get_settings()
+    if settings.auto_open_browser:
+        Timer(1.0, open_browser).start()
     uvicorn.run(app, host=HOST, port=PORT)
