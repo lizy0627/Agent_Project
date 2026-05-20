@@ -12,6 +12,7 @@ from app.core.logger import get_logger
 logger = get_logger(__name__)
 WEB_SEARCH_CACHE_TTL_SECONDS = 3 * 60
 WEB_SEARCH_CACHE_MAX_SIZE = 100
+WEB_SEARCH_STALE_CACHE_WARNING = "搜索服务暂时不可用，已返回过期缓存"
 _WEB_SEARCH_CACHE: dict[str, tuple[float, dict]] = {}
 _WEB_SEARCH_CACHE_LOCK = Lock()
 
@@ -81,6 +82,9 @@ class WebSearchTool:
                 raise ValueError("Tavily API returned a non-object JSON response.")
         except httpx.TimeoutException as exc:
             logger.warning("Tavily search request timed out: query=%s", query[:200])
+            stale_result = self._get_stale_cached_result(cache_key)
+            if stale_result is not None:
+                return self._stale_cache_response(stale_result, cache_key)
             raise TimeoutError("Tavily search request timed out after 5 seconds.") from exc
         except httpx.HTTPStatusError as exc:
             detail = self._extract_error_detail(exc.response)
@@ -89,6 +93,9 @@ class WebSearchTool:
                 exc.response.status_code,
                 detail,
             )
+            stale_result = self._get_stale_cached_result(cache_key)
+            if stale_result is not None:
+                return self._stale_cache_response(stale_result, cache_key)
             raise ValueError(f"Tavily API returned an error: {detail}") from exc
         except httpx.RequestError as exc:
             logger.warning(
@@ -96,6 +103,9 @@ class WebSearchTool:
                 query[:200],
                 exc.__class__.__name__,
             )
+            stale_result = self._get_stale_cached_result(cache_key)
+            if stale_result is not None:
+                return self._stale_cache_response(stale_result, cache_key)
             raise ConnectionError("Unable to connect to Tavily Search API.") from exc
         except ValueError as exc:
             logger.warning("Tavily search returned invalid JSON: query=%s", query[:200])
@@ -151,10 +161,34 @@ class WebSearchTool:
             cached_at, result = cached
             if now - cached_at > WEB_SEARCH_CACHE_TTL_SECONDS:
                 logger.info("Web search cache expired: key=%s", self._safe_cache_key_for_log(cache_key))
-                del _WEB_SEARCH_CACHE[cache_key]
                 return None
 
             return deepcopy(result)
+
+    def _get_stale_cached_result(self, cache_key: str) -> dict[str, Any] | None:
+        now = time()
+        with _WEB_SEARCH_CACHE_LOCK:
+            cached = _WEB_SEARCH_CACHE.get(cache_key)
+            if cached is None:
+                return None
+
+            cached_at, result = cached
+            if now - cached_at <= WEB_SEARCH_CACHE_TTL_SECONDS:
+                return None
+
+            return deepcopy(result)
+
+    def _stale_cache_response(self, result: dict[str, Any], cache_key: str) -> dict[str, Any]:
+        logger.warning(
+            "Tavily search failed; returning stale cache: key=%s",
+            self._safe_cache_key_for_log(cache_key),
+        )
+        return {
+            **result,
+            "cached": True,
+            "stale": True,
+            "warning": WEB_SEARCH_STALE_CACHE_WARNING,
+        }
 
     def _set_cached_result(self, cache_key: str, result: dict[str, Any]) -> None:
         with _WEB_SEARCH_CACHE_LOCK:

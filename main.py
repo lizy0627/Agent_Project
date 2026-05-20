@@ -9,6 +9,7 @@ from fastapi.staticfiles import StaticFiles
 import uvicorn
 
 from app.api.chat import error_payload, error_response, get_conversation_store, router as chat_router
+from app.api.mcp import router as mcp_router
 from app.core.config import (
     APP_DESCRIPTION,
     APP_TITLE,
@@ -59,6 +60,7 @@ def create_app() -> FastAPI:
     )
 
     app.include_router(chat_router)
+    app.include_router(mcp_router)
 
     if FRONTEND_DIR.exists():
         app.mount(

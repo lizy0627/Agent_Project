@@ -1,5 +1,8 @@
 // Configuration
 
+const DEBUG = false;
+function debugLog(...args) { if (DEBUG) console.log(...args); }
+
 const CHAT_API_URL = "http://127.0.0.1:8000/chat";
 const CHAT_STREAM_API_URL = "http://127.0.0.1:8000/chat/stream";
 
@@ -123,7 +126,7 @@ ensureModeItems();
 ensureModelOptions();
 ensureSettingsModeOptions();
 const modeButtons = getRequiredElements(".mode-item");
-console.log("modeButtons found", modeButtons.length);
+debugLog("modeButtons found", modeButtons.length);
 
 // State
 
@@ -140,6 +143,7 @@ let isLoading = false;
 let activeAbortController = null;
 let shouldStickToBottom = true;
 let conversationSearchQuery = "";
+const messageElementMap = new Map();
 
 initPage();
 
@@ -154,7 +158,7 @@ function getRequiredElement(selector) {
     console.warn("element missing", selector);
     throw new Error(`页面缺少必要元素：${selector}`);
   }
-  console.log("element found", selector, element);
+  debugLog("element found", selector, element);
   return element;
 }
 
@@ -164,7 +168,7 @@ function getRequiredElements(selector) {
     console.warn("elements missing", selector);
     throw new Error(`页面缺少必要元素：${selector}`);
   }
-  console.log("elements found", selector, elements.length);
+  debugLog("elements found", selector, elements.length);
   return elements;
 }
 
@@ -254,7 +258,7 @@ function ensureModeItems() {
       `.mode-item[data-mode="${modeName}"]`,
     );
     if (!existingButton) {
-      console.log("mode-item created", modeName);
+      debugLog("mode-item created", modeName);
       modeMenu.appendChild(createModeButton(modeName));
     }
   });
@@ -512,17 +516,17 @@ function renderConversationList() {
     item.classList.toggle("active", conversation.id === conversationId);
     item.setAttribute("aria-label", `切换到 ${conversation.title}`);
     item.addEventListener("click", () => {
-      console.log("conversation item clicked", conversation.id);
+      debugLog("conversation item clicked", conversation.id);
       switchConversation(conversation.id);
     });
     item.addEventListener("keydown", (event) => {
-      console.log("conversation item keydown", event.key, conversation.id);
+      debugLog("conversation item keydown", event.key, conversation.id);
       if (event.target !== item) {
         return;
       }
       if (event.key === "Enter" || event.key === " ") {
         event.preventDefault();
-        console.log("conversation item keyboard activate", conversation.id);
+        debugLog("conversation item keyboard activate", conversation.id);
         switchConversation(conversation.id);
       }
     });
@@ -554,7 +558,7 @@ function renderConversationList() {
     renameButton.title = "重命名会话";
     renameButton.setAttribute("aria-label", `重命名 ${conversation.title}`);
     renameButton.addEventListener("click", (event) => {
-      console.log("renameConversationButton clicked", conversation.id);
+      debugLog("renameConversationButton clicked", conversation.id);
       event.stopPropagation();
       renameConversation(conversation.id);
     });
@@ -566,7 +570,7 @@ function renderConversationList() {
     deleteButton.title = "删除会话";
     deleteButton.setAttribute("aria-label", `删除 ${conversation.title}`);
     deleteButton.addEventListener("click", (event) => {
-      console.log("deleteConversationButton clicked", conversation.id);
+      debugLog("deleteConversationButton clicked", conversation.id);
       event.stopPropagation();
       deleteConversation(conversation.id);
     });
@@ -628,6 +632,7 @@ function updateHeaderTitle() {
 
 function renderMessages({ scrollToEnd = true } = {}) {
   messageList.innerHTML = "";
+  messageElementMap.clear();
 
   if (messages.length === 0) {
     renderWelcomePanel();
@@ -669,7 +674,7 @@ function renderWelcomePanel() {
     button.className = "prompt-card";
     button.type = "button";
     button.textContent = prompt;
-    console.log("prompt-card created", prompt);
+    debugLog("prompt-card created", prompt);
     promptGrid.appendChild(button);
   });
 
@@ -680,7 +685,7 @@ function renderWelcomePanel() {
 
 function handlePromptCardClick(promptCard) {
   const text = promptCard.textContent.trim();
-  console.log("prompt card clicked", text);
+  debugLog("prompt card clicked", text);
 
   const input = document.querySelector("#messageInput");
   if (!input) {
@@ -720,6 +725,12 @@ function appendMessage(message) {
 }
 
 function appendMessageElement(message) {
+  const messageItem = createMessageElement(message);
+  messageList.appendChild(messageItem);
+  messageElementMap.set(message.id, messageItem);
+}
+
+function createMessageElement(message) {
   const messageItem = document.createElement("article");
   messageItem.className = `message ${message.role}-message`;
   messageItem.dataset.messageId = message.id;
@@ -766,7 +777,22 @@ function appendMessageElement(message) {
 
   shell.appendChild(content);
   messageItem.appendChild(shell);
-  messageList.appendChild(messageItem);
+  return messageItem;
+}
+
+function replaceMessageElement(message, currentMessageId = message.id) {
+  const currentElement = messageElementMap.get(currentMessageId);
+  if (!currentElement || !currentElement.isConnected) {
+    return false;
+  }
+
+  const nextElement = createMessageElement(message);
+  currentElement.replaceWith(nextElement);
+  if (currentMessageId !== message.id) {
+    messageElementMap.delete(currentMessageId);
+  }
+  messageElementMap.set(message.id, nextElement);
+  return true;
 }
 
 function createMessageToolbar(message) {
@@ -784,7 +810,7 @@ function createRegenerateButton(message) {
   button.type = "button";
   button.textContent = "重新生成";
   button.addEventListener("click", () => {
-    console.log("regenerate-message-button clicked", message.id);
+    debugLog("regenerate-message-button clicked", message.id);
     regenerateAgentReply(message.id);
   });
 
@@ -797,7 +823,7 @@ function createCopyButton(text) {
   button.type = "button";
   button.textContent = "复制";
   button.addEventListener("click", () => {
-    console.log("copy-message-button clicked");
+    debugLog("copy-message-button clicked");
     copyText(text, button, "已复制");
   });
 
@@ -856,7 +882,9 @@ function createToolPanel(message) {
   title.append(marker, name);
 
   const status = document.createElement("span");
-  const statusText = formatToolStatus(message.toolStatus, message.toolError);
+  const toolErrorDetail = getToolErrorDetail(message);
+  const toolErrorMessage = isToolSuccessful(message) ? "" : getToolErrorMessage(message);
+  const statusText = formatToolStatus(message.toolStatus, toolErrorMessage);
   status.className = `tool-status ${statusText === "失败" ? "failed" : "success"}`;
   status.textContent = statusText;
 
@@ -867,9 +895,19 @@ function createToolPanel(message) {
   details.className = "tool-panel-details";
   details.appendChild(createToolDetail("工具名称", message.toolName || "未命名工具"));
   details.appendChild(createToolDetail("工具状态", statusText));
+  const routeReason = getToolRouteReason(message);
+  if (routeReason) {
+    details.appendChild(createToolDetail("调用原因", routeReason));
+  }
 
   if (message.toolDurationMs !== undefined && message.toolDurationMs !== null) {
     details.appendChild(createToolDetail("耗时", formatToolDuration(message.toolDurationMs)));
+  }
+
+  if (shouldShowToolErrorDetail(message)) {
+    details.appendChild(createToolDetail("\u9519\u8bef\u7801", toolErrorDetail.code || "\u672a\u77e5"));
+    details.appendChild(createToolDetail("\u9519\u8bef\u4fe1\u606f", toolErrorDetail.message || getToolDisplayError(message) || "\u672a\u77e5"));
+    details.appendChild(createToolDetail("\u662f\u5426\u53ef\u91cd\u8bd5", formatToolRetryable(toolErrorDetail.retryable)));
   }
 
   panel.appendChild(details);
@@ -1005,6 +1043,71 @@ function getToolDisplayResult(message) {
   }
 
   return "无返回结果";
+}
+
+function getToolRouteReason(message) {
+  const root = normalizeToolResultRoot(message.toolResult);
+  return String(root.route_reason || "").trim();
+}
+
+function shouldShowToolErrorDetail(message) {
+  return message.usedTool === true && !isToolSuccessful(message) && isToolFailed(message);
+}
+
+function isToolFailed(message) {
+  return Boolean(
+    message.toolStatus === "failed" ||
+      message.toolStatus === false ||
+      message.toolError ||
+      message.toolErrorCode ||
+      message.toolErrorMessage ||
+      message.toolErrorDetail,
+  );
+}
+
+function isToolSuccessful(message) {
+  return message.toolStatus === "success" || message.toolStatus === true;
+}
+
+function getToolErrorDetail(message) {
+  const detail = normalizeToolErrorDetail(message.toolErrorDetail);
+  return {
+    code: detail.code || message.toolErrorCode || "",
+    message: detail.message || message.toolErrorMessage || "",
+    retryable: detail.retryable ?? message.toolRetryable,
+  };
+}
+
+function normalizeToolErrorDetail(detail) {
+  if (!detail || typeof detail !== "object") {
+    return {};
+  }
+
+  return {
+    code: detail.code,
+    message: detail.message,
+    retryable: detail.retryable,
+  };
+}
+
+function getToolErrorMessage(message) {
+  return getToolErrorDetail(message).message || message.toolError || "";
+}
+
+function getToolDisplayError(message) {
+  return getToolErrorMessage(message) || message.toolError || "";
+}
+
+function formatToolRetryable(value) {
+  if (value === true) {
+    return "\u662f";
+  }
+
+  if (value === false) {
+    return "\u5426";
+  }
+
+  return "\u672a\u77e5";
 }
 
 function createToolDetail(label, value) {
@@ -1232,7 +1335,7 @@ function createCodeBlock(code, language) {
   copyButton.type = "button";
   copyButton.textContent = "复制代码";
   copyButton.addEventListener("click", () => {
-    console.log("code-copy-button clicked", language || "text");
+    debugLog("code-copy-button clicked", language || "text");
     copyText(code, copyButton, "已复制");
   });
 
@@ -1297,7 +1400,7 @@ function escapeHtml(value) {
 // Clipboard and indicators
 
 async function copyText(text, button, successText) {
-  console.log("copyText start", {
+  debugLog("copyText start", {
     textLength: text.length,
   });
   const previousText = button.textContent;
@@ -1357,26 +1460,32 @@ function removeWelcomePanel() {
 function updateMessage(messageId, updates) {
   const shouldKeepAtBottom = shouldStickToBottom || isMessageListNearBottom();
   const previousScrollTop = messageList.scrollTop;
-  const currentMessage = messages.find((message) => message.id === messageId);
+  const messageIndex = messages.findIndex((message) => message.id === messageId);
+  const currentMessage = messages[messageIndex];
+  if (!currentMessage) {
+    return;
+  }
+
   const nextRole = updates.role || currentMessage?.role;
   const nextType = updates.type || currentMessage?.type;
   const shouldShowNewMessageNotice =
     !shouldKeepAtBottom && (nextRole === "agent" || nextRole === "error") && nextType !== "loading";
+  const updatedMessage = {
+    ...currentMessage,
+    ...updates,
+  };
 
-  messages = messages.map((message) => {
-    if (message.id !== messageId) {
-      return message;
-    }
-
-    return {
-      ...message,
-      ...updates,
-    };
-  });
+  messages = [
+    ...messages.slice(0, messageIndex),
+    updatedMessage,
+    ...messages.slice(messageIndex + 1),
+  ];
 
   saveMessages();
   updateConversationMeta();
-  renderMessages({ scrollToEnd: false });
+  if (!replaceMessageElement(updatedMessage, messageId)) {
+    renderMessages({ scrollToEnd: false });
+  }
 
   if (shouldKeepAtBottom) {
     scrollToBottom();
@@ -1570,7 +1679,7 @@ function maybeRenameConversation(text) {
 }
 
 function setLoading(nextLoading) {
-  console.log("setLoading", nextLoading);
+  debugLog("setLoading", nextLoading);
   isLoading = nextLoading;
   messageInput.disabled = nextLoading;
   modelSelect.disabled = nextLoading;
@@ -1595,7 +1704,7 @@ function updateInputState() {
 }
 
 function setMode(mode) {
-  console.log("setMode start", mode);
+  debugLog("setMode start", mode);
   currentMode = normalizeMode(mode);
   localStorage.setItem(MODE_KEY, currentMode);
   currentModeText.textContent = currentMode;
@@ -1604,7 +1713,7 @@ function setMode(mode) {
   modeButtons.forEach((button) => {
     button.classList.toggle("active", button.dataset.mode === currentMode);
   });
-  console.log("mode changed", currentMode);
+  debugLog("mode changed", currentMode);
 }
 
 function setSelectedModel(model) {
@@ -1613,21 +1722,21 @@ function setSelectedModel(model) {
   modelSelect.value = selectedModel;
   settingsModelSelect.value = selectedModel;
   currentModelText.textContent = selectedModel;
-  console.log("model changed", selectedModel);
+  debugLog("model changed", selectedModel);
 }
 
 function setMaxContextRounds(value) {
   maxContextRounds = normalizeMaxContextRounds(value);
   localStorage.setItem(MAX_CONTEXT_ROUNDS_KEY, String(maxContextRounds));
   settingsMaxContextInput.value = String(maxContextRounds);
-  console.log("max context rounds changed", maxContextRounds);
+  debugLog("max context rounds changed", maxContextRounds);
 }
 
 function setStreamingEnabled(value) {
   streamingEnabled = Boolean(value);
   localStorage.setItem(STREAMING_ENABLED_KEY, String(streamingEnabled));
   settingsStreamingToggle.checked = streamingEnabled;
-  console.log("streaming changed", streamingEnabled);
+  debugLog("streaming changed", streamingEnabled);
 }
 
 function applyTheme(theme) {
@@ -1642,7 +1751,7 @@ function applyTheme(theme) {
     isDark ? "切换浅色主题" : "切换深色主题",
   );
   themeToggleButton.setAttribute("aria-pressed", String(isDark));
-  console.log("theme changed", currentTheme);
+  debugLog("theme changed", currentTheme);
 }
 
 function toggleTheme() {
@@ -1664,7 +1773,7 @@ async function requestAgentReply(
     onStatus = null,
   } = {},
 ) {
-  console.log("requestAgentReply start", {
+  debugLog("requestAgentReply start", {
     conversationId: targetConversationId,
     messageLength: message.length,
     mode: targetMode,
@@ -1723,7 +1832,7 @@ async function requestAgentReply(
 }
 
 async function requestJsonAgentReply(requestBody, signal, fallbackConversationId) {
-  console.log("POST /chat request start", requestBody);
+  debugLog("POST /chat request start", requestBody);
   const response = await fetch(CHAT_API_URL, {
     method: "POST",
     headers: {
@@ -1733,7 +1842,7 @@ async function requestJsonAgentReply(requestBody, signal, fallbackConversationId
     body: JSON.stringify(requestBody),
     signal,
   });
-  console.log("POST /chat response received", {
+  debugLog("POST /chat response received", {
     ok: response.ok,
     status: response.status,
     statusText: response.statusText,
@@ -1746,7 +1855,7 @@ async function requestJsonAgentReply(requestBody, signal, fallbackConversationId
   }
 
   const data = await parseJsonResponse(response);
-  console.log("POST /chat response body", data);
+  debugLog("POST /chat response body", data);
   if (!data.success) {
     const message = toFriendlyError(data.error);
     console.warn("Chat API returned an error:", message);
@@ -1763,6 +1872,10 @@ async function requestJsonAgentReply(requestBody, signal, fallbackConversationId
     toolStatus: data.tool_status,
     toolResult: data.tool_result,
     toolError: data.tool_error,
+    toolErrorCode: data.tool_error_code,
+    toolErrorMessage: data.tool_error_message,
+    toolRetryable: data.tool_retryable,
+    toolErrorDetail: data.tool_error_detail,
     toolDurationMs: data.tool_duration_ms,
   };
 }
@@ -1775,7 +1888,7 @@ async function requestStreamingAgentReply(
   onToolMetadata,
   onStatus,
 ) {
-  console.log("POST /chat/stream request start", requestBody);
+  debugLog("POST /chat/stream request start", requestBody);
   const response = await fetch(CHAT_STREAM_API_URL, {
     method: "POST",
     headers: {
@@ -1875,6 +1988,10 @@ async function requestStreamingAgentReply(
     toolStatus: done.tool_status ?? metadata.tool_status,
     toolResult: done.tool_result ?? metadata.tool_result,
     toolError: done.tool_error ?? metadata.tool_error,
+    toolErrorCode: done.tool_error_code ?? metadata.tool_error_code,
+    toolErrorMessage: done.tool_error_message ?? metadata.tool_error_message,
+    toolRetryable: done.tool_retryable ?? metadata.tool_retryable,
+    toolErrorDetail: done.tool_error_detail ?? metadata.tool_error_detail,
     toolDurationMs: done.tool_duration_ms ?? metadata.tool_duration_ms,
   };
 }
@@ -1886,6 +2003,10 @@ function normalizeToolMetadata(data = {}) {
     toolStatus: data.tool_status,
     toolResult: data.tool_result,
     toolError: data.tool_error,
+    toolErrorCode: data.tool_error_code,
+    toolErrorMessage: data.tool_error_message,
+    toolRetryable: data.tool_retryable,
+    toolErrorDetail: data.tool_error_detail,
     toolDurationMs: data.tool_duration_ms,
   };
 }
@@ -1937,9 +2058,9 @@ function findPreviousUserMessage(messageIndex) {
 }
 
 async function regenerateAgentReply(messageId) {
-  console.log("regenerateAgentReply start", messageId);
+  debugLog("regenerateAgentReply start", messageId);
   if (guardActionDuringLoading()) {
-    console.log("regenerateAgentReply blocked by loading");
+    debugLog("regenerateAgentReply blocked by loading");
     return;
   }
 
@@ -2028,7 +2149,9 @@ async function regenerateAgentReply(messageId) {
   ];
   saveMessages();
   updateConversationMeta();
-  renderMessages({ scrollToEnd: false });
+  if (!replaceMessageElement(loadingMessage, targetMessage.id)) {
+    renderMessages({ scrollToEnd: false });
+  }
 
   if (shouldKeepAtBottom) {
     scrollToBottom();
@@ -2053,7 +2176,7 @@ async function regenerateAgentReply(messageId) {
 
   try {
     const result = await requestAgentReply(previousUserMessage.content || "", requestContext);
-    console.log("regenerateAgentReply received result", result);
+    debugLog("regenerateAgentReply received result", result);
     if (result.aborted) {
       if (searchStatusTimer) {
         window.clearTimeout(searchStatusTimer);
@@ -2084,6 +2207,10 @@ async function regenerateAgentReply(messageId) {
       toolStatus: result.toolStatus,
       toolResult: result.toolResult,
       toolError: result.toolError,
+      toolErrorCode: result.toolErrorCode,
+      toolErrorMessage: result.toolErrorMessage,
+      toolRetryable: result.toolRetryable,
+      toolErrorDetail: result.toolErrorDetail,
       toolDurationMs: result.toolDurationMs,
       createdAt: getCurrentTime(),
     });
@@ -2155,7 +2282,7 @@ function syncSettingsControls() {
 }
 
 function clearAllLocalConversations() {
-  console.log("clearAllLocalConversations start");
+  debugLog("clearAllLocalConversations start");
   if (guardActionDuringLoading()) {
     return;
   }
@@ -2210,25 +2337,25 @@ function clearAllLocalConversations() {
 // Conversation actions
 
 async function sendCurrentMessage() {
-  console.log("sendCurrentMessage start", {
+  debugLog("sendCurrentMessage start", {
     isLoading,
     inputLength: messageInput.value.length,
   });
   if (isLoading) {
-    console.log("sendCurrentMessage abort current request");
+    debugLog("sendCurrentMessage abort current request");
     abortCurrentRequest();
     return;
   }
 
   const userText = messageInput.value.trim();
   if (!userText) {
-    console.log("sendCurrentMessage empty input");
+    debugLog("sendCurrentMessage empty input");
     updateInputState();
     return;
   }
 
   appendMessage(createMessage("user", userText));
-  console.log("sendCurrentMessage user message appended");
+  debugLog("sendCurrentMessage user message appended");
   messageInput.value = "";
   autoResizeInput();
   updateInputState();
@@ -2237,7 +2364,7 @@ async function sendCurrentMessage() {
   const initialLoadingText = likelyWebSearch ? WEB_SEARCH_STATUS_SEARCHING : "Agent 正在思考";
   const loadingMessage = createMessage("agent", initialLoadingText, "loading");
   appendMessage(loadingMessage);
-  console.log("sendCurrentMessage loading message appended", loadingMessage.id);
+  debugLog("sendCurrentMessage loading message appended", loadingMessage.id);
   setLoading(true);
 
   let hasReceivedFirstChunk = false;
@@ -2318,7 +2445,7 @@ async function sendCurrentMessage() {
         });
       },
     });
-    console.log("sendCurrentMessage received result", result);
+    debugLog("sendCurrentMessage received result", result);
     if (result.aborted) {
       updateMessage(loadingMessage.id, {
         type: "text",
@@ -2353,10 +2480,14 @@ async function sendCurrentMessage() {
       toolStatus: result.toolStatus,
       toolResult: result.toolResult,
       toolError: result.toolError,
+      toolErrorCode: result.toolErrorCode,
+      toolErrorMessage: result.toolErrorMessage,
+      toolRetryable: result.toolRetryable,
+      toolErrorDetail: result.toolErrorDetail,
       toolDurationMs: result.toolDurationMs,
       createdAt: getCurrentTime(),
     });
-    console.log("sendCurrentMessage agent reply rendered", loadingMessage.id);
+    debugLog("sendCurrentMessage agent reply rendered", loadingMessage.id);
   } catch (error) {
     console.warn("sendCurrentMessage error", error);
     updateMessage(loadingMessage.id, {
@@ -2376,7 +2507,7 @@ async function sendCurrentMessage() {
 }
 
 function submitChatForm(source) {
-  console.log("submitChatForm start", source);
+  debugLog("submitChatForm start", source);
   if (typeof chatForm.requestSubmit === "function") {
     chatForm.requestSubmit();
     return;
@@ -2386,9 +2517,9 @@ function submitChatForm(source) {
 }
 
 function startNewConversation() {
-  console.log("startNewConversation start");
+  debugLog("startNewConversation start");
   if (guardActionDuringLoading()) {
-    console.log("startNewConversation blocked by loading");
+    debugLog("startNewConversation blocked by loading");
     return;
   }
 
@@ -2397,7 +2528,7 @@ function startNewConversation() {
   removeConversationScrollPosition(conversationId);
   conversationSearchQuery = "";
   conversationSearchInput.value = "";
-  console.log("newConversation created", conversationId);
+  debugLog("newConversation created", conversationId);
   localStorage.setItem(ACTIVE_CONVERSATION_KEY, conversationId);
   conversations.unshift({
     id: conversationId,
@@ -2421,9 +2552,9 @@ function startNewConversation() {
 }
 
 function renameConversation(targetId) {
-  console.log("renameConversation start", targetId);
+  debugLog("renameConversation start", targetId);
   if (guardActionDuringLoading()) {
-    console.log("renameConversation blocked by loading", targetId);
+    debugLog("renameConversation blocked by loading", targetId);
     return;
   }
 
@@ -2457,9 +2588,9 @@ function renameConversation(targetId) {
 }
 
 function switchConversation(nextId) {
-  console.log("switchConversation start", nextId);
+  debugLog("switchConversation start", nextId);
   if (nextId === conversationId || guardActionDuringLoading()) {
-    console.log("switchConversation skipped", {
+    debugLog("switchConversation skipped", {
       nextId,
       conversationId,
       isLoading,
@@ -2483,9 +2614,9 @@ function switchConversation(nextId) {
 }
 
 function deleteConversation(targetId) {
-  console.log("deleteConversation start", targetId);
+  debugLog("deleteConversation start", targetId);
   if (guardActionDuringLoading()) {
-    console.log("deleteConversation blocked by loading", targetId);
+    debugLog("deleteConversation blocked by loading", targetId);
     return;
   }
 
@@ -2528,14 +2659,14 @@ function deleteConversation(targetId) {
 }
 
 function clearCurrentConversation() {
-  console.log("clearCurrentConversation start", conversationId);
+  debugLog("clearCurrentConversation start", conversationId);
   if (guardActionDuringLoading()) {
-    console.log("clearCurrentConversation blocked by loading");
+    debugLog("clearCurrentConversation blocked by loading");
     return;
   }
 
   if (!window.confirm("确定要清空当前会话吗？")) {
-    console.log("clearCurrentConversation cancelled");
+    debugLog("clearCurrentConversation cancelled");
     return;
   }
 
@@ -2554,7 +2685,7 @@ function guardActionDuringLoading() {
     return false;
   }
 
-  console.log("guardActionDuringLoading blocked action");
+  debugLog("guardActionDuringLoading blocked action");
   window.alert("当前正在生成回复，请先点击“停止生成”。");
   return true;
 }
@@ -2562,13 +2693,13 @@ function guardActionDuringLoading() {
 // Event bindings
 
 chatForm.addEventListener("submit", (event) => {
-  console.log("chatForm submit start");
+  debugLog("chatForm submit start");
   event.preventDefault();
   sendCurrentMessage();
 });
 
 sendButton.addEventListener("click", () => {
-  console.log("sendButton clicked");
+  debugLog("sendButton clicked");
 });
 
 messageList.addEventListener("scroll", handleMessageListScroll);
@@ -2595,19 +2726,19 @@ document.addEventListener("click", (event) => {
 });
 
 messageInput.addEventListener("keydown", (event) => {
-  console.log("messageInput keydown", {
+  debugLog("messageInput keydown", {
     key: event.key,
     shiftKey: event.shiftKey,
   });
   if (event.key === "Enter" && !event.shiftKey) {
     event.preventDefault();
-    console.log("messageInput enter submit");
+    debugLog("messageInput enter submit");
     submitChatForm("keyboard-enter");
   }
 });
 
 messageInput.addEventListener("input", () => {
-  console.log("messageInput input", {
+  debugLog("messageInput input", {
     length: messageInput.value.length,
   });
   updateInputState();
@@ -2615,7 +2746,7 @@ messageInput.addEventListener("input", () => {
 });
 
 newConversationButton.addEventListener("click", () => {
-  console.log("new conversation clicked");
+  debugLog("new conversation clicked");
   startNewConversation();
 });
 
@@ -2669,13 +2800,13 @@ clearAllConversationsButton.addEventListener("click", () => {
 });
 
 clearConversationButton.addEventListener("click", () => {
-  console.log("clear conversation clicked");
+  debugLog("clear conversation clicked");
   clearCurrentConversation();
 });
 
 modeButtons.forEach((button) => {
   button.addEventListener("click", () => {
-    console.log("modeButton clicked", button.dataset.mode);
+    debugLog("modeButton clicked", button.dataset.mode);
     setMode(button.dataset.mode);
     messageInput.focus();
   });

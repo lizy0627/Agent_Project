@@ -6,17 +6,20 @@ from pydantic import BaseModel, Field
 class ChatRequest(BaseModel):
     """Request body for the chat endpoint."""
 
-    message: str = Field(..., min_length=1, description="User message")
+    message: str = Field(..., min_length=1, max_length=4000, description="User message")
     system_prompt: str | None = Field(
         default=None,
+        max_length=2000,
         description="Optional system prompt for the agent",
     )
     model: str | None = Field(
         default=None,
+        max_length=100,
         description="Optional DashScope model name. Falls back to server default when omitted.",
     )
     conversation_id: str | None = Field(
         default=None,
+        max_length=100,
         description="Optional conversation id for multi-turn chat",
     )
     max_context_rounds: int | None = Field(
@@ -52,6 +55,22 @@ class ChatResponse(BaseModel):
     tool_error_message: str | None = None
     tool_retryable: bool | None = None
     tool_error_detail: ErrorDetail | None = None
+
+
+class ConversationClearResponse(BaseModel):
+    """Response body returned after clearing one conversation."""
+
+    success: bool = True
+    conversation_id: str
+    message: str
+
+
+class ConversationMessagesResponse(BaseModel):
+    """Response body returned when reading one conversation history."""
+
+    success: bool = True
+    conversation_id: str
+    messages: list[dict[str, str]]
 
 
 class ErrorResponse(BaseModel):

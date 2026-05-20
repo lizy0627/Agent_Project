@@ -75,12 +75,14 @@ class SQLiteConversationStore:
 
     def __init__(self, db_path: str | Path = "data/conversations.db", max_rounds: int = 10) -> None:
         self.db_path = Path(db_path)
+        self._is_memory_database = str(db_path) == ":memory:"
         self.max_rounds = max_rounds
         self._lock = Lock()
-        if str(db_path) != ":memory:":
+        if not self._is_memory_database:
             self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._connection = sqlite3.connect(self.db_path, check_same_thread=False)
         self._connection.row_factory = sqlite3.Row
+        self._configure_connection()
         self._initialize_database()
 
     @property
@@ -129,6 +131,11 @@ class SQLiteConversationStore:
                 "DELETE FROM conversation_messages WHERE conversation_id = ?",
                 (conversation_id,),
             )
+
+    def _configure_connection(self) -> None:
+        if not self._is_memory_database:
+            self._connection.execute("PRAGMA journal_mode=WAL")
+        self._connection.execute("PRAGMA busy_timeout=3000")
 
     def _initialize_database(self) -> None:
         with self._connection:

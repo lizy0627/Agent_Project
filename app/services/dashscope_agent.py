@@ -94,6 +94,15 @@ MODELSCOPE_QUERY_NOISE_PHRASES = (
 )
 
 
+WEB_SEARCH_ROUTE_REASON = (
+    "\u68c0\u6d4b\u5230\u7528\u6237\u95ee\u9898\u5305\u542b\u6700\u65b0/"
+    "\u641c\u7d22/github\u7b49\u5173\u952e\u8bcd\uff0c\u9700\u8981\u8054\u7f51\u641c\u7d22"
+)
+MODELSCOPE_MCP_ROUTE_REASON = (
+    "\u68c0\u6d4b\u5230 ModelScope \u76f8\u5173\u5173\u952e\u8bcd\uff0c\u8def\u7531\u5230 MCP \u5de5\u5177"
+)
+
+
 def extract_search_keyword(query: str) -> str:
     """Extract the likely ModelScope search keyword from a Chinese request."""
 
@@ -145,6 +154,7 @@ class PlannedToolCall:
 
     name: str
     arguments: dict[str, Any]
+    route_reason: str = ""
 
 
 @dataclass(frozen=True)
@@ -359,7 +369,8 @@ class DashScopeAgent:
         if planned_call.name == "mcp_tool":
             return self._call_mcp_tool(planned_call)
 
-        return self.tool_manager.call(planned_call.name, **planned_call.arguments)
+        tool_result = self.tool_manager.call(planned_call.name, **planned_call.arguments)
+        return self._with_route_reason(tool_result, self._planned_route_reason(planned_call))
 
     def _log_planned_tool(self, planned_call: PlannedToolCall) -> None:
         logger.info(
@@ -374,7 +385,28 @@ class DashScopeAgent:
         return {
             "name": planned_call.name,
             "arguments": safe_log_data(planned_call.arguments),
+            "route_reason": planned_call.route_reason,
         }
+
+    def _planned_route_reason(self, planned_call: PlannedToolCall) -> str:
+        return planned_call.route_reason or str(planned_call.arguments.get("route_reason") or "")
+
+    def _with_route_reason(self, tool_result: ToolResult, route_reason: str) -> ToolResult:
+        if not route_reason or not isinstance(tool_result.result, dict):
+            return tool_result
+
+        result = dict(tool_result.result)
+        result.setdefault("route_reason", route_reason)
+        return ToolResult(
+            name=tool_result.name,
+            success=tool_result.success,
+            result=result,
+            error=tool_result.error,
+            duration_ms=tool_result.duration_ms,
+            error_code=tool_result.error_code,
+            error_message=tool_result.error_message,
+            retryable=tool_result.retryable,
+        )
 
     def _call_mcp_tool(self, planned_call: PlannedToolCall) -> ToolResult:
         original_query = str(planned_call.arguments.get("original_query") or "")
@@ -416,7 +448,12 @@ class DashScopeAgent:
                 )
 
         if last_result is None:
-            last_result = self.tool_manager.call(planned_call.name, **planned_call.arguments)
+            fallback_call_arguments = {
+                key: value
+                for key, value in planned_call.arguments.items()
+                if key not in {"original_query", "rewritten_query", "query_fallbacks", "route_reason"}
+            }
+            last_result = self.tool_manager.call(planned_call.name, **fallback_call_arguments)
             last_result = self._normalize_mcp_tool_result(last_result)
 
         return self._with_mcp_query_metadata(
@@ -424,7 +461,7 @@ class DashScopeAgent:
             original_query=original_query,
             rewritten_query=rewritten_query,
             final_query=final_query,
-            route_reason=str(planned_call.arguments.get("route_reason") or ""),
+            route_reason=self._planned_route_reason(planned_call),
         )
 
     def _normalize_mcp_tool_result(self, tool_result: ToolResult) -> ToolResult:
@@ -470,7 +507,7 @@ class DashScopeAgent:
             call_arguments = {
                 key: value
                 for key, value in planned_call.arguments.items()
-                if key not in {"arguments", "original_query", "rewritten_query"}
+                if key not in {"arguments", "original_query", "rewritten_query", "route_reason"}
             }
             call_arguments["arguments"] = query_arguments
             last_result = self.tool_manager.call(planned_call.name, **call_arguments)
@@ -491,9 +528,18 @@ class DashScopeAgent:
                 original_query=original_query,
                 rewritten_query=rewritten_query,
                 final_query=final_query,
+                route_reason=self._planned_route_reason(planned_call),
             )
 
-        return self.tool_manager.call(planned_call.name, **planned_call.arguments)
+        fallback_call_arguments = {
+            key: value
+            for key, value in planned_call.arguments.items()
+            if key not in {"original_query", "rewritten_query", "route_reason"}
+        }
+        return self._with_route_reason(
+            self.tool_manager.call(planned_call.name, **fallback_call_arguments),
+            self._planned_route_reason(planned_call),
+        )
 
     def _handle_search_workflow(
         self,
@@ -555,6 +601,7 @@ class DashScopeAgent:
             MAX_SEARCH_WORKFLOW_READ_TOP_K,
         )
         logger.info("Search workflow started: query=%s", safe_log_field("query", query))
+        route_reason = self._planned_route_reason(planned_call) or WEB_SEARCH_ROUTE_REASON
         search_started_at = perf_counter()
         search_result = self._call_search_workflow_tool("web_search", **search_kwargs)
         search_cost = self._elapsed_seconds(search_started_at)
@@ -646,6 +693,7 @@ class DashScopeAgent:
         )
         workflow_payload = {
             "query": query,
+            "route_reason": route_reason,
             "search_success": search_result.success,
             "search_error": search_result.error,
             "search_results": compact_search_items,
@@ -1121,6 +1169,7 @@ class DashScopeAgent:
                     "max_results": DEFAULT_WEB_SEARCH_MAX_RESULTS,
                     "search_depth": "basic",
                 },
+                route_reason=WEB_SEARCH_ROUTE_REASON,
             )
 
         if planned_call:
@@ -1260,17 +1309,22 @@ success=true / false
         if not route:
             return None
 
+        server_name = str(route["server_name"])
+        route_reason = str(route.get("reason") or "")
+        if server_name.strip().lower() == "modelscope" and self._looks_like_modelscope_mcp_request(user_message):
+            route_reason = MODELSCOPE_MCP_ROUTE_REASON
         planned_call = PlannedToolCall(
             name="mcp_tool",
             arguments={
-                "server_name": route["server_name"],
+                "server_name": server_name,
                 "tool_name": route["tool_name"],
                 "arguments": route.get("arguments") or {},
                 "original_query": route.get("original_query") or user_message,
                 "rewritten_query": route.get("rewritten_query") or "",
                 "query_fallbacks": route.get("query_fallbacks") or [],
-                "route_reason": route.get("reason") or "",
+                "route_reason": route_reason,
             },
+            route_reason=route_reason,
         )
         self._log_planned_tool(planned_call)
         return planned_call
@@ -1297,7 +1351,9 @@ success=true / false
                 "arguments": arguments,
                 "original_query": user_message,
                 "rewritten_query": rewritten_query,
+                "route_reason": MODELSCOPE_MCP_ROUTE_REASON,
             },
+            route_reason=MODELSCOPE_MCP_ROUTE_REASON,
         )
         self._log_planned_tool(planned_call)
         return planned_call
@@ -1452,6 +1508,7 @@ success=true / false
         original_query: str,
         rewritten_query: str,
         final_query: str,
+        route_reason: str,
     ) -> ToolResult:
         if isinstance(tool_result.result, dict):
             result = dict(tool_result.result)
@@ -1464,6 +1521,8 @@ success=true / false
                 "rewritten": rewritten_query,
                 "final": final_query,
             }
+            if route_reason:
+                result["route_reason"] = route_reason
         else:
             result = tool_result.result
 

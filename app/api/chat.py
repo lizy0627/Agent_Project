@@ -2,13 +2,20 @@ import json
 from threading import Lock
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Path
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from app.core.config import Settings, get_settings
-from app.core.errors import AgentError, UnknownAgentError
+from app.core.errors import AgentError, InvalidArgumentsError, UnknownAgentError
 from app.core.logger import get_logger
-from app.schemas.chat import ChatRequest, ChatResponse, ErrorDetail, ErrorResponse
+from app.schemas.chat import (
+    ChatRequest,
+    ChatResponse,
+    ConversationClearResponse,
+    ConversationMessagesResponse,
+    ErrorDetail,
+    ErrorResponse,
+)
 from app.services.conversation_store import ConversationStoreProtocol, create_conversation_store
 from app.services.dashscope_agent import DashScopeAgent
 
@@ -122,6 +129,49 @@ def health_check() -> dict[str, str]:
     """Return a simple service health response."""
 
     return {"status": "ok", "message": "DashScope Agent is running"}
+
+
+@router.get("/conversations/{conversation_id}/messages", response_model=ConversationMessagesResponse)
+def get_conversation_messages(
+    conversation_id: str = Path(..., min_length=1, max_length=100),
+    store: ConversationStoreProtocol = Depends(get_conversation_store),
+) -> ConversationMessagesResponse:
+    """Return stored history for one conversation."""
+
+    clean_conversation_id = conversation_id.strip()
+    if not clean_conversation_id:
+        raise InvalidArgumentsError()
+
+    return ConversationMessagesResponse(
+        conversation_id=clean_conversation_id,
+        messages=store.get_messages(clean_conversation_id),
+    )
+
+
+@router.delete("/conversations/{conversation_id}", response_model=ConversationClearResponse)
+def clear_conversation(
+    conversation_id: str = Path(..., min_length=1, max_length=100),
+    store: ConversationStoreProtocol = Depends(get_conversation_store),
+) -> ConversationClearResponse:
+    """Clear stored history for one conversation."""
+
+    clean_conversation_id = conversation_id.strip()
+    if not clean_conversation_id:
+        raise InvalidArgumentsError()
+
+    store.clear(clean_conversation_id)
+    return ConversationClearResponse(
+        conversation_id=clean_conversation_id,
+        message="\u4f1a\u8bdd\u5df2\u6e05\u7a7a",
+    )
+
+
+@router.delete("/conversations", include_in_schema=False)
+@router.delete("/conversations/", include_in_schema=False)
+def clear_conversation_missing_id() -> JSONResponse:
+    """Return a stable error when conversation id is missing."""
+
+    return error_response(InvalidArgumentsError())
 
 
 @router.post("/chat", response_model=ChatResponse)

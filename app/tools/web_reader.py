@@ -9,6 +9,11 @@ import httpx
 
 from app.core.logger import get_logger
 
+try:
+    import trafilatura
+except ImportError:  # pragma: no cover - optional runtime dependency fallback
+    trafilatura = None
+
 
 logger = get_logger(__name__)
 WEB_READER_CACHE_TTL_SECONDS = 10 * 60
@@ -218,9 +223,7 @@ class WebReaderTool:
             content_type = response.headers.get("content-type", "")
             raw_text = response.text
             if "html" in content_type.lower():
-                parser = _ReadableHTMLParser()
-                parser.feed(raw_text)
-                text = parser.text()
+                text = self._extract_html_text(raw_text, str(response.url))
             else:
                 text = raw_text
 
@@ -247,6 +250,37 @@ class WebReaderTool:
         }
         self._set_cached_result(cache_key, result)
         return result
+
+    def _extract_html_text(self, html: str, url: str) -> str:
+        text = self._extract_with_trafilatura(html, url)
+        if text:
+            return text
+
+        parser = _ReadableHTMLParser()
+        parser.feed(html)
+        return parser.text()
+
+    def _extract_with_trafilatura(self, html: str, url: str) -> str:
+        if trafilatura is None:
+            return ""
+
+        try:
+            text = trafilatura.extract(
+                html,
+                url=url,
+                include_comments=False,
+                include_tables=False,
+                favor_precision=True,
+            )
+        except Exception as exc:
+            logger.info(
+                "Trafilatura extraction failed, falling back to HTMLParser: url=%s error=%s",
+                url,
+                exc.__class__.__name__,
+            )
+            return ""
+
+        return str(text or "").strip()
 
     def _clean_text(self, text: str) -> str:
         lines = []
