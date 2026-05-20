@@ -8,7 +8,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 import uvicorn
 
-from app.api.chat import get_conversation_store, router as chat_router
+from app.api.chat import error_payload, error_response, get_conversation_store, router as chat_router
 from app.core.config import (
     APP_DESCRIPTION,
     APP_TITLE,
@@ -19,7 +19,7 @@ from app.core.config import (
     PORT,
     get_settings,
 )
-from app.core.errors import AgentError, UnknownAgentError
+from app.core.errors import AgentError, InvalidArgumentsError, UnknownAgentError
 from app.core.logger import get_logger, setup_logging
 
 
@@ -33,10 +33,8 @@ def frontend_page() -> Response:
     index_file = FRONTEND_DIR / "index.html"
     if not index_file.exists():
         logger.warning("Frontend entry file is missing: %s", index_file)
-        return JSONResponse(
-            status_code=404,
-            content={"success": False, "error": "Frontend files are not available."},
-        )
+        error = UnknownAgentError()
+        return JSONResponse(status_code=404, content=error_payload(error))
 
     return FileResponse(index_file)
 
@@ -79,36 +77,27 @@ def create_app() -> FastAPI:
     @app.exception_handler(AgentError)
     async def agent_error_handler(_, exc: AgentError) -> JSONResponse:
         logger.info("Agent error handled: code=%s status=%s", exc.code, exc.status_code)
-        return JSONResponse(
-            status_code=exc.status_code,
-            content={"success": False, "error": exc.message},
-        )
+        return error_response(exc)
 
     @app.exception_handler(RequestValidationError)
     async def validation_error_handler(_, exc: RequestValidationError) -> JSONResponse:
         logger.info("Request validation failed: errors=%s", len(exc.errors()))
-        return JSONResponse(
-            status_code=422,
-            content={"success": False, "error": "Invalid request. Please check the request body."},
-        )
+        return error_response(InvalidArgumentsError())
 
     @app.exception_handler(HTTPException)
     async def http_error_handler(_, exc: HTTPException) -> JSONResponse:
         logger.info("HTTP error handled: status=%s", exc.status_code)
-        detail = exc.detail if isinstance(exc.detail, str) else "Request failed."
+        error = InvalidArgumentsError() if 400 <= exc.status_code < 500 else UnknownAgentError()
         return JSONResponse(
             status_code=exc.status_code,
-            content={"success": False, "error": detail},
+            content=error_payload(error),
         )
 
     @app.exception_handler(Exception)
     async def unknown_error_handler(_, exc: Exception) -> JSONResponse:
         logger.exception("Unhandled application error")
         error = UnknownAgentError()
-        return JSONResponse(
-            status_code=error.status_code,
-            content={"success": False, "error": error.message},
-        )
+        return error_response(error)
 
     return app
 

@@ -2,20 +2,18 @@ from time import perf_counter
 from typing import Any
 
 from app.core.logger import get_logger
+from app.core.safe_logging import safe_log_data
 from app.tools.base import Tool, ToolResult
 
 
 logger = get_logger(__name__)
-SENSITIVE_LOG_KEYS = {
-    "api_key",
-    "token",
-    "password",
-    "secret",
-    "authorization",
-    "access_key",
-}
-MAX_LOG_VALUE_LENGTH = 200
-MASKED_LOG_VALUE = "***"
+TOOL_NOT_FOUND = "TOOL_NOT_FOUND"
+TOOL_TIMEOUT = "TOOL_TIMEOUT"
+TOOL_EXECUTION_ERROR = "TOOL_EXECUTION_ERROR"
+INVALID_ARGUMENTS = "INVALID_ARGUMENTS"
+NETWORK_ERROR = "NETWORK_ERROR"
+API_KEY_MISSING = "API_KEY_MISSING"
+MCP_SERVER_UNAVAILABLE = "MCP_SERVER_UNAVAILABLE"
 
 
 class ToolManager:
@@ -35,64 +33,161 @@ class ToolManager:
         started_at = perf_counter()
         tool = self.get(name)
         if tool is None:
-            logger.warning("Tool call skipped because tool is not registered: name=%s", name)
-            return ToolResult(
+            duration_ms = self._elapsed_ms(started_at)
+            result = ToolResult(
                 name=name,
                 success=False,
                 error=f"Tool is not registered: {name}",
-                duration_ms=self._elapsed_ms(started_at),
+                duration_ms=duration_ms,
+                error_code=TOOL_NOT_FOUND,
+                error_message=f"Tool is not registered: {name}",
+                retryable=False,
             )
+            self._log_tool_finished(result)
+            return result
 
         try:
-            logger.info("Tool call started: name=%s args=%s", name, self._safe_log_args(kwargs))
-            result = tool.run(**kwargs)
-            logger.info("Tool call succeeded: name=%s", name)
-            return ToolResult(
-                name=name,
-                success=True,
-                result=result,
-                duration_ms=self._elapsed_ms(started_at),
-            )
+            logger.info("Tool call started: name=%s args=%s", name, safe_log_data(kwargs))
+            data = tool.run(**kwargs)
+            result = self._build_success_result(name, data, self._elapsed_ms(started_at))
         except Exception as exc:
-            logger.exception("Tool call failed: name=%s", name)
-            return ToolResult(
+            result = self._build_error_result(
                 name=name,
-                success=False,
-                error=str(exc),
+                error_message=str(exc),
                 duration_ms=self._elapsed_ms(started_at),
+                exc=exc,
             )
+            logger.exception(
+                "Tool call failed: tool_name=%s success=%s duration_ms=%s error_code=%s",
+                result.name,
+                result.success,
+                result.duration_ms,
+                result.error_code,
+            )
+
+        self._log_tool_finished(result)
+        return result
 
     def list_tools(self) -> list[str]:
         return sorted(self._tools)
 
-    def _safe_log_args(self, kwargs: dict[str, Any]) -> dict[str, Any]:
-        safe_args: dict[str, Any] = {}
-        for key, value in kwargs.items():
-            safe_args[key] = self._safe_log_value(key, value)
-        return safe_args
-
-    def _safe_log_value(self, key: str, value: Any) -> Any:
-        if self._is_sensitive_log_key(key):
-            return MASKED_LOG_VALUE
-        return self._truncate_log_value(value)
-
-    def _is_sensitive_log_key(self, key: str) -> bool:
-        normalized_key = key.strip().lower()
-        return normalized_key in SENSITIVE_LOG_KEYS
-
-    def _truncate_log_value(self, value: Any) -> Any:
-        if isinstance(value, dict):
-            return {
-                nested_key: self._safe_log_value(str(nested_key), nested_value)
-                for nested_key, nested_value in value.items()
-            }
-        if isinstance(value, list):
-            return [self._truncate_log_value(item) for item in value]
-        if isinstance(value, tuple):
-            return tuple(self._truncate_log_value(item) for item in value)
-        if isinstance(value, str) and len(value) > MAX_LOG_VALUE_LENGTH:
-            return f"{value[:MAX_LOG_VALUE_LENGTH]}..."
-        return value
-
     def _elapsed_ms(self, started_at: float) -> float:
         return round((perf_counter() - started_at) * 1000, 2)
+
+    def _build_success_result(self, name: str, data: Any, duration_ms: float) -> ToolResult:
+        if self._result_indicates_failure(data):
+            error_message = self._extract_result_error(data)
+            error_code, retryable = self._classify_error(name, error_message)
+            return ToolResult(
+                name=name,
+                success=False,
+                result=data,
+                error=error_message,
+                duration_ms=duration_ms,
+                error_code=error_code,
+                error_message=error_message,
+                retryable=retryable,
+            )
+
+        return ToolResult(
+            name=name,
+            success=True,
+            result=data,
+            duration_ms=duration_ms,
+        )
+
+    def _build_error_result(
+        self,
+        name: str,
+        error_message: str,
+        duration_ms: float,
+        exc: Exception,
+    ) -> ToolResult:
+        error_code, retryable = self._classify_error(name, error_message, exc=exc)
+        return ToolResult(
+            name=name,
+            success=False,
+            error=error_message,
+            duration_ms=duration_ms,
+            error_code=error_code,
+            error_message=error_message,
+            retryable=retryable,
+        )
+
+    def _result_indicates_failure(self, data: Any) -> bool:
+        return isinstance(data, dict) and data.get("success") is False
+
+    def _extract_result_error(self, data: Any) -> str:
+        if isinstance(data, dict):
+            error = data.get("error") or data.get("error_message") or "Tool returned a failed result."
+            return str(error)
+        return "Tool returned a failed result."
+
+    def _classify_error(
+        self,
+        name: str,
+        error_message: str,
+        exc: Exception | None = None,
+    ) -> tuple[str, bool]:
+        normalized_message = error_message.lower()
+        if isinstance(exc, TimeoutError):
+            return TOOL_TIMEOUT, True
+        if self._looks_like_api_key_missing(normalized_message):
+            return API_KEY_MISSING, False
+        if "timed out" in normalized_message or "timeout" in normalized_message:
+            return TOOL_TIMEOUT, True
+        if self._looks_like_mcp_server_unavailable(name, normalized_message):
+            return MCP_SERVER_UNAVAILABLE, True
+        if isinstance(exc, ConnectionError) or self._looks_like_network_error(normalized_message):
+            return NETWORK_ERROR, True
+        if isinstance(exc, (ValueError, TypeError)):
+            return INVALID_ARGUMENTS, False
+        return TOOL_EXECUTION_ERROR, False
+
+    def _looks_like_api_key_missing(self, message: str) -> bool:
+        return (
+            "api key" in message
+            or "api_key" in message
+            or "apikey" in message
+        ) and any(marker in message for marker in ("missing", "not configured", "empty", "required"))
+
+    def _looks_like_mcp_server_unavailable(self, name: str, message: str) -> bool:
+        if name != "mcp_tool" and "mcp" not in message:
+            return False
+        unavailable_markers = (
+            "not configured",
+            "disabled",
+            "unsupported",
+            "unavailable",
+            "unreachable",
+            "not running",
+            "server is running",
+            "connection",
+            "connect",
+            "timed out",
+            "timeout",
+        )
+        return any(marker in message for marker in unavailable_markers)
+
+    def _looks_like_network_error(self, message: str) -> bool:
+        return any(
+            marker in message
+            for marker in (
+                "network",
+                "connection",
+                "connect",
+                "unable to read",
+                "unable to connect",
+                "request failed",
+                "http",
+            )
+        )
+
+    def _log_tool_finished(self, result: ToolResult) -> None:
+        logger.info(
+            "Tool call finished: tool_name=%s success=%s duration_ms=%s error_code=%s",
+            result.name,
+            result.success,
+            result.duration_ms,
+            result.error_code,
+        )

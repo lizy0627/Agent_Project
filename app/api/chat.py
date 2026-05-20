@@ -8,7 +8,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from app.core.config import Settings, get_settings
 from app.core.errors import AgentError, UnknownAgentError
 from app.core.logger import get_logger
-from app.schemas.chat import ChatRequest, ChatResponse, ErrorResponse
+from app.schemas.chat import ChatRequest, ChatResponse, ErrorDetail, ErrorResponse
 from app.services.conversation_store import ConversationStoreProtocol, create_conversation_store
 from app.services.dashscope_agent import DashScopeAgent
 
@@ -149,6 +149,10 @@ def chat(
             tool_result=reply.tool_result.result if reply.tool_result else None,
             tool_error=reply.tool_result.error if reply.tool_result else None,
             tool_duration_ms=reply.tool_result.duration_ms if reply.tool_result else None,
+            tool_error_code=reply.tool_result.error_code if reply.tool_result else None,
+            tool_error_message=reply.tool_result.error_message if reply.tool_result else None,
+            tool_retryable=reply.tool_result.retryable if reply.tool_result else None,
+            tool_error_detail=tool_error_detail(reply.tool_result),
         )
     except AgentError as exc:
         logger.info("Chat request failed: code=%s status=%s", exc.code, exc.status_code)
@@ -213,14 +217,14 @@ def stream_chat(
             )
         except AgentError as exc:
             logger.info("Streaming chat failed: code=%s status=%s", exc.code, exc.status_code)
-            yield sse_event("error", {"success": False, "error": exc.message})
+            yield sse_event("error", error_payload(exc))
         except GeneratorExit:
             logger.info("Streaming chat client disconnected: conversation_id=%s", conversation_id)
             raise
         except Exception:
             logger.exception("Unhandled streaming chat error")
             error = UnknownAgentError()
-            yield sse_event("error", {"success": False, "error": error.message})
+            yield sse_event("error", error_payload(error))
 
     return StreamingResponse(
         event_stream(),
@@ -309,6 +313,10 @@ def tool_response_metadata(tool_result) -> dict:
             "tool_result": None,
             "tool_error": None,
             "tool_duration_ms": None,
+            "tool_error_code": None,
+            "tool_error_message": None,
+            "tool_retryable": None,
+            "tool_error_detail": None,
         }
 
     return {
@@ -318,7 +326,20 @@ def tool_response_metadata(tool_result) -> dict:
         "tool_result": tool_result.result,
         "tool_error": tool_result.error,
         "tool_duration_ms": tool_result.duration_ms,
+        "tool_error_code": tool_result.error_code,
+        "tool_error_message": tool_result.error_message,
+        "tool_retryable": tool_result.retryable,
+        "tool_error_detail": tool_error_detail(tool_result),
     }
+
+
+def tool_error_detail(tool_result) -> dict | None:
+    if tool_result is None or tool_result.success:
+        return None
+
+    code = tool_result.error_code or "TOOL_EXECUTION_ERROR"
+    message = tool_result.error_message or tool_result.error or "工具调用失败，请调整问题后重试。"
+    return ErrorDetail(code=code, message=message, retryable=tool_result.retryable).model_dump()
 
 
 def sse_event(event: str, data: dict) -> str:
@@ -331,8 +352,48 @@ def sse_event(event: str, data: dict) -> str:
 def error_response(error: AgentError) -> JSONResponse:
     """Return all chat errors in a stable JSON shape."""
 
-    body = ErrorResponse(error=error.message)
+    body = ErrorResponse(
+        error=ErrorDetail(
+            code=str(error.code),
+            message=public_error_message(error),
+            retryable=error.retryable,
+        ),
+        message=public_error_message(error),
+        error_code=str(error.code),
+        error_message=public_error_message(error),
+        retryable=error.retryable,
+    )
     return JSONResponse(
         status_code=error.status_code,
         content=body.model_dump(),
     )
+
+
+def error_payload(error: AgentError) -> dict:
+    """Return the API/SSE error payload without exposing low-level exception details."""
+
+    return ErrorResponse(
+        error=ErrorDetail(
+            code=str(error.code),
+            message=public_error_message(error),
+            retryable=error.retryable,
+        ),
+        message=public_error_message(error),
+        error_code=str(error.code),
+        error_message=public_error_message(error),
+        retryable=error.retryable,
+    ).model_dump()
+
+
+def public_error_message(error: AgentError) -> str:
+    messages = {
+        "API_KEY_MISSING": "DashScope API Key 未配置，请在 .env 中设置 DASHSCOPE_API_KEY。",
+        "API_KEY_INVALID": "DashScope API Key 无效或没有权限，请检查配置。",
+        "MODEL_TIMEOUT": "模型请求超时，请稍后重试。",
+        "NETWORK_ERROR": "网络连接失败，请检查网络或稍后重试。",
+        "TOOL_EXECUTION_ERROR": "工具调用失败，请调整问题后重试。",
+        "MCP_SERVER_UNAVAILABLE": "MCP 服务不可用，请确认 MCP Server 已启动并可访问。",
+        "INVALID_ARGUMENTS": "请求参数非法，请检查请求内容。",
+        "UNKNOWN_ERROR": "服务暂时异常，请稍后重试。",
+    }
+    return messages.get(str(error.code), "服务暂时异常，请稍后重试。")

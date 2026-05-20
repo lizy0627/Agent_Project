@@ -2,7 +2,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Annotated
 
-from pydantic import Field, field_validator
+from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
@@ -30,7 +30,10 @@ class Settings(BaseSettings):
     dashscope_api_key: str | None = None
     dashscope_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     dashscope_model: str = "qwen-plus"
-    dashscope_timeout_seconds: float = 30.0
+    dashscope_timeout_seconds: float = Field(
+        default=30.0,
+        validation_alias=AliasChoices("MODEL_TIMEOUT_SECONDS", "DASHSCOPE_TIMEOUT_SECONDS"),
+    )
     tavily_api_key: str | None = None
     web_search_provider: str = "tavily"
     conversation_store: str = "memory"
@@ -40,7 +43,10 @@ class Settings(BaseSettings):
     mcp_default_server: str = "modelscope"
     modelscope_api_token: str | None = None
     modelscope_mcp_url: str = "http://127.0.0.1:8001/mcp"
-    mcp_timeout_seconds: int = 20
+    mcp_timeout_seconds: int = Field(
+        default=20,
+        validation_alias=AliasChoices("TOOL_TIMEOUT_SECONDS", "MCP_TIMEOUT_SECONDS"),
+    )
     cors_allow_origins: Annotated[list[str], NoDecode] = Field(
         default_factory=lambda: DEFAULT_CORS_ALLOW_ORIGINS.copy(),
     )
@@ -62,6 +68,7 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         env_prefix="",
         extra="ignore",
+        populate_by_name=True,
     )
 
 

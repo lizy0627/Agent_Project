@@ -235,7 +235,7 @@ cp .env.example .env
 DASHSCOPE_API_KEY=your_dashscope_api_key_here
 DASHSCOPE_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
 DASHSCOPE_MODEL=qwen-plus
-DASHSCOPE_TIMEOUT_SECONDS=30
+MODEL_TIMEOUT_SECONDS=30
 CORS_ALLOW_ORIGINS=http://127.0.0.1:8000,http://localhost:8000
 CONVERSATION_STORE=memory
 CONVERSATION_DB_PATH=data/conversations.db
@@ -246,7 +246,7 @@ MCP_ENABLED=true
 MCP_DEFAULT_SERVER=modelscope
 MODELSCOPE_API_TOKEN=
 MODELSCOPE_MCP_URL=http://127.0.0.1:8001/mcp
-MCP_TIMEOUT_SECONDS=20
+TOOL_TIMEOUT_SECONDS=20
 ```
 
 主要配置说明：
@@ -254,8 +254,8 @@ MCP_TIMEOUT_SECONDS=20
 - `DASHSCOPE_API_KEY`：DashScope API Key，必填，不要提交到 GitHub。
 - `DASHSCOPE_BASE_URL`：DashScope OpenAI 兼容模式接口地址。
 - `DASHSCOPE_MODEL`：默认模型名称，例如 `qwen-plus`。
-- `DASHSCOPE_TIMEOUT_SECONDS`：模型请求超时时间，单位为秒。
-- `CORS_ALLOW_ORIGINS`：允许跨域访问的来源，多个地址用英文逗号分隔；不配置时默认允许 `http://127.0.0.1:8000` 和 `http://localhost:8000`。
+- `MODEL_TIMEOUT_SECONDS`：模型请求超时时间，单位为秒；兼容旧配置名 `DASHSCOPE_TIMEOUT_SECONDS`。
+- `CORS_ALLOW_ORIGINS`：允许跨域访问的来源，多个地址用英文逗号分隔；不配置时不会使用 `*`，默认只允许 `http://127.0.0.1:8000` 和 `http://localhost:8000`。
 - `CONVERSATION_STORE`：会话存储方式，可选 `memory` 或 `sqlite`；默认 `memory`，保持原有内存会话行为。
 - `CONVERSATION_DB_PATH`：SQLite 会话数据库路径，仅在 `CONVERSATION_STORE=sqlite` 时使用，默认 `data/conversations.db`。
 - `AUTO_OPEN_BROWSER`：直接运行 `python main.py` 时是否自动打开浏览器，默认 `true`；设置为 `false` 时只启动服务。
@@ -264,7 +264,7 @@ MCP_TIMEOUT_SECONDS=20
 - `MCP_ENABLED`：是否注册 MCP 工具。
 - `MCP_DEFAULT_SERVER`：默认 MCP Server 名称。
 - `MODELSCOPE_MCP_URL`：ModelScope MCP Server 地址。
-- `MCP_TIMEOUT_SECONDS`：MCP 连接和工具调用超时时间，单位为秒。
+- `TOOL_TIMEOUT_SECONDS`：工具相关请求超时时间，单位为秒；当前用于 MCP 连接和 MCP 工具调用，兼容旧配置名 `MCP_TIMEOUT_SECONDS`。
 
 ### 4. 启动服务
 

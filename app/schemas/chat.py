@@ -27,6 +27,14 @@ class ChatRequest(BaseModel):
     )
 
 
+class ErrorDetail(BaseModel):
+    """Structured error detail returned by API error responses."""
+
+    code: str
+    message: str
+    retryable: bool = False
+
+
 class ChatResponse(BaseModel):
     """Response body returned by the chat endpoint."""
 
@@ -40,10 +48,19 @@ class ChatResponse(BaseModel):
     tool_result: Any | None = None
     tool_error: str | None = None
     tool_duration_ms: float | None = None
+    tool_error_code: str | None = None
+    tool_error_message: str | None = None
+    tool_retryable: bool | None = None
+    tool_error_detail: ErrorDetail | None = None
 
 
 class ErrorResponse(BaseModel):
     """Unified error response body."""
 
     success: bool = False
-    error: str
+    error: ErrorDetail
+    # Legacy-friendly fields for existing frontend/client code.
+    message: str
+    error_code: str
+    error_message: str
+    retryable: bool = False

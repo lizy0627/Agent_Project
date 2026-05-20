@@ -2109,9 +2109,19 @@ async function parseJsonResponse(response) {
 }
 
 function toFriendlyError(errorText) {
-  const text = String(errorText || "");
+  const text = normalizeErrorText(errorText);
   const knownError = FRIENDLY_ERROR_MESSAGES.find((item) => text.includes(item.match));
   return knownError ? knownError.message : text || "请求失败，请稍后重试。";
+}
+
+function normalizeErrorText(errorValue) {
+  if (!errorValue) {
+    return "";
+  }
+  if (typeof errorValue === "object") {
+    return String(errorValue.message || errorValue.error_message || errorValue.code || "");
+  }
+  return String(errorValue);
 }
 
 // Settings panel

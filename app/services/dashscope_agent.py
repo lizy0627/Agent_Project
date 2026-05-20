@@ -25,11 +25,12 @@ from app.core.errors import (
     UnknownAgentError,
 )
 from app.core.logger import get_logger
+from app.core.safe_logging import safe_log_data, safe_log_field
 from app.mcp.manager import MCPManager
 from app.mcp.router import MCPRouter
 from app.tools import create_default_tool_manager
 from app.tools.base import ToolResult
-from app.tools.tool_manager import ToolManager
+from app.tools.tool_manager import MCP_SERVER_UNAVAILABLE, ToolManager
 
 
 logger = get_logger(__name__)
@@ -344,7 +345,7 @@ class DashScopeAgent:
         logger.info(
             "EXEC_TOOL=%s ARGS=%s",
             planned_call.name if planned_call else None,
-            planned_call.arguments if planned_call else None,
+            safe_log_data(planned_call.arguments) if planned_call else None,
         )
         if planned_call is None:
             logger.info("No tool call needed for current user message")
@@ -353,7 +354,7 @@ class DashScopeAgent:
         logger.info(
             "Executing planned tool: name=%s arguments=%s",
             planned_call.name,
-            planned_call.arguments,
+            safe_log_data(planned_call.arguments),
         )
         if planned_call.name == "mcp_tool":
             return self._call_mcp_tool(planned_call)
@@ -364,8 +365,16 @@ class DashScopeAgent:
         logger.info(
             "PLANNED_TOOL=%s ARGS=%s",
             planned_call.name,
-            planned_call.arguments,
+            safe_log_data(planned_call.arguments),
         )
+
+    def _safe_planned_tool_log(self, planned_call: PlannedToolCall | None) -> dict[str, Any] | None:
+        if planned_call is None:
+            return None
+        return {
+            "name": planned_call.name,
+            "arguments": safe_log_data(planned_call.arguments),
+        }
 
     def _call_mcp_tool(self, planned_call: PlannedToolCall) -> ToolResult:
         original_query = str(planned_call.arguments.get("original_query") or "")
@@ -401,7 +410,10 @@ class DashScopeAgent:
             if not self._is_empty_mcp_result(last_result):
                 break
             if index < len(fallback_queries) - 1:
-                logger.info("MCP result empty, fallback query: %s", fallback_queries[index + 1])
+                logger.info(
+                    "MCP result empty, fallback query: %s",
+                    safe_log_field("query", fallback_queries[index + 1]),
+                )
 
         if last_result is None:
             last_result = self.tool_manager.call(planned_call.name, **planned_call.arguments)
@@ -427,6 +439,10 @@ class DashScopeAgent:
             result=tool_result.result,
             error=str(tool_result.result.get("error") or "MCP tool call failed."),
             duration_ms=tool_result.duration_ms,
+            error_code=tool_result.error_code or MCP_SERVER_UNAVAILABLE,
+            error_message=tool_result.error_message
+            or str(tool_result.result.get("error") or "MCP tool call failed."),
+            retryable=tool_result.retryable,
         )
 
     def _is_modelscope_mcp_call(self, planned_call: PlannedToolCall) -> bool:
@@ -444,8 +460,8 @@ class DashScopeAgent:
         if not fallback_queries:
             fallback_queries = [rewritten_query or original_query]
 
-        logger.info("原问题: %s", original_query)
-        logger.info("重写后: %s", rewritten_query)
+        logger.info("原问题: %s", safe_log_field("original_query", original_query))
+        logger.info("重写后: %s", safe_log_field("rewritten_query", rewritten_query))
 
         last_result: ToolResult | None = None
         final_query = fallback_queries[0]
@@ -463,9 +479,12 @@ class DashScopeAgent:
             if not self._is_empty_modelscope_mcp_result(last_result):
                 break
             if index < len(fallback_queries) - 1:
-                logger.info("ModelScope MCP result empty, fallback query: %s", fallback_queries[index + 1])
+                logger.info(
+                    "ModelScope MCP result empty, fallback query: %s",
+                    safe_log_field("query", fallback_queries[index + 1]),
+                )
 
-        logger.info("降级后: %s", final_query)
+        logger.info("降级后: %s", safe_log_field("query", final_query))
         if last_result is not None:
             return self._with_modelscope_query_metadata(
                 last_result,
@@ -535,7 +554,7 @@ class DashScopeAgent:
             ),
             MAX_SEARCH_WORKFLOW_READ_TOP_K,
         )
-        logger.info("Search workflow started: query=%s", query[:200])
+        logger.info("Search workflow started: query=%s", safe_log_field("query", query))
         search_started_at = perf_counter()
         search_result = self._call_search_workflow_tool("web_search", **search_kwargs)
         search_cost = self._elapsed_seconds(search_started_at)
@@ -585,7 +604,7 @@ class DashScopeAgent:
                 if not reader_result.success:
                     logger.warning(
                         "Search workflow web_reader failed, skipped: url=%s error=%s",
-                        str(item.get("url") or "").strip(),
+                        safe_log_field("url", str(item.get("url") or "").strip()),
                         reader_result.error,
                     )
                     continue
@@ -594,7 +613,7 @@ class DashScopeAgent:
                 url = str(item.get("url") or "").strip()
                 logger.info(
                     "Search workflow web_reader finished: url=%s success=%s error=%s",
-                    url,
+                    safe_log_field("url", url),
                     reader_result.success,
                     reader_result.error,
                 )
@@ -659,6 +678,9 @@ class DashScopeAgent:
             result=workflow_payload,
             error=search_result.error,
             duration_ms=workflow_duration_ms,
+            error_code=search_result.error_code,
+            error_message=search_result.error_message,
+            retryable=search_result.retryable,
         )
         model_messages = self._messages_with_search_workflow_result(messages, workflow_result)
         logger.info(
@@ -712,7 +734,8 @@ class DashScopeAgent:
 
     def _call_search_workflow_tool(self, name: str, **kwargs: Any) -> ToolResult:
         started_at = perf_counter()
-        url = str(kwargs.get("url") or "").strip()
+        safe_kwargs = safe_log_data(kwargs)
+        url = str(safe_kwargs.get("url") or "").strip() if isinstance(safe_kwargs, dict) else ""
         if name == "web_reader":
             logger.info("[SearchWorkflow] web_reader start url=%s", url)
         else:
@@ -725,10 +748,11 @@ class DashScopeAgent:
         else:
             logger.info("[SearchWorkflow] %s done, cost=%.2fs", name, cost)
         logger.info(
-            "Search workflow step finished: name=%s success=%s duration_ms=%s",
+            "Search workflow step finished: tool_name=%s success=%s duration_ms=%s error_code=%s",
             result.name,
             result.success,
             result.duration_ms,
+            result.error_code,
         )
         return result
 
@@ -777,7 +801,7 @@ class DashScopeAgent:
             if isinstance(result, Exception):
                 logger.warning(
                     "Search workflow web_reader raised, skipped: url=%s error=%s",
-                    url,
+                    safe_log_field("url", url),
                     result,
                 )
                 continue
@@ -1056,8 +1080,8 @@ class DashScopeAgent:
 
     def _plan_tool_call(self, messages: list[ChatMessage]) -> PlannedToolCall | None:
         user_message = self._latest_user_message(messages)
-        logger.info("USER=%s", user_message)
-        logger.info("USER_MESSAGE=%s", user_message)
+        logger.info("USER=%s", safe_log_field("user_message", user_message))
+        logger.info("USER_MESSAGE=%s", safe_log_field("user_message", user_message))
         if not user_message:
             return None
 
@@ -1077,7 +1101,7 @@ class DashScopeAgent:
 
         if planned_call is None:
             mcp_call = self._plan_mcp_tool(user_message)
-            logger.info("ROUTE=%s", mcp_call)
+            logger.info("ROUTE=%s", self._safe_planned_tool_log(mcp_call))
             if mcp_call:
                 planned_call = mcp_call
 
@@ -1117,6 +1141,9 @@ class DashScopeAgent:
             "success": tool_result.success,
             "result": tool_result.result,
             "error": tool_result.error,
+            "error_code": tool_result.error_code,
+            "error_message": tool_result.error_message,
+            "retryable": tool_result.retryable,
         }
         if tool_result.name == "web_search":
             search_system_prompt = (
@@ -1446,6 +1473,9 @@ success=true / false
             result=result,
             error=tool_result.error,
             duration_ms=tool_result.duration_ms,
+            error_code=tool_result.error_code,
+            error_message=tool_result.error_message,
+            retryable=tool_result.retryable,
         )
 
     def _with_mcp_query_metadata(
@@ -1478,6 +1508,9 @@ success=true / false
             result=result,
             error=tool_result.error,
             duration_ms=tool_result.duration_ms,
+            error_code=tool_result.error_code,
+            error_message=tool_result.error_message,
+            retryable=tool_result.retryable,
         )
 
     def _is_empty_mcp_result(self, tool_result: ToolResult) -> bool:
@@ -1572,6 +1605,9 @@ success=true / false
             "success": tool_result.success,
             "result": tool_result.result,
             "error": tool_result.error,
+            "error_code": tool_result.error_code,
+            "error_message": tool_result.error_message,
+            "retryable": tool_result.retryable,
         }
         search_system_prompt = (
             "你是一个严谨的联网研究助手。你已经获得 Tavily 搜索摘要；"
