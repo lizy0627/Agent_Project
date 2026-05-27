@@ -5,6 +5,7 @@ function debugLog(...args) { if (DEBUG) console.log(...args); }
 
 const CHAT_API_URL = "http://127.0.0.1:8000/chat";
 const CHAT_STREAM_API_URL = "http://127.0.0.1:8000/chat/stream";
+const CONVERSATIONS_API_URL = "http://127.0.0.1:8000/conversations";
 
 const ACTIVE_CONVERSATION_KEY = "agent_project_conversation_id";
 const CONVERSATIONS_KEY = "agent_project_conversations";
@@ -25,9 +26,16 @@ const AUTO_SCROLL_THRESHOLD_PX = 200;
 const WEB_SEARCH_STATUS_SEARCHING = "正在联网搜索...";
 const WEB_SEARCH_STATUS_ORGANIZING = "正在搜索并整理资料...";
 const WEB_SEARCH_STATUS_DONE = "已联网搜索";
-const WEB_SEARCH_STATUS_MESSAGES = new Set([
+const STREAM_STATUS_MESSAGES = new Set([
   WEB_SEARCH_STATUS_SEARCHING,
+  "正在读取网页内容...",
   WEB_SEARCH_STATUS_ORGANIZING,
+  "正在连接 MCP 服务...",
+  "正在调用 MCP 工具...",
+  "正在计算...",
+  "正在总结文本...",
+  "正在获取当前时间...",
+  "正在生成回答...",
   WEB_SEARCH_STATUS_DONE,
 ]);
 const CHAT_FAILURE_MESSAGE = "请求失败，请检查后端服务或 API Key";
@@ -895,19 +903,17 @@ function createToolPanel(message) {
   details.className = "tool-panel-details";
   details.appendChild(createToolDetail("工具名称", message.toolName || "未命名工具"));
   details.appendChild(createToolDetail("工具状态", statusText));
+  details.appendChild(createToolDetail("耗时", formatToolDuration(message.toolDurationMs)));
   const routeReason = getToolRouteReason(message);
   if (routeReason) {
     details.appendChild(createToolDetail("调用原因", routeReason));
   }
 
-  if (message.toolDurationMs !== undefined && message.toolDurationMs !== null) {
-    details.appendChild(createToolDetail("耗时", formatToolDuration(message.toolDurationMs)));
-  }
-
   if (shouldShowToolErrorDetail(message)) {
-    details.appendChild(createToolDetail("\u9519\u8bef\u7801", toolErrorDetail.code || "\u672a\u77e5"));
-    details.appendChild(createToolDetail("\u9519\u8bef\u4fe1\u606f", toolErrorDetail.message || getToolDisplayError(message) || "\u672a\u77e5"));
-    details.appendChild(createToolDetail("\u662f\u5426\u53ef\u91cd\u8bd5", formatToolRetryable(toolErrorDetail.retryable)));
+    const errorNote = document.createElement("div");
+    errorNote.className = "tool-error-note";
+    errorNote.textContent = formatToolFailureMessage(message);
+    panel.appendChild(errorNote);
   }
 
   panel.appendChild(details);
@@ -1098,6 +1104,13 @@ function getToolDisplayError(message) {
   return getToolErrorMessage(message) || message.toolError || "";
 }
 
+function formatToolFailureMessage(message) {
+  const detail = getToolErrorDetail(message);
+  const errorMessage = detail.message || getToolDisplayError(message) || "工具调用失败";
+  const retryMessage = detail.retryable === true ? " 可以稍后重试。" : "";
+  return `${errorMessage}${retryMessage}`;
+}
+
 function formatToolRetryable(value) {
   if (value === true) {
     return "\u662f";
@@ -1139,7 +1152,7 @@ function formatToolStatus(status, error) {
 function formatToolDuration(durationMs) {
   const value = Number(durationMs);
   if (!Number.isFinite(value)) {
-    return String(durationMs);
+    return durationMs === undefined || durationMs === null || durationMs === "" ? "未返回" : String(durationMs);
   }
 
   if (value < 1000) {
@@ -1457,6 +1470,128 @@ function removeWelcomePanel() {
   }
 }
 
+function updateMessageElementOnly(messageId, updates) {
+  const shouldKeepAtBottom = shouldStickToBottom || isMessageListNearBottom();
+  const previousScrollTop = messageList.scrollTop;
+  const messageIndex = messages.findIndex((message) => message.id === messageId);
+  const currentMessage = messages[messageIndex];
+  if (!currentMessage) {
+    return false;
+  }
+
+  const updatedMessage = {
+    ...currentMessage,
+    ...updates,
+  };
+  const nextRole = updatedMessage.role;
+  const nextType = updatedMessage.type;
+  const shouldShowNewMessageNotice =
+    !shouldKeepAtBottom && (nextRole === "agent" || nextRole === "error") && nextType !== "loading";
+
+  messages = [
+    ...messages.slice(0, messageIndex),
+    updatedMessage,
+    ...messages.slice(messageIndex + 1),
+  ];
+  saveMessages();
+
+  const messageItem = messageElementMap.get(messageId);
+  if (!messageItem || !messageItem.isConnected) {
+    return false;
+  }
+
+  messageItem.className = `message ${updatedMessage.role}-message`;
+  messageItem.dataset.messageId = updatedMessage.id;
+
+  const content = messageItem.querySelector(".message-content");
+  const bubble = messageItem.querySelector(".message-bubble");
+  if (!content || !bubble) {
+    return false;
+  }
+
+  updateMessageToolbarElement(content, updatedMessage);
+  updateToolPanelElement(content, updatedMessage);
+  updateMessageBubbleElement(bubble, updatedMessage);
+  updateMessageMetaElement(content, updatedMessage);
+
+  if (messageId !== updatedMessage.id) {
+    messageElementMap.delete(messageId);
+  }
+  messageElementMap.set(updatedMessage.id, messageItem);
+
+  if (shouldKeepAtBottom) {
+    scrollToBottom({ behavior: "auto" });
+  } else if (shouldShowNewMessageNotice) {
+    messageList.scrollTop = previousScrollTop;
+    showNewMessageNotice();
+  } else {
+    messageList.scrollTop = previousScrollTop;
+    updateScrollToBottomButton();
+  }
+
+  return true;
+}
+
+function updateMessageToolbarElement(content, message) {
+  const toolbar = content.querySelector(".message-toolbar");
+  if (message.role !== "agent" || message.type === "loading") {
+    toolbar?.remove();
+    return;
+  }
+
+  const nextToolbar = createMessageToolbar(message);
+  if (toolbar) {
+    toolbar.replaceWith(nextToolbar);
+    return;
+  }
+
+  content.insertBefore(nextToolbar, content.firstChild);
+}
+
+function updateToolPanelElement(content, message) {
+  const currentPanel = content.querySelector(".tool-panel");
+  const nextPanel = createToolPanel(message);
+  if (!nextPanel) {
+    currentPanel?.remove();
+    return;
+  }
+
+  if (currentPanel) {
+    currentPanel.replaceWith(nextPanel);
+    return;
+  }
+
+  const bubble = content.querySelector(".message-bubble");
+  content.insertBefore(nextPanel, bubble || null);
+}
+
+function updateMessageBubbleElement(bubble, message) {
+  bubble.replaceChildren();
+  if (message.type === "loading") {
+    bubble.appendChild(createTypingIndicator(message.content || "Agent is thinking..."));
+  } else if (message.role === "agent") {
+    bubble.appendChild(renderMarkdown(message.content || ""));
+  } else {
+    bubble.textContent = message.content || "";
+  }
+}
+
+function updateMessageMetaElement(content, message) {
+  const meta = content.querySelector(".message-meta");
+  const nextMeta = createMessageMeta(message);
+  if (!nextMeta) {
+    meta?.remove();
+    return;
+  }
+
+  if (meta) {
+    meta.replaceWith(nextMeta);
+    return;
+  }
+
+  content.appendChild(nextMeta);
+}
+
 function updateMessage(messageId, updates) {
   const shouldKeepAtBottom = shouldStickToBottom || isMessageListNearBottom();
   const previousScrollTop = messageList.scrollTop;
@@ -1615,6 +1750,58 @@ function createMessage(role, content, type = "text", extra = {}) {
   };
 }
 
+function backendMessagesToFrontendMessages(backendMessages, targetConversationId) {
+  return backendMessages
+    .map((message, index) => {
+      const role = backendRoleToFrontendRole(message?.role);
+      if (!role) {
+        return null;
+      }
+
+      return {
+        id: `backend-${targetConversationId}-${index}`,
+        role,
+        type: "text",
+        content: String(message.content || ""),
+      };
+    })
+    .filter(Boolean);
+}
+
+function backendRoleToFrontendRole(role) {
+  if (role === "user") {
+    return "user";
+  }
+  if (role === "assistant") {
+    return "agent";
+  }
+  return null;
+}
+
+async function syncBackendConversationMessages(targetConversationId) {
+  const backendMessages = await fetchBackendConversationMessages(targetConversationId);
+  if (!Array.isArray(backendMessages) || backendMessages.length === 0) {
+    return;
+  }
+
+  if (targetConversationId !== conversationId) {
+    return;
+  }
+
+  const nextMessages = backendMessagesToFrontendMessages(backendMessages, targetConversationId);
+  if (nextMessages.length === 0) {
+    return;
+  }
+
+  messages = nextMessages;
+  saveMessages();
+  updateConversationMeta({
+    updatedAt: getCurrentConversation()?.updatedAt,
+  });
+  renderMessages({ scrollToEnd: false });
+  restoreConversationScrollPosition(targetConversationId);
+}
+
 function looksLikeWebSearchRequest(text) {
   const normalized = String(text || "").toLowerCase().trim();
   if (!normalized) {
@@ -1660,7 +1847,7 @@ function getToolStatusContent(metadata) {
 
 function normalizeStreamStatusMessage(message) {
   const normalized = String(message || "").trim();
-  return WEB_SEARCH_STATUS_MESSAGES.has(normalized) ? normalized : "";
+  return STREAM_STATUS_MESSAGES.has(normalized) ? normalized : "";
 }
 
 // Input state
@@ -1759,6 +1946,81 @@ function toggleTheme() {
 }
 
 // Agent request flow
+
+async function clearBackendConversation(conversationId) {
+  const targetConversationId = String(conversationId || "").trim();
+  if (!targetConversationId) {
+    return false;
+  }
+
+  try {
+    const response = await fetch(
+      `${CONVERSATIONS_API_URL}/${encodeURIComponent(targetConversationId)}`,
+      { method: "DELETE" },
+    );
+    if (response.ok) {
+      return true;
+    }
+
+    console.warn("DELETE /conversations request failed", {
+      conversationId: targetConversationId,
+      status: response.status,
+      statusText: response.statusText,
+    });
+  } catch (error) {
+    console.warn("DELETE /conversations request error", {
+      conversationId: targetConversationId,
+      error,
+    });
+  }
+
+  return false;
+}
+
+async function fetchBackendConversationMessages(conversationId) {
+  const targetConversationId = String(conversationId || "").trim();
+  if (!targetConversationId) {
+    return null;
+  }
+
+  try {
+    const response = await fetch(
+      `${CONVERSATIONS_API_URL}/${encodeURIComponent(targetConversationId)}/messages`,
+      {
+        method: "GET",
+        headers: {
+          Accept: "application/json",
+        },
+      },
+    );
+    if (!response.ok) {
+      console.warn("GET /conversations/messages request failed", {
+        conversationId: targetConversationId,
+        status: response.status,
+        statusText: response.statusText,
+      });
+      return null;
+    }
+
+    const data = await parseJsonResponse(response);
+    if (!data.success || !Array.isArray(data.messages)) {
+      console.warn("GET /conversations/messages returned invalid data", {
+        conversationId: targetConversationId,
+        data,
+      });
+      return null;
+    }
+
+    return data.messages;
+  } catch (error) {
+    console.warn("GET /conversations/messages request error", {
+      conversationId: targetConversationId,
+      error,
+    });
+  }
+
+  return null;
+}
 
 async function requestAgentReply(
   message,
@@ -2107,21 +2369,25 @@ async function regenerateAgentReply(messageId) {
     targetStreamingEnabled: streamingEnabled,
     onToolMetadata: (metadata) => {
       const statusContent = getToolStatusContent(metadata);
-      if (hasReceivedFirstChunk) {
-        return;
-      }
       const metadataUpdates = {
-        type: "loading",
         role: "agent",
         ...metadata,
         createdAt: getCurrentTime(),
       };
-      const nextStatusContent =
-        statusContent || (likelyWebSearch && streamingEnabled ? WEB_SEARCH_STATUS_ORGANIZING : null);
-      if (nextStatusContent) {
-        metadataUpdates.content = nextStatusContent;
+      if (!hasReceivedFirstChunk) {
+        metadataUpdates.type = "loading";
+        const nextStatusContent =
+          statusContent || (likelyWebSearch && streamingEnabled ? WEB_SEARCH_STATUS_ORGANIZING : null);
+        if (nextStatusContent) {
+          metadataUpdates.content = nextStatusContent;
+        }
+        updateMessage(loadingMessage.id, metadataUpdates);
+        return;
       }
-      updateMessage(loadingMessage.id, metadataUpdates);
+
+      if (!updateMessageElementOnly(loadingMessage.id, metadataUpdates)) {
+        updateMessage(loadingMessage.id, metadataUpdates);
+      }
     },
     onStatus: (statusMessage) => {
       updateLoadingStatus(statusMessage);
@@ -2131,12 +2397,15 @@ async function regenerateAgentReply(messageId) {
       if (searchStatusTimer) {
         window.clearTimeout(searchStatusTimer);
       }
-      updateMessage(loadingMessage.id, {
+      const chunkUpdates = {
         type: "text",
         role: "agent",
         content: partialReply || "Agent 正在重新生成...",
         createdAt: getCurrentTime(),
-      });
+      };
+      if (!updateMessageElementOnly(loadingMessage.id, chunkUpdates)) {
+        updateMessage(loadingMessage.id, chunkUpdates);
+      }
     },
   };
   const shouldKeepAtBottom = shouldStickToBottom || isMessageListNearBottom();
@@ -2291,6 +2560,11 @@ function clearAllLocalConversations() {
     return;
   }
 
+  const backendConversationIds = conversations.map((item) => item.id).filter(Boolean);
+  backendConversationIds.forEach((id) => {
+    void clearBackendConversation(id);
+  });
+
   const keysToRemove = [];
   for (let index = 0; index < localStorage.length; index += 1) {
     const key = localStorage.key(index);
@@ -2412,21 +2686,25 @@ async function sendCurrentMessage() {
     const result = await requestAgentReply(userText, {
       onToolMetadata: (metadata) => {
         const statusContent = getToolStatusContent(metadata);
-        if (hasReceivedFirstChunk) {
-          return;
-        }
         const metadataUpdates = {
-          type: "loading",
           role: "agent",
           ...metadata,
           createdAt: getCurrentTime(),
         };
-        const nextStatusContent =
-          statusContent || (likelyWebSearch && streamingEnabled ? WEB_SEARCH_STATUS_ORGANIZING : null);
-        if (nextStatusContent) {
-          metadataUpdates.content = nextStatusContent;
+        if (!hasReceivedFirstChunk) {
+          metadataUpdates.type = "loading";
+          const nextStatusContent =
+            statusContent || (likelyWebSearch && streamingEnabled ? WEB_SEARCH_STATUS_ORGANIZING : null);
+          if (nextStatusContent) {
+            metadataUpdates.content = nextStatusContent;
+          }
+          updateMessage(loadingMessage.id, metadataUpdates);
+          return;
         }
-        updateMessage(loadingMessage.id, metadataUpdates);
+
+        if (!updateMessageElementOnly(loadingMessage.id, metadataUpdates)) {
+          updateMessage(loadingMessage.id, metadataUpdates);
+        }
       },
       onStatus: (statusMessage) => {
         updateLoadingStatus(statusMessage);
@@ -2437,12 +2715,15 @@ async function sendCurrentMessage() {
           window.clearTimeout(searchStatusTimer);
         }
         window.clearTimeout(thinkingTimer);
-        updateMessage(loadingMessage.id, {
+        const chunkUpdates = {
           type: "text",
           role: "agent",
           content: partialReply || "Agent 正在生成...",
           createdAt: getCurrentTime(),
-        });
+        };
+        if (!updateMessageElementOnly(loadingMessage.id, chunkUpdates)) {
+          updateMessage(loadingMessage.id, chunkUpdates);
+        }
       },
     });
     debugLog("sendCurrentMessage received result", result);
@@ -2611,6 +2892,7 @@ function switchConversation(nextId) {
   autoResizeInput();
   updateInputState();
   messageInput.focus();
+  void syncBackendConversationMessages(nextId);
 }
 
 function deleteConversation(targetId) {
@@ -2625,6 +2907,7 @@ function deleteConversation(targetId) {
     return;
   }
 
+  void clearBackendConversation(targetId);
   localStorage.removeItem(getMessagesKey(targetId));
   removeConversationScrollPosition(targetId);
   conversations = conversations.filter((item) => item.id !== targetId);
@@ -2670,6 +2953,7 @@ function clearCurrentConversation() {
     return;
   }
 
+  void clearBackendConversation(conversationId);
   messages = [];
   saveMessages();
   removeConversationScrollPosition(conversationId);

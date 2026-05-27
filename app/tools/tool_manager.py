@@ -1,4 +1,5 @@
-from time import perf_counter
+import re
+from time import perf_counter, sleep
 from typing import Any
 
 from app.core.logger import get_logger
@@ -14,6 +15,12 @@ INVALID_ARGUMENTS = "INVALID_ARGUMENTS"
 NETWORK_ERROR = "NETWORK_ERROR"
 API_KEY_MISSING = "API_KEY_MISSING"
 MCP_SERVER_UNAVAILABLE = "MCP_SERVER_UNAVAILABLE"
+RATE_LIMIT = "RATE_LIMIT"
+HTTP_ERROR = "HTTP_ERROR"
+PARSE_ERROR = "PARSE_ERROR"
+EMPTY_RESULT = "EMPTY_RESULT"
+RETRYABLE_ERROR_CODES = {TOOL_TIMEOUT, NETWORK_ERROR, MCP_SERVER_UNAVAILABLE}
+DEFAULT_RETRY_BACKOFF_SECONDS = 0.3
 
 
 class ToolManager:
@@ -29,7 +36,7 @@ class ToolManager:
     def get(self, name: str) -> Tool | None:
         return self._tools.get(name)
 
-    def call(self, name: str, **kwargs: Any) -> ToolResult:
+    def call(self, name: str, max_retries: int = 1, **kwargs: Any) -> ToolResult:
         started_at = perf_counter()
         tool = self.get(name)
         if tool is None:
@@ -46,25 +53,51 @@ class ToolManager:
             self._log_tool_finished(result)
             return result
 
-        try:
-            logger.info("Tool call started: name=%s args=%s", name, safe_log_data(kwargs))
-            data = tool.run(**kwargs)
-            result = self._build_success_result(name, data, self._elapsed_ms(started_at))
-        except Exception as exc:
-            result = self._build_error_result(
-                name=name,
-                error_message=str(exc),
-                duration_ms=self._elapsed_ms(started_at),
-                exc=exc,
-            )
-            logger.exception(
-                "Tool call failed: tool_name=%s success=%s duration_ms=%s error_code=%s",
-                result.name,
-                result.success,
-                result.duration_ms,
-                result.error_code,
-            )
+        retry_count = self._normalize_max_retries(max_retries)
+        attempts = retry_count + 1
+        result: ToolResult | None = None
+        for attempt in range(1, attempts + 1):
+            try:
+                logger.info(
+                    "Tool call started: name=%s attempt=%s args=%s",
+                    name,
+                    attempt,
+                    safe_log_data(kwargs),
+                )
+                data = tool.run(**kwargs)
+                result = self._build_success_result(name, data, self._elapsed_ms(started_at))
+            except Exception as exc:
+                result = self._build_error_result(
+                    name=name,
+                    error_message=str(exc),
+                    duration_ms=self._elapsed_ms(started_at),
+                    exc=exc,
+                )
+                logger.exception(
+                    "Tool call failed: tool_name=%s attempt=%s success=%s duration_ms=%s error_code=%s",
+                    result.name,
+                    attempt,
+                    result.success,
+                    result.duration_ms,
+                    result.error_code,
+                )
 
+            if result.success or not self._should_retry(result) or attempt >= attempts:
+                break
+
+            self._log_tool_retry(result, attempt + 1)
+            sleep(self._retry_backoff_seconds(attempt))
+
+        if result is None:
+            result = ToolResult(
+                name=name,
+                success=False,
+                error="Tool call did not produce a result.",
+                duration_ms=self._elapsed_ms(started_at),
+                error_code=TOOL_EXECUTION_ERROR,
+                error_message="Tool call did not produce a result.",
+                retryable=False,
+            )
         self._log_tool_finished(result)
         return result
 
@@ -136,8 +169,17 @@ class ToolManager:
             return API_KEY_MISSING, False
         if "timed out" in normalized_message or "timeout" in normalized_message:
             return TOOL_TIMEOUT, True
+        if self._looks_like_rate_limit(normalized_message):
+            return RATE_LIMIT, True
         if self._looks_like_mcp_server_unavailable(name, normalized_message):
             return MCP_SERVER_UNAVAILABLE, True
+        http_status_code = self._http_status_code_from_error(normalized_message, exc=exc)
+        if http_status_code is not None or self._looks_like_http_error(normalized_message, exc=exc):
+            return HTTP_ERROR, self._is_retryable_http_status(http_status_code)
+        if self._looks_like_parse_error(normalized_message):
+            return PARSE_ERROR, False
+        if self._looks_like_empty_result(normalized_message):
+            return EMPTY_RESULT, False
         if isinstance(exc, ConnectionError) or self._looks_like_network_error(normalized_message):
             return NETWORK_ERROR, True
         if isinstance(exc, (ValueError, TypeError)):
@@ -169,6 +211,85 @@ class ToolManager:
         )
         return any(marker in message for marker in unavailable_markers)
 
+    def _looks_like_rate_limit(self, message: str) -> bool:
+        return any(
+            marker in message
+            for marker in (
+                "429",
+                "rate limit",
+                "ratelimit",
+                "too many requests",
+            )
+        )
+
+    def _http_status_code_from_error(self, message: str, exc: Exception | None = None) -> int | None:
+        response = getattr(exc, "response", None)
+        status_code = getattr(response, "status_code", None)
+        if isinstance(status_code, int):
+            return status_code
+
+        if "http 5xx" in message:
+            return 500
+        if "http 4xx" in message:
+            return 400
+
+        patterns = (
+            r"\bhttp\s*(?P<status>[45]\d{2})\b",
+            r"\bstatus(?:\s+code|_code)?\D+(?P<status>[45]\d{2})\b",
+        )
+        for pattern in patterns:
+            match = re.search(pattern, message)
+            if match:
+                return int(match.group("status"))
+        return None
+
+    def _looks_like_http_error(self, message: str, exc: Exception | None = None) -> bool:
+        exc_name = exc.__class__.__name__.lower() if exc is not None else ""
+        return (
+            "httpstatuserror" in exc_name
+            or "httpstatuserror" in message
+            or "http 4xx" in message
+            or "http 5xx" in message
+            or "status code" in message
+            or "status_code" in message
+        )
+
+    def _is_retryable_http_status(self, status_code: int | None) -> bool:
+        return status_code is not None and 500 <= status_code <= 599
+
+    def _should_retry(self, result: ToolResult) -> bool:
+        return bool(result.retryable and result.error_code in RETRYABLE_ERROR_CODES)
+
+    def _retry_backoff_seconds(self, failed_attempt: int) -> float:
+        return DEFAULT_RETRY_BACKOFF_SECONDS * (2 ** (failed_attempt - 1))
+
+    def _normalize_max_retries(self, max_retries: int) -> int:
+        try:
+            return max(int(max_retries), 0)
+        except (TypeError, ValueError):
+            logger.warning("Invalid max_retries for tool call; using default: max_retries=%s", max_retries)
+            return 1
+
+    def _looks_like_parse_error(self, message: str) -> bool:
+        return any(
+            marker in message
+            for marker in (
+                "invalid json",
+                "parse",
+                "解析失败",
+            )
+        )
+
+    def _looks_like_empty_result(self, message: str) -> bool:
+        return any(
+            marker in message
+            for marker in (
+                "empty result",
+                "no results",
+                "结果为空",
+            )
+        )
+
     def _looks_like_network_error(self, message: str) -> bool:
         return any(
             marker in message
@@ -189,5 +310,13 @@ class ToolManager:
             result.name,
             result.success,
             result.duration_ms,
+            result.error_code,
+        )
+
+    def _log_tool_retry(self, result: ToolResult, attempt: int) -> None:
+        logger.warning(
+            "Tool call retrying: tool_name=%s attempt=%s error_code=%s",
+            result.name,
+            attempt,
             result.error_code,
         )

@@ -172,8 +172,11 @@ class WebReaderTool:
 
     name = "web_reader"
     description = "Read a web page and extract readable text."
-    timeout_seconds = 5.0
+    default_timeout_seconds = 5.0
     max_content_chars = 3000
+
+    def __init__(self, timeout_seconds: float | int | None = None) -> None:
+        self.timeout_seconds = self._normalize_timeout(timeout_seconds, self.default_timeout_seconds)
 
     def run(self, url: str) -> dict[str, Any]:
         original_url = url.strip()
@@ -200,7 +203,7 @@ class WebReaderTool:
             response.raise_for_status()
         except httpx.TimeoutException as exc:
             logger.warning("Web page read request timed out: url=%s", original_url)
-            raise TimeoutError("Web page read request timed out after 5 seconds.") from exc
+            raise TimeoutError(f"Web page read request timed out after {self.timeout_seconds:g} seconds.") from exc
         except httpx.HTTPStatusError as exc:
             logger.warning(
                 "Web page returned HTTP error: url=%s status=%s",
@@ -259,6 +262,13 @@ class WebReaderTool:
         parser = _ReadableHTMLParser()
         parser.feed(html)
         return parser.text()
+
+    def _normalize_timeout(self, value: float | int | None, default: float) -> float:
+        try:
+            timeout = float(value) if value is not None else default
+        except (TypeError, ValueError):
+            return default
+        return max(timeout, 0.1)
 
     def _extract_with_trafilatura(self, html: str, url: str) -> str:
         if trafilatura is None:

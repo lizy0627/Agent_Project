@@ -23,11 +23,17 @@ class WebSearchTool:
     name = "web_search"
     description = "Search the web for current information."
     endpoint = "https://api.tavily.com/search"
-    timeout_seconds = 5.0
+    default_timeout_seconds = 5.0
 
-    def __init__(self, api_key: str | None = None, provider: str | None = None) -> None:
+    def __init__(
+        self,
+        api_key: str | None = None,
+        provider: str | None = None,
+        timeout_seconds: float | int | None = None,
+    ) -> None:
         self.api_key = api_key or os.getenv("TAVILY_API_KEY")
         self.provider = provider or os.getenv("WEB_SEARCH_PROVIDER", "tavily")
+        self.timeout_seconds = self._normalize_timeout(timeout_seconds, self.default_timeout_seconds)
 
     def run(
         self,
@@ -56,7 +62,7 @@ class WebSearchTool:
                 safe_max_results,
                 safe_search_depth,
             )
-            return {**cached_result, "cached": True}
+            return {**cached_result, "cached": True, "stale": False}
 
         logger.info(
             "Web search cache miss: query=%s max_results=%s search_depth=%s",
@@ -85,7 +91,7 @@ class WebSearchTool:
             stale_result = self._get_stale_cached_result(cache_key)
             if stale_result is not None:
                 return self._stale_cache_response(stale_result, cache_key)
-            raise TimeoutError("Tavily search request timed out after 5 seconds.") from exc
+            raise TimeoutError(f"Tavily search request timed out after {self.timeout_seconds:g} seconds.") from exc
         except httpx.HTTPStatusError as exc:
             detail = self._extract_error_detail(exc.response)
             logger.warning(
@@ -130,6 +136,7 @@ class WebSearchTool:
             "query": data.get("query", query),
             "results": results,
             "cached": False,
+            "stale": False,
         }
         self._set_cached_result(cache_key, result)
         return result
@@ -146,6 +153,13 @@ class WebSearchTool:
                 return str(detail)
 
         return f"HTTP {response.status_code}"
+
+    def _normalize_timeout(self, value: float | int | None, default: float) -> float:
+        try:
+            timeout = float(value) if value is not None else default
+        except (TypeError, ValueError):
+            return default
+        return max(timeout, 0.1)
 
     def _cache_key(self, query: str, max_results: int, search_depth: str) -> str:
         normalized_query = " ".join(query.split()).casefold()

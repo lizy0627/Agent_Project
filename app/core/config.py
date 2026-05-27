@@ -36,6 +36,18 @@ class Settings(BaseSettings):
     )
     tavily_api_key: str | None = None
     web_search_provider: str = "tavily"
+    web_search_timeout_seconds: float = Field(
+        default=5.0,
+        validation_alias=AliasChoices("WEB_SEARCH_TIMEOUT_SECONDS"),
+    )
+    web_reader_timeout_seconds: float = Field(
+        default=5.0,
+        validation_alias=AliasChoices("WEB_READER_TIMEOUT_SECONDS"),
+    )
+    search_workflow_read_top_k: int = Field(
+        default=2,
+        validation_alias=AliasChoices("SEARCH_WORKFLOW_READ_TOP_K", "WEB_SEARCH_READ_TOP_K"),
+    )
     conversation_store: str = "memory"
     conversation_db_path: Path = BASE_DIR / "data" / "conversations.db"
     auto_open_browser: bool = True

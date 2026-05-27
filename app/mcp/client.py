@@ -85,10 +85,6 @@ class MCPClient:
                 config.transport,
                 config.url,
             )
-            reachable_error = await self._check_server_reachable(config, tool_name="list_tools")
-            if reachable_error:
-                return self._failure(server_name, "list_tools", {}, reachable_error, started_at)
-
             async with self._open_session(config) as session:
                 result = await session.list_tools()
 
@@ -132,10 +128,6 @@ class MCPClient:
                 tool_name,
                 self._safe_log_args(arguments),
             )
-            reachable_error = await self._check_server_reachable(config, tool_name=tool_name)
-            if reachable_error:
-                return self._failure(server_name, tool_name, arguments, reachable_error, started_at)
-
             async with self._open_session(config) as session:
                 result = await session.call_tool(tool_name, arguments=arguments)
 

@@ -242,6 +242,9 @@ CONVERSATION_DB_PATH=data/conversations.db
 AUTO_OPEN_BROWSER=true
 TAVILY_API_KEY=your_tavily_api_key_here
 WEB_SEARCH_PROVIDER=tavily
+WEB_SEARCH_TIMEOUT_SECONDS=5
+WEB_READER_TIMEOUT_SECONDS=5
+SEARCH_WORKFLOW_READ_TOP_K=2
 MCP_ENABLED=true
 MCP_DEFAULT_SERVER=modelscope
 MODELSCOPE_API_TOKEN=
@@ -261,6 +264,9 @@ TOOL_TIMEOUT_SECONDS=20
 - `AUTO_OPEN_BROWSER`：直接运行 `python main.py` 时是否自动打开浏览器，默认 `true`；设置为 `false` 时只启动服务。
 - `TAVILY_API_KEY`：Tavily Search API Key，使用联网搜索时需要配置。
 - `WEB_SEARCH_PROVIDER`：联网搜索提供商，当前代码使用 `tavily`。
+- `WEB_SEARCH_TIMEOUT_SECONDS`：联网搜索请求超时时间，单位为秒，默认 `5`。
+- `WEB_READER_TIMEOUT_SECONDS`：网页读取请求超时时间，单位为秒，默认 `5`。
+- `SEARCH_WORKFLOW_READ_TOP_K`：深度搜索问题最多读取的网页数量，默认 `2`。
 - `MCP_ENABLED`：是否注册 MCP 工具。
 - `MCP_DEFAULT_SERVER`：默认 MCP Server 名称。
 - `MODELSCOPE_MCP_URL`：ModelScope MCP Server 地址。

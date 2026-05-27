@@ -1188,6 +1188,16 @@ button {
   margin-bottom: 9px;
 }
 
+.tool-error-note {
+  margin-bottom: 8px;
+  padding: 7px 8px;
+  border: 1px solid rgba(248, 113, 113, 0.22);
+  border-radius: 7px;
+  color: var(--red);
+  background: rgba(248, 113, 113, 0.09);
+  font-weight: 800;
+}
+
 .tool-panel-detail {
   min-width: 0;
   padding: 7px 8px;
@@ -1262,6 +1272,10 @@ button {
 [data-theme="dark"] .tool-panel-result,
 [data-theme="dark"] .reference-sources {
   background: rgba(255, 255, 255, 0.055);
+}
+
+[data-theme="dark"] .tool-error-note {
+  background: rgba(248, 113, 113, 0.12);
 }
 
 @media (max-width: 720px) {

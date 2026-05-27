@@ -4,7 +4,7 @@ from dataclasses import dataclass
 import json
 import re
 from time import perf_counter
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
 from urllib.parse import urlsplit, urlunsplit
 
 from openai import (
@@ -28,17 +28,33 @@ from app.core.logger import get_logger
 from app.core.safe_logging import safe_log_data, safe_log_field
 from app.mcp.manager import MCPManager
 from app.mcp.router import MCPRouter
+from app.services.agent_planner import (
+    AgentPlanner,
+    DEFAULT_WEB_SEARCH_MAX_RESULTS,
+    WEB_SEARCH_ROUTE_REASON,
+    PlannedToolCall,
+    normalize_query,
+)
 from app.tools import create_default_tool_manager
 from app.tools.base import ToolResult
+from app.tools.mcp_tool import MCPTool
 from app.tools.tool_manager import MCP_SERVER_UNAVAILABLE, ToolManager
 
 
 logger = get_logger(__name__)
 ChatMessage = dict[str, str]
-DEFAULT_WEB_SEARCH_MAX_RESULTS = 3
+StatusCallback = Callable[[str], None]
 DEFAULT_SEARCH_WORKFLOW_READ_TOP_K = 2
-MAX_SEARCH_WORKFLOW_READ_TOP_K = 2
+MAX_SEARCH_WORKFLOW_READ_TOP_K = 5
 WEB_SEARCH_TOOL_ARGUMENTS = {"query", "max_results", "search_depth"}
+STATUS_WEB_SEARCHING = "正在联网搜索..."
+STATUS_WEB_READING = "正在读取网页内容..."
+STATUS_MCP_CONNECTING = "正在连接 MCP 服务..."
+STATUS_MCP_CALLING = "正在调用 MCP 工具..."
+STATUS_CALCULATING = "正在计算..."
+STATUS_SUMMARIZING = "正在总结文本..."
+STATUS_GETTING_TIME = "正在获取当前时间..."
+STATUS_GENERATING = "正在生成回答..."
 MAX_SEARCH_SUMMARY_RESULTS = 3
 MAX_PAGE_SUMMARY_RESULTS = 2
 MAX_PAGE_CONTENT_CHARS = 2500
@@ -63,98 +79,6 @@ NOISY_PAGE_KEYWORDS = (
     "newsletter",
     "cookie policy",
 )
-MODELSCOPE_MCP_KEYWORDS = (
-    "魔搭",
-    "modelscope",
-    "模型",
-    "数据集",
-    "dataset",
-    "创空间",
-    "论文",
-    "paper",
-    "mcp服务",
-    "mcp 服务",
-    "qwen",
-    "通义千问",
-)
-MODELSCOPE_DEFAULT_TOOL_CANDIDATES = (
-    "search",
-    "modelscope_search",
-    "search_models",
-    "search_model",
-    "model_search",
-)
-MODELSCOPE_QUERY_NOISE_PHRASES = (
-    "相关模型",
-    "模型",
-    "搜索",
-    "帮我",
-    "魔搭",
-    "关于",
-)
-
-
-WEB_SEARCH_ROUTE_REASON = (
-    "\u68c0\u6d4b\u5230\u7528\u6237\u95ee\u9898\u5305\u542b\u6700\u65b0/"
-    "\u641c\u7d22/github\u7b49\u5173\u952e\u8bcd\uff0c\u9700\u8981\u8054\u7f51\u641c\u7d22"
-)
-MODELSCOPE_MCP_ROUTE_REASON = (
-    "\u68c0\u6d4b\u5230 ModelScope \u76f8\u5173\u5173\u952e\u8bcd\uff0c\u8def\u7531\u5230 MCP \u5de5\u5177"
-)
-
-
-def extract_search_keyword(query: str) -> str:
-    """Extract the likely ModelScope search keyword from a Chinese request."""
-
-    cleaned = " ".join(str(query or "").strip().split())
-    if not cleaned:
-        return ""
-
-    patterns = (
-        r"搜索\s*(?P<keyword>.+?)(?:相关模型|模型)?(?:[。！？?!，,；;]|$)",
-        r"找\s*(?P<keyword>.+?)(?:相关模型|模型)(?:[。！？?!，,；;]|$)",
-        r"关于\s*(?P<keyword>.+?)(?:相关模型|模型)?(?:[。！？?!，,；;]|$)",
-    )
-    for pattern in patterns:
-        match = re.search(pattern, cleaned, flags=re.IGNORECASE)
-        if match:
-            keyword = match.group("keyword").strip()
-            if keyword:
-                return keyword
-
-    return cleaned
-
-
-def normalize_query(query: str) -> str:
-    """Normalize a ModelScope search query before sending it to MCP."""
-
-    normalized = str(query or "").strip()
-    if not normalized:
-        return ""
-
-    normalized = re.sub(
-        r"\bqwen\s*-\s*(\d+)\b",
-        lambda match: f"Qwen{match.group(1)}",
-        normalized,
-        flags=re.IGNORECASE,
-    )
-    for phrase in MODELSCOPE_QUERY_NOISE_PHRASES:
-        normalized = normalized.replace(phrase, "")
-
-    normalized = re.sub(r"(?i)\bmodelscope\b", "", normalized)
-    normalized = re.sub(r"^[请麻烦帮忙我想要查找一下在上有关的\s]+", "", normalized)
-    normalized = re.sub(r"[。！？?!，,；;：:\s]+$", "", normalized)
-    normalized = " ".join(normalized.split())
-    return normalized.strip()
-
-
-@dataclass(frozen=True)
-class PlannedToolCall:
-    """A local tool call selected for the latest user message."""
-
-    name: str
-    arguments: dict[str, Any]
-    route_reason: str = ""
 
 
 @dataclass(frozen=True)
@@ -195,16 +119,26 @@ class DashScopeAgent:
             timeout=settings.dashscope_timeout_seconds,
         )
         self.model = settings.dashscope_model
-        self.tool_manager = tool_manager or create_default_tool_manager(
-            tavily_api_key=settings.tavily_api_key,
-            web_search_provider=settings.web_search_provider,
-            mcp_enabled=settings.mcp_enabled,
-        )
         self.mcp_manager = MCPManager(
             timeout_seconds=settings.mcp_timeout_seconds,
             modelscope_url=settings.modelscope_mcp_url,
         )
+        self.tool_manager = tool_manager or create_default_tool_manager(
+            tavily_api_key=settings.tavily_api_key,
+            web_search_provider=settings.web_search_provider,
+            web_search_timeout_seconds=settings.web_search_timeout_seconds,
+            web_reader_timeout_seconds=settings.web_reader_timeout_seconds,
+            mcp_enabled=settings.mcp_enabled,
+            mcp_manager=self.mcp_manager,
+        )
+        self._inject_mcp_manager_into_tool()
         self.mcp_router = MCPRouter(self.mcp_manager)
+        self.planner = AgentPlanner(settings=self.settings, mcp_router=self.mcp_router)
+
+    def _inject_mcp_manager_into_tool(self) -> None:
+        mcp_tool = self.tool_manager.get("mcp_tool")
+        if isinstance(mcp_tool, MCPTool) and mcp_tool.manager is None:
+            mcp_tool.manager = self.mcp_manager
 
     def chat(self, messages: list[ChatMessage], model: str | None = None) -> AgentReply:
         """Send a chat request with complete context and return model text."""
@@ -268,15 +202,23 @@ class DashScopeAgent:
         self,
         messages: list[ChatMessage],
         model: str | None = None,
+        status_callback: StatusCallback | None = None,
     ) -> tuple[Iterator[str], ToolResult | None]:
         """Return a streaming iterator and the tool metadata used to build it."""
 
+        emitted_statuses: set[str] = set()
+        initial_tool_name = self._emit_initial_tool_status(messages, status_callback, emitted_statuses)
         planned_call = self._plan_tool_call(messages)
         if planned_call and planned_call.name == "web_search":
+            if initial_tool_name != "web_search":
+                self._emit_status(status_callback, STATUS_WEB_SEARCHING, emitted_statuses)
             model_messages, workflow_result, performance = self._prepare_search_workflow(
                 messages,
                 planned_call,
+                status_callback=status_callback,
+                emitted_statuses=emitted_statuses,
             )
+            self._emit_status(status_callback, STATUS_GENERATING, emitted_statuses)
             logger.info("[SearchWorkflow] streaming summarize start")
             stream = self._stream_search_workflow_summary(
                 model_messages,
@@ -285,7 +227,15 @@ class DashScopeAgent:
             )
             return stream, workflow_result
 
+        self._emit_planned_tool_status(
+            planned_call,
+            status_callback,
+            emitted_statuses,
+            initial_tool_name=initial_tool_name,
+        )
         tool_result = self._call_planned_tool(planned_call)
+        if tool_result is not None:
+            self._emit_status(status_callback, STATUS_GENERATING, emitted_statuses)
         model_messages = self._messages_with_tool_result(messages, tool_result)
         return self._stream_complete_chat(model_messages, model=model), tool_result
 
@@ -347,6 +297,82 @@ class DashScopeAgent:
             logger.exception("Unexpected error while streaming from DashScope")
             raise UnknownAgentError() from exc
 
+    def _emit_initial_tool_status(
+        self,
+        messages: list[ChatMessage],
+        status_callback: StatusCallback | None,
+        emitted_statuses: set[str],
+    ) -> str | None:
+        """Emit an early status for likely local tool work before any slow discovery."""
+
+        tool_name = self._likely_tool_name_for_status(messages)
+        if tool_name is None:
+            return None
+
+        if tool_name == "mcp_tool":
+            self._emit_status(status_callback, STATUS_MCP_CONNECTING, emitted_statuses)
+            return tool_name
+
+        message = self._status_message_for_tool(tool_name)
+        if message:
+            self._emit_status(status_callback, message, emitted_statuses)
+        return tool_name
+
+    def _emit_planned_tool_status(
+        self,
+        planned_call: PlannedToolCall | None,
+        status_callback: StatusCallback | None,
+        emitted_statuses: set[str],
+        initial_tool_name: str | None = None,
+    ) -> None:
+        if planned_call is None:
+            return
+
+        if planned_call.name == "mcp_tool":
+            if initial_tool_name != "mcp_tool":
+                self._emit_status(status_callback, STATUS_MCP_CONNECTING, emitted_statuses)
+            self._emit_status(status_callback, STATUS_MCP_CALLING, emitted_statuses)
+            return
+
+        if initial_tool_name == planned_call.name:
+            return
+
+        message = self._status_message_for_tool(planned_call.name)
+        if message:
+            self._emit_status(status_callback, message, emitted_statuses)
+
+    def _likely_tool_name_for_status(self, messages: list[ChatMessage]) -> str | None:
+        user_message = self._latest_user_message(messages)
+        if not user_message:
+            return None
+        return self.planner.likely_tool_name_for_status(user_message)
+
+    def _status_message_for_tool(self, tool_name: str) -> str | None:
+        return {
+            "web_search": STATUS_WEB_SEARCHING,
+            "calculate": STATUS_CALCULATING,
+            "summarize_text": STATUS_SUMMARIZING,
+            "get_current_time": STATUS_GETTING_TIME,
+        }.get(tool_name)
+
+    def _emit_status(
+        self,
+        status_callback: StatusCallback | None,
+        message: str,
+        emitted_statuses: set[str] | None = None,
+    ) -> None:
+        if status_callback is None:
+            return
+
+        clean_message = str(message or "").strip()
+        if not clean_message:
+            return
+        if emitted_statuses is not None:
+            if clean_message in emitted_statuses:
+                return
+            emitted_statuses.add(clean_message)
+        status_callback(clean_message)
+
     def _maybe_call_tool(self, messages: list[ChatMessage]) -> ToolResult | None:
         planned_call = self._plan_tool_call(messages)
         return self._call_planned_tool(planned_call)
@@ -374,8 +400,10 @@ class DashScopeAgent:
 
     def _log_planned_tool(self, planned_call: PlannedToolCall) -> None:
         logger.info(
-            "PLANNED_TOOL=%s ARGS=%s",
+            "PLANNED_TOOL=%s route_score=%s route_reason=%s ARGS=%s",
             planned_call.name,
+            planned_call.route_score,
+            planned_call.route_reason,
             safe_log_data(planned_call.arguments),
         )
 
@@ -385,6 +413,7 @@ class DashScopeAgent:
         return {
             "name": planned_call.name,
             "arguments": safe_log_data(planned_call.arguments),
+            "route_score": planned_call.route_score,
             "route_reason": planned_call.route_reason,
         }
 
@@ -585,6 +614,8 @@ class DashScopeAgent:
         self,
         messages: list[ChatMessage],
         planned_call: PlannedToolCall,
+        status_callback: StatusCallback | None = None,
+        emitted_statuses: set[str] | None = None,
     ) -> tuple[list[ChatMessage], ToolResult, SearchWorkflowPerformance]:
         """Prepare search context and collect performance metrics."""
 
@@ -593,13 +624,7 @@ class DashScopeAgent:
         query = str(planned_call.arguments.get("query", user_message))
         search_kwargs = self._web_search_tool_arguments(planned_call.arguments, query=query)
         should_read_pages = self._should_read_web_pages(user_message or query)
-        read_top_k = min(
-            self._positive_int(
-                planned_call.arguments.get("read_top_k"),
-                default=DEFAULT_SEARCH_WORKFLOW_READ_TOP_K,
-            ),
-            MAX_SEARCH_WORKFLOW_READ_TOP_K,
-        )
+        read_top_k = self._search_workflow_read_top_k(planned_call)
         logger.info("Search workflow started: query=%s", safe_log_field("query", query))
         route_reason = self._planned_route_reason(planned_call) or WEB_SEARCH_ROUTE_REASON
         search_started_at = perf_counter()
@@ -635,8 +660,18 @@ class DashScopeAgent:
                 read_top_k,
                 len(selected_items),
             )
+            if selected_items:
+                self._emit_status(status_callback, STATUS_WEB_READING, emitted_statuses)
             reader_started_at = perf_counter()
-            reader_pairs = self._read_search_pages_concurrently(selected_items)
+            try:
+                reader_pairs = self._read_search_pages_concurrently(selected_items)
+            except Exception as exc:
+                reader_pairs = []
+                logger.warning(
+                    "Search workflow web_reader batch failed; continuing with search results: error=%s",
+                    exc,
+                    exc_info=True,
+                )
             reader_cost = self._elapsed_seconds(reader_started_at)
             logger.info(
                 "Search workflow web_reader total finished: selected=%s returned=%s cost=%.2fs",
@@ -690,6 +725,9 @@ class DashScopeAgent:
             pages=pages,
             max_context_chars=MAX_SEARCH_CONTEXT_CHARS,
             web_pages_read=should_read_pages,
+            success_pages=successful_reader_count,
+            failed_pages=max(selected_page_count - successful_reader_count, 0),
+            cache_hit_count=cache_hit_count,
         )
         workflow_payload = {
             "query": query,
@@ -699,6 +737,9 @@ class DashScopeAgent:
             "search_results": compact_search_items,
             "read_pages": compact_pages,
             "web_pages_read": should_read_pages,
+            "success_pages": successful_reader_count,
+            "failed_pages": max(selected_page_count - successful_reader_count, 0),
+            "cache_hit_count": cache_hit_count,
             "context_limited": self._is_search_context_limited(
                 search_result_count=search_result_count,
                 compact_search_count=len(compact_search_items),
@@ -935,6 +976,18 @@ class DashScopeAgent:
             return default
         return max(parsed, 1)
 
+    def _search_workflow_read_top_k(self, planned_call: PlannedToolCall) -> int:
+        configured_default = self._positive_int(
+            getattr(self.settings, "search_workflow_read_top_k", DEFAULT_SEARCH_WORKFLOW_READ_TOP_K),
+            default=DEFAULT_SEARCH_WORKFLOW_READ_TOP_K,
+        )
+        requested_value = planned_call.arguments.get("read_top_k")
+        resolved_value = self._positive_int(
+            requested_value,
+            default=configured_default,
+        )
+        return min(resolved_value, MAX_SEARCH_WORKFLOW_READ_TOP_K)
+
     def _compact_search_workflow_context(
         self,
         query: str,
@@ -944,6 +997,9 @@ class DashScopeAgent:
         pages: list[dict[str, Any]],
         max_context_chars: int,
         web_pages_read: bool,
+        success_pages: int = 0,
+        failed_pages: int = 0,
+        cache_hit_count: int = 0,
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         compact_search_items = self._compact_search_results(search_items)
         compact_pages = self._compact_pages(pages)
@@ -955,6 +1011,9 @@ class DashScopeAgent:
             compact_search_items,
             compact_pages,
             web_pages_read,
+            success_pages=success_pages,
+            failed_pages=failed_pages,
+            cache_hit_count=cache_hit_count,
         ) > max_context_chars:
             if self._trim_longest_page_content(compact_pages):
                 continue
@@ -1103,6 +1162,9 @@ class DashScopeAgent:
         search_items: list[dict[str, Any]],
         pages: list[dict[str, Any]],
         web_pages_read: bool,
+        success_pages: int = 0,
+        failed_pages: int = 0,
+        cache_hit_count: int = 0,
     ) -> int:
         payload = {
             "query": query,
@@ -1111,6 +1173,9 @@ class DashScopeAgent:
             "search_results": search_items,
             "read_pages": pages,
             "web_pages_read": web_pages_read,
+            "success_pages": success_pages,
+            "failed_pages": failed_pages,
+            "cache_hit_count": cache_hit_count,
             "context_limited": False,
             "context_note": (
                 "搜索结果有限；如果材料不足以支持结论，请在最终回答中明确说明。"
@@ -1127,55 +1192,7 @@ class DashScopeAgent:
         return cleaned[: max_chars - 3].rstrip() + "..."
 
     def _plan_tool_call(self, messages: list[ChatMessage]) -> PlannedToolCall | None:
-        user_message = self._latest_user_message(messages)
-        logger.info("USER=%s", safe_log_field("user_message", user_message))
-        logger.info("USER_MESSAGE=%s", safe_log_field("user_message", user_message))
-        if not user_message:
-            return None
-
-        planned_call: PlannedToolCall | None = None
-        if self._looks_like_time_request(user_message):
-            planned_call = PlannedToolCall(
-                name="get_current_time",
-                arguments={"timezone": "Asia/Shanghai"},
-            )
-        else:
-            expression = self._extract_calculation_expression(user_message)
-            if expression:
-                planned_call = PlannedToolCall(
-                    name="calculate",
-                    arguments={"expression": expression},
-                )
-
-        if planned_call is None:
-            mcp_call = self._plan_mcp_tool(user_message)
-            logger.info("ROUTE=%s", self._safe_planned_tool_log(mcp_call))
-            if mcp_call:
-                planned_call = mcp_call
-
-        if planned_call is None:
-            text_to_summarize = self._extract_text_to_summarize(user_message)
-            if text_to_summarize:
-                planned_call = PlannedToolCall(
-                    name="summarize_text",
-                    arguments={"text": text_to_summarize},
-                )
-
-        if planned_call is None and self._looks_like_search_request(user_message):
-            planned_call = PlannedToolCall(
-                name="web_search",
-                arguments={
-                    "query": user_message,
-                    "max_results": DEFAULT_WEB_SEARCH_MAX_RESULTS,
-                    "search_depth": "basic",
-                },
-                route_reason=WEB_SEARCH_ROUTE_REASON,
-            )
-
-        if planned_call:
-            logger.info("SELECTED=%s", planned_call.name)
-            self._log_planned_tool(planned_call)
-        return planned_call
+        return self.planner.plan(messages)
 
     def _messages_with_tool_result(
         self,
@@ -1300,161 +1317,6 @@ success=true / false
                 "content": tool_context,
             },
         ]
-
-    def _plan_mcp_tool(self, user_message: str) -> PlannedToolCall | None:
-        if not self.settings.mcp_enabled:
-            return None
-
-        route = self.mcp_router.route(user_message)
-        if not route:
-            return None
-
-        server_name = str(route["server_name"])
-        route_reason = str(route.get("reason") or "")
-        if server_name.strip().lower() == "modelscope" and self._looks_like_modelscope_mcp_request(user_message):
-            route_reason = MODELSCOPE_MCP_ROUTE_REASON
-        planned_call = PlannedToolCall(
-            name="mcp_tool",
-            arguments={
-                "server_name": server_name,
-                "tool_name": route["tool_name"],
-                "arguments": route.get("arguments") or {},
-                "original_query": route.get("original_query") or user_message,
-                "rewritten_query": route.get("rewritten_query") or "",
-                "query_fallbacks": route.get("query_fallbacks") or [],
-                "route_reason": route_reason,
-            },
-            route_reason=route_reason,
-        )
-        self._log_planned_tool(planned_call)
-        return planned_call
-
-    def _plan_modelscope_mcp_tool(self, user_message: str) -> PlannedToolCall | None:
-        if not self.settings.mcp_enabled:
-            return None
-        if not self._looks_like_modelscope_mcp_request(user_message):
-            return None
-
-        server_name = self.settings.mcp_default_server or "modelscope"
-        tool = self._select_modelscope_tool(user_message, server_name)
-        tool_name = str(tool.get("name") or "").strip()
-        if not tool_name:
-            tool_name = MODELSCOPE_DEFAULT_TOOL_CANDIDATES[0]
-
-        rewritten_query = normalize_query(extract_search_keyword(user_message)) or normalize_query(user_message)
-        arguments = self._build_mcp_tool_arguments(user_message, tool, rewritten_query)
-        planned_call = PlannedToolCall(
-            name="mcp_tool",
-            arguments={
-                "server_name": server_name,
-                "tool_name": tool_name,
-                "arguments": arguments,
-                "original_query": user_message,
-                "rewritten_query": rewritten_query,
-                "route_reason": MODELSCOPE_MCP_ROUTE_REASON,
-            },
-            route_reason=MODELSCOPE_MCP_ROUTE_REASON,
-        )
-        self._log_planned_tool(planned_call)
-        return planned_call
-
-    def _looks_like_modelscope_mcp_request(self, message: str) -> bool:
-        lowered = message.lower()
-        return any(keyword.lower() in lowered for keyword in MODELSCOPE_MCP_KEYWORDS)
-
-    def _select_modelscope_tool(self, user_message: str, server_name: str) -> dict[str, Any]:
-        try:
-            manager = MCPManager(
-                timeout_seconds=self.settings.mcp_timeout_seconds,
-                modelscope_url=self.settings.modelscope_mcp_url,
-            )
-            list_result = manager.client.list_tools(server_name)
-        except Exception as exc:
-            logger.warning("ModelScope MCP list_tools planning failed: %s", exc)
-            return {"name": MODELSCOPE_DEFAULT_TOOL_CANDIDATES[0]}
-
-        if not list_result.get("success"):
-            logger.warning("ModelScope MCP list_tools failed: error=%s", list_result.get("error"))
-            return {"name": MODELSCOPE_DEFAULT_TOOL_CANDIDATES[0]}
-
-        tools = (list_result.get("data") or {}).get("tools", [])
-        if not isinstance(tools, list) or not tools:
-            logger.warning("ModelScope MCP server returned no tools during planning")
-            return {"name": MODELSCOPE_DEFAULT_TOOL_CANDIDATES[0]}
-
-        selected_tool = max(
-            [tool for tool in tools if isinstance(tool, dict)],
-            key=lambda tool: self._modelscope_tool_score(user_message, tool),
-            default={},
-        )
-        logger.info(
-            "ModelScope MCP tool selected: tool=%s",
-            selected_tool.get("name") if isinstance(selected_tool, dict) else "",
-        )
-        return selected_tool if isinstance(selected_tool, dict) else {}
-
-    def _modelscope_tool_score(self, user_message: str, tool: dict[str, Any]) -> int:
-        lowered_message = user_message.lower()
-        tool_name = str(tool.get("name") or "").lower()
-        description = str(tool.get("description") or "").lower()
-        searchable = f"{tool_name} {description}"
-        score = 0
-
-        if "search" in searchable or "搜索" in searchable:
-            score += 20
-        if any(candidate in tool_name for candidate in MODELSCOPE_DEFAULT_TOOL_CANDIDATES):
-            score += 12
-        if any(keyword in lowered_message for keyword in ("模型", "model", "qwen", "通义千问")):
-            score += self._category_score(searchable, ("model", "模型"))
-        if any(keyword in lowered_message for keyword in ("数据集", "dataset")):
-            score += self._category_score(searchable, ("dataset", "数据集"))
-        if any(keyword in lowered_message for keyword in ("创空间", "space", "studio")):
-            score += self._category_score(searchable, ("space", "创空间", "studio"))
-        if any(keyword in lowered_message for keyword in ("论文", "paper")):
-            score += self._category_score(searchable, ("paper", "论文"))
-        if "mcp" in lowered_message:
-            score += self._category_score(searchable, ("mcp", "服务"))
-
-        return score
-
-    def _category_score(self, searchable: str, category_keywords: tuple[str, ...]) -> int:
-        return 10 if any(keyword in searchable for keyword in category_keywords) else 0
-
-    def _build_mcp_tool_arguments(
-        self,
-        user_message: str,
-        tool: dict[str, Any],
-        rewritten_query: str | None = None,
-    ) -> dict[str, Any]:
-        input_schema = tool.get("inputSchema") or tool.get("input_schema") or {}
-        properties = input_schema.get("properties", {}) if isinstance(input_schema, dict) else {}
-        query = rewritten_query or normalize_query(extract_search_keyword(user_message)) or user_message
-        if not isinstance(properties, dict) or not properties:
-            return {"query": query}
-
-        arguments: dict[str, Any] = {}
-        for property_name, property_schema in properties.items():
-            lowered_name = str(property_name).lower()
-            if self._looks_like_query_argument(lowered_name):
-                arguments[property_name] = query
-                continue
-            if self._looks_like_limit_argument(lowered_name):
-                arguments[property_name] = 5
-                continue
-
-            default_value = self._schema_default_value(property_schema)
-            if default_value is not None:
-                arguments[property_name] = default_value
-
-        required = input_schema.get("required", []) if isinstance(input_schema, dict) else []
-        if isinstance(required, list):
-            for property_name in required:
-                if property_name not in arguments:
-                    arguments[property_name] = query
-
-        if not arguments:
-            arguments["query"] = query
-        return arguments
 
     def _with_mcp_query_arguments(self, arguments: dict[str, Any], query: str) -> dict[str, Any]:
         updated = dict(arguments)
@@ -1638,21 +1500,7 @@ success=true / false
             return value
 
     def _looks_like_query_argument(self, name: str) -> bool:
-        query_keywords = ("query", "keyword", "keywords", "search", "q", "text", "name")
-        return any(keyword in name for keyword in query_keywords)
-
-    def _looks_like_limit_argument(self, name: str) -> bool:
-        limit_keywords = ("limit", "count", "size", "page_size", "max_results", "top_k")
-        return any(keyword in name for keyword in limit_keywords)
-
-    def _schema_default_value(self, schema: Any) -> Any:
-        if not isinstance(schema, dict):
-            return None
-        if "default" in schema:
-            return schema["default"]
-        if "enum" in schema and isinstance(schema["enum"], list) and schema["enum"]:
-            return schema["enum"][0]
-        return None
+        return self.planner._looks_like_query_argument(name)
 
     def _messages_with_search_workflow_result(
         self,
@@ -1697,180 +1545,68 @@ success=true / false
         ]
 
     def _latest_user_message(self, messages: list[ChatMessage]) -> str:
-        for message in reversed(messages):
-            if message.get("role") == "user":
-                return message.get("content", "")
-        return ""
-
-    def _looks_like_time_request(self, message: str) -> bool:
-        lowered = message.lower()
-        time_keywords = (
-            "现在几点",
-            "当前时间",
-            "现在时间",
-            "今天几号",
-            "今天日期",
-            "当前日期",
-            "current time",
-            "what time",
-            "today's date",
-            "today date",
-        )
-        return any(keyword in lowered for keyword in time_keywords)
-
-    def _extract_calculation_expression(self, message: str) -> str | None:
-        lowered = message.lower()
-        has_calculation_intent = any(
-            keyword in lowered
-            for keyword in ("计算", "算一下", "等于多少", "calculate", "calc", "=", "求值")
-        )
-        if not has_calculation_intent:
-            return None
-
-        normalized = (
-            message.replace("×", "*")
-            .replace("÷", "/")
-            .replace("^", "**")
-            .replace("（", "(")
-            .replace("）", ")")
-        )
-        allowed_chunks = re.findall(
-            r"(?:sqrt|sin|cos|tan|log10|log|ceil|floor|round|abs|pow|pi|tau|e|[0-9+\-*/().,%\s])+",
-            normalized,
-            flags=re.IGNORECASE,
-        )
-        candidates = [
-            chunk.strip().rstrip("=?？。")
-            for chunk in allowed_chunks
-            if any(char.isdigit() for char in chunk)
-        ]
-        if not candidates:
-            return None
-
-        expression = max(candidates, key=len).replace(",", "")
-        if len(re.findall(r"[+\-*/%()]|\*\*", expression)) == 0:
-            return None
-        return expression
-
-    def _extract_text_to_summarize(self, message: str) -> str | None:
-        lowered = message.lower()
-        if not any(keyword in lowered for keyword in ("总结", "摘要", "概括", "summarize", "summary")):
-            return None
-
-        split_match = re.search(r"[:：]\s*(.+)", message, flags=re.DOTALL)
-        if split_match:
-            text = split_match.group(1).strip()
-        else:
-            text = re.sub(
-                r"^(请|帮我|麻烦)?(总结|摘要|概括|summarize|summary)(一下|下)?",
-                "",
-                message,
-                flags=re.IGNORECASE,
-            ).strip()
-
-        return text if len(text) >= 20 else None
-
-    def _looks_like_search_request(self, message: str) -> bool:
-        """Return True when a user asks for current or external web information."""
-
-        clean_message = message.strip()
-        if not clean_message:
-            return False
-
-        lowered = message.lower()
-        casual_phrases = (
-            "你好",
-            "您好",
-            "在吗",
-            "谢谢",
-            "你是谁",
-            "你好吗",
-            "你现在好吗",
-            "你怎么样",
-            "hello",
-            "hi",
-            "thanks",
-            "thank you",
-            "who are you",
-            "how are you",
-        )
-        if lowered in casual_phrases:
-            return False
-
-        chinese_keywords = (
-            "搜索",
-            "查一下",
-            "联网",
-            "最新",
-            "新闻",
-            "资料",
-            "官网",
-            "最近",
-            "价格",
-            "github",
-            "论文",
-            "教程",
-        )
-        english_keywords = (
-            "search",
-            "latest",
-            "news",
-            "current",
-            "recent",
-            "github",
-            "website",
-            "official",
-            "price",
-        )
-        extra_search_keywords = (
-            "联网搜索",
-            "网络搜索",
-            "网上搜索",
-            "帮我查",
-            "项目",
-            "today",
-        )
-        strong_keywords = chinese_keywords + english_keywords + extra_search_keywords
-        if any(keyword in lowered for keyword in strong_keywords):
-            return True
-
-        ambiguous_keywords = (
-            "今天",
-            "现在",
-            "是什么",
-            "怎么样",
-        )
-        if not any(keyword in lowered for keyword in ambiguous_keywords):
-            return False
-
-        if lowered.startswith("你"):
-            return False
-
-        if lowered.startswith("我") and not self._has_external_subject_hint(lowered):
-            return False
-
-        return self._has_external_subject_hint(lowered)
+        return self.planner.latest_user_message(messages)
 
     def _should_read_web_pages(self, message: str) -> bool:
-        """Return True when search snippets are unlikely to be enough."""
+        """Return True only for deeper questions where snippets are unlikely to be enough."""
 
         lowered = message.lower().strip()
         if not lowered:
             return False
 
-        if re.search(r"https?://\S+|www\.\S+|\b[a-z0-9][a-z0-9.-]*\.[a-z]{2,}(?:/\S*)?", lowered):
-            return True
-
         deep_analysis_keywords = (
+            "分析",
+            "对比",
+            "比较",
+            "总结",
             "详细分析",
             "详细解析",
+            "详细",
+            "为什么",
+            "原理",
+            "教程",
+            "指南",
+            "步骤",
+            "怎么做",
+            "如何",
+            "解析",
             "深入",
             "深度",
+            "analysis",
+            "analyze",
+            "compare",
+            "comparison",
+            "summarize",
+            "summary",
+            "detail",
+            "detailed",
+            "why",
+            "principle",
+            "how it works",
+            "tutorial",
+            "guide",
             "deep analysis",
             "in-depth",
             "in depth",
         )
         if any(keyword in lowered for keyword in deep_analysis_keywords):
+            return True
+
+        if re.search(r"https?://\S+|www\.\S+|\b[a-z0-9][a-z0-9.-]*\.[a-z]{2,}(?:/\S*)?", lowered) and any(
+            keyword in lowered
+            for keyword in (
+                "读",
+                "读取",
+                "打开",
+                "网页",
+                "文章",
+                "页面",
+                "read",
+                "open",
+                "page",
+                "article",
+            )
+        ):
             return True
 
         article_summary_keywords = (
@@ -1880,21 +1616,6 @@ success=true / false
             "summarize this article",
         )
         if any(keyword in lowered for keyword in article_summary_keywords):
-            return True
-
-        github_project_keywords = (
-            "github项目",
-            "github 项目",
-            "github仓库",
-            "github 仓库",
-            "github repo",
-            "github repository",
-        )
-        if any(keyword in lowered for keyword in github_project_keywords):
-            return True
-        if "github" in lowered and any(
-            keyword in lowered for keyword in ("分析", "解析", "项目", "仓库", "源码", "repo", "repository")
-        ):
             return True
 
         organize_keywords = ("整理", "汇总", "收集", "梳理", "归纳", "compile", "collect")
@@ -1911,57 +1632,3 @@ success=true / false
         return any(keyword in lowered for keyword in organize_keywords) and any(
             keyword in lowered for keyword in technical_material_keywords
         )
-
-    def _has_external_subject_hint(self, lowered_message: str) -> bool:
-        external_subject_keywords = (
-            "公司",
-            "产品",
-            "品牌",
-            "平台",
-            "官网",
-            "网站",
-            "app",
-            "软件",
-            "版本",
-            "发布",
-            "更新",
-            "技术",
-            "框架",
-            "库",
-            "api",
-            "模型",
-            "价格",
-            "股价",
-            "github",
-            "项目",
-            "论文",
-            "教程",
-            "文档",
-            "资料",
-            "新闻",
-            "天气",
-            "汇率",
-            "股票",
-            "基金",
-            "国家",
-            "城市",
-            "地区",
-            "总统",
-            "政策",
-            "赛事",
-            "榜单",
-            "招聘",
-            "fastapi",
-            "python",
-            "javascript",
-            "typescript",
-            "react",
-            "vue",
-            "openai",
-            "dashscope",
-            "tavily",
-        )
-        if any(keyword in lowered_message for keyword in external_subject_keywords):
-            return True
-
-        return bool(re.search(r"[a-z0-9][a-z0-9_.-]{1,}", lowered_message))

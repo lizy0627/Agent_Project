@@ -36,8 +36,9 @@ class MCPTool:
             ).model_dump(mode="json")
 
         try:
-            manager = self.manager or MCPManager()
-            result = manager.call_tool(server_name, tool_name, arguments or {})
+            if self.manager is None:
+                self.manager = MCPManager()
+            result = self.manager.call_tool(server_name, tool_name, arguments or {})
             if not result.get("success") and not result.get("error"):
                 result["error"] = "MCP tool call failed. Please check whether the MCP Server is running."
             return result

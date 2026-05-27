@@ -1,5 +1,6 @@
 import json
-from threading import Lock
+from queue import Empty, Queue
+from threading import Lock, Thread
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, Path
@@ -25,10 +26,24 @@ logger = get_logger(__name__)
 agent_lock = Lock()
 store_lock = Lock()
 cached_agent: DashScopeAgent | None = None
-cached_agent_signature: tuple[str | None, str, str, float, str | None, str, bool, str, int] | None = None
+cached_agent_signature: tuple[
+    str | None,
+    str,
+    str,
+    float,
+    str | None,
+    str,
+    float,
+    float,
+    int,
+    bool,
+    str,
+    int,
+] | None = None
 cached_conversation_store: ConversationStoreProtocol | None = None
 cached_conversation_store_signature: tuple[str, str, int] | None = None
 DEFAULT_SYSTEM_PROMPT = "\u4f60\u662f\u4e00\u4e2a\u7b80\u6d01\u3001\u53ef\u9760\u7684\u4e2d\u6587 AI \u52a9\u624b\u3002"
+ALLOWED_CHAT_MODELS = {"qwen-plus", "qwen-turbo", "qwen-max"}
 WEB_SEARCH_STATUS_SEARCHING = "正在联网搜索..."
 WEB_SEARCH_STATUS_ORGANIZING = "正在搜索并整理资料..."
 SEARCH_INTENT_KEYWORDS = (
@@ -78,6 +93,9 @@ def get_agent(settings: Settings = Depends(get_settings)) -> DashScopeAgent:
         settings.dashscope_timeout_seconds,
         settings.tavily_api_key,
         settings.web_search_provider,
+        settings.web_search_timeout_seconds,
+        settings.web_reader_timeout_seconds,
+        settings.search_workflow_read_top_k,
         settings.mcp_enabled,
         settings.modelscope_mcp_url,
         settings.mcp_timeout_seconds,
@@ -227,18 +245,71 @@ def stream_chat(
 
     def event_stream():
         assistant_chunks: list[str] = []
+        status_queue: Queue[str] = Queue()
+        result_queue: Queue[tuple[str, object]] = Queue(maxsize=1)
+        sent_statuses: set[str] = set()
+
+        def queue_status(message: str) -> None:
+            clean_message = str(message or "").strip()
+            if clean_message:
+                status_queue.put(clean_message)
+
+        def status_event(message: str) -> str | None:
+            clean_message = str(message or "").strip()
+            if not clean_message or clean_message in sent_statuses:
+                return None
+            sent_statuses.add(clean_message)
+            return sse_event("status", {"message": clean_message})
+
+        def drain_status_events():
+            while True:
+                try:
+                    message = status_queue.get_nowait()
+                except Empty:
+                    break
+
+                event = status_event(message)
+                if event is not None:
+                    yield event
 
         try:
             if likely_web_search:
-                yield sse_event("status", {"message": WEB_SEARCH_STATUS_SEARCHING})
+                event = status_event(WEB_SEARCH_STATUS_SEARCHING)
+                if event is not None:
+                    yield event
 
-            agent = get_agent(settings)
-            stream, tool_result = agent.stream_chat_with_tool_result(
-                messages=model_messages,
-                model=requested_model,
-            )
-            if tool_result and tool_result.name == "web_search":
-                yield sse_event("status", {"message": WEB_SEARCH_STATUS_ORGANIZING})
+            def prepare_stream() -> None:
+                try:
+                    prepared_agent = get_agent(settings)
+                    stream, tool_result = prepared_agent.stream_chat_with_tool_result(
+                        messages=model_messages,
+                        model=requested_model,
+                        status_callback=queue_status,
+                    )
+                    result_queue.put(("ok", (prepared_agent, stream, tool_result)))
+                except Exception as exc:
+                    result_queue.put(("error", exc))
+
+            prepare_thread = Thread(target=prepare_stream, daemon=True)
+            prepare_thread.start()
+            while prepare_thread.is_alive():
+                try:
+                    message = status_queue.get(timeout=0.1)
+                except Empty:
+                    continue
+
+                event = status_event(message)
+                if event is not None:
+                    yield event
+
+            yield from drain_status_events()
+            result_status, result_payload = result_queue.get()
+            if result_status == "error":
+                if isinstance(result_payload, Exception):
+                    raise result_payload
+                raise UnknownAgentError()
+
+            agent, stream, tool_result = result_payload
 
             yield sse_event(
                 "metadata",
@@ -318,7 +389,11 @@ def normalize_requested_model(model: str | None) -> str | None:
         return None
 
     clean_model = model.strip()
-    return clean_model or None
+    if not clean_model:
+        return None
+    if clean_model not in ALLOWED_CHAT_MODELS:
+        raise InvalidArgumentsError()
+    return clean_model
 
 
 def _looks_like_search_request(message: str) -> bool:
