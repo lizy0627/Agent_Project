@@ -6,6 +6,7 @@ from typing import Protocol
 
 
 ChatMessage = dict[str, str]
+DEFAULT_CONVERSATION_USER_ID = "__dev__"
 
 
 class ConversationStoreProtocol(Protocol):
@@ -13,16 +14,36 @@ class ConversationStoreProtocol(Protocol):
 
     max_rounds: int
 
-    def get_messages(self, conversation_id: str) -> list[ChatMessage]:
+    def get_messages(
+        self,
+        conversation_id: str,
+        user_id: str = DEFAULT_CONVERSATION_USER_ID,
+    ) -> list[ChatMessage]:
         """Return recent user/assistant messages."""
 
-    def append_message(self, conversation_id: str, role: str, content: str) -> None:
+    def append_message(
+        self,
+        conversation_id: str,
+        role: str,
+        content: str,
+        user_id: str = DEFAULT_CONVERSATION_USER_ID,
+    ) -> None:
         """Append one message."""
 
-    def append_exchange(self, conversation_id: str, user_message: str, assistant_reply: str) -> None:
+    def append_exchange(
+        self,
+        conversation_id: str,
+        user_message: str,
+        assistant_reply: str,
+        user_id: str = DEFAULT_CONVERSATION_USER_ID,
+    ) -> None:
         """Append one user/assistant round."""
 
-    def clear(self, conversation_id: str) -> None:
+    def clear(
+        self,
+        conversation_id: str,
+        user_id: str = DEFAULT_CONVERSATION_USER_ID,
+    ) -> None:
         """Clear one conversation."""
 
 
@@ -31,43 +52,65 @@ class ConversationStore:
     """In-memory conversation history store."""
 
     max_rounds: int = 10
-    conversations: dict[str, list[ChatMessage]] = field(default_factory=dict)
+    conversations: dict[tuple[str, str], list[ChatMessage]] = field(default_factory=dict)
     _lock: Lock = field(default_factory=Lock, init=False, repr=False)
 
     @property
     def max_messages(self) -> int:
         return self.max_rounds * 2
 
-    def get_messages(self, conversation_id: str) -> list[ChatMessage]:
+    def get_messages(
+        self,
+        conversation_id: str,
+        user_id: str = DEFAULT_CONVERSATION_USER_ID,
+    ) -> list[ChatMessage]:
         """Return a copy of recent user/assistant messages."""
 
         with self._lock:
-            return list(self.conversations.get(conversation_id, []))
+            return list(self.conversations.get(conversation_key(conversation_id, user_id), []))
 
-    def append_message(self, conversation_id: str, role: str, content: str) -> None:
+    def append_message(
+        self,
+        conversation_id: str,
+        role: str,
+        content: str,
+        user_id: str = DEFAULT_CONVERSATION_USER_ID,
+    ) -> None:
         """Append one message and trim the conversation to the latest rounds."""
 
         with self._lock:
-            messages = self.conversations.setdefault(conversation_id, [])
+            key = conversation_key(conversation_id, user_id)
+            messages = self.conversations.setdefault(key, [])
             messages.append({"role": role, "content": content})
-            self.conversations[conversation_id] = messages[-self.max_messages :]
+            self.conversations[key] = messages[-self.max_messages :]
 
-    def append_exchange(self, conversation_id: str, user_message: str, assistant_reply: str) -> None:
+    def append_exchange(
+        self,
+        conversation_id: str,
+        user_message: str,
+        assistant_reply: str,
+        user_id: str = DEFAULT_CONVERSATION_USER_ID,
+    ) -> None:
         """Append one user/assistant round and trim old context."""
 
         with self._lock:
-            messages = self.conversations.setdefault(conversation_id, [])
+            key = conversation_key(conversation_id, user_id)
+            messages = self.conversations.setdefault(key, [])
             messages.extend(
                 [
                     {"role": "user", "content": user_message},
                     {"role": "assistant", "content": assistant_reply},
                 ]
             )
-            self.conversations[conversation_id] = messages[-self.max_messages :]
+            self.conversations[key] = messages[-self.max_messages :]
 
-    def clear(self, conversation_id: str) -> None:
+    def clear(
+        self,
+        conversation_id: str,
+        user_id: str = DEFAULT_CONVERSATION_USER_ID,
+    ) -> None:
         with self._lock:
-            self.conversations.pop(conversation_id, None)
+            self.conversations.pop(conversation_key(conversation_id, user_id), None)
 
 
 class SQLiteConversationStore:
@@ -89,7 +132,11 @@ class SQLiteConversationStore:
     def max_messages(self) -> int:
         return self.max_rounds * 2
 
-    def get_messages(self, conversation_id: str) -> list[ChatMessage]:
+    def get_messages(
+        self,
+        conversation_id: str,
+        user_id: str = DEFAULT_CONVERSATION_USER_ID,
+    ) -> list[ChatMessage]:
         """Return a copy of recent user/assistant messages."""
 
         with self._lock:
@@ -99,37 +146,53 @@ class SQLiteConversationStore:
                 FROM (
                     SELECT id, role, content
                     FROM conversation_messages
-                    WHERE conversation_id = ?
+                    WHERE user_id = ? AND conversation_id = ?
                     ORDER BY id DESC
                     LIMIT ?
                 )
                 ORDER BY id ASC
                 """,
-                (conversation_id, self.max_messages),
+                (user_id, conversation_id, self.max_messages),
             ).fetchall()
 
         return [{"role": row["role"], "content": row["content"]} for row in rows]
 
-    def append_message(self, conversation_id: str, role: str, content: str) -> None:
+    def append_message(
+        self,
+        conversation_id: str,
+        role: str,
+        content: str,
+        user_id: str = DEFAULT_CONVERSATION_USER_ID,
+    ) -> None:
         """Append one message and trim the conversation to the latest rounds."""
 
         with self._lock, self._connection:
-            self._insert_message(self._connection, conversation_id, role, content)
-            self._trim_conversation(self._connection, conversation_id)
+            self._insert_message(self._connection, conversation_id, role, content, user_id)
+            self._trim_conversation(self._connection, conversation_id, user_id)
 
-    def append_exchange(self, conversation_id: str, user_message: str, assistant_reply: str) -> None:
+    def append_exchange(
+        self,
+        conversation_id: str,
+        user_message: str,
+        assistant_reply: str,
+        user_id: str = DEFAULT_CONVERSATION_USER_ID,
+    ) -> None:
         """Append one user/assistant round and trim old context."""
 
         with self._lock, self._connection:
-            self._insert_message(self._connection, conversation_id, "user", user_message)
-            self._insert_message(self._connection, conversation_id, "assistant", assistant_reply)
-            self._trim_conversation(self._connection, conversation_id)
+            self._insert_message(self._connection, conversation_id, "user", user_message, user_id)
+            self._insert_message(self._connection, conversation_id, "assistant", assistant_reply, user_id)
+            self._trim_conversation(self._connection, conversation_id, user_id)
 
-    def clear(self, conversation_id: str) -> None:
+    def clear(
+        self,
+        conversation_id: str,
+        user_id: str = DEFAULT_CONVERSATION_USER_ID,
+    ) -> None:
         with self._lock, self._connection:
             self._connection.execute(
-                "DELETE FROM conversation_messages WHERE conversation_id = ?",
-                (conversation_id,),
+                "DELETE FROM conversation_messages WHERE user_id = ? AND conversation_id = ?",
+                (user_id, conversation_id),
             )
 
     def _configure_connection(self) -> None:
@@ -143,6 +206,7 @@ class SQLiteConversationStore:
                 """
                 CREATE TABLE IF NOT EXISTS conversation_messages (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id TEXT NOT NULL DEFAULT '__dev__',
                     conversation_id TEXT NOT NULL,
                     role TEXT NOT NULL,
                     content TEXT NOT NULL,
@@ -150,12 +214,24 @@ class SQLiteConversationStore:
                 )
                 """
             )
+            self._ensure_user_id_column()
             self._connection.execute(
                 """
-                CREATE INDEX IF NOT EXISTS idx_conversation_messages_conversation_id_id
-                ON conversation_messages (conversation_id, id)
+                CREATE INDEX IF NOT EXISTS idx_conversation_messages_user_conversation_id
+                ON conversation_messages (user_id, conversation_id, id)
                 """
             )
+
+    def _ensure_user_id_column(self) -> None:
+        columns = {
+            row["name"]
+            for row in self._connection.execute("PRAGMA table_info(conversation_messages)").fetchall()
+        }
+        if "user_id" in columns:
+            return
+        self._connection.execute(
+            "ALTER TABLE conversation_messages ADD COLUMN user_id TEXT NOT NULL DEFAULT '__dev__'"
+        )
 
     def _insert_message(
         self,
@@ -163,30 +239,42 @@ class SQLiteConversationStore:
         conversation_id: str,
         role: str,
         content: str,
+        user_id: str = DEFAULT_CONVERSATION_USER_ID,
     ) -> None:
         connection.execute(
             """
-            INSERT INTO conversation_messages (conversation_id, role, content)
-            VALUES (?, ?, ?)
+            INSERT INTO conversation_messages (user_id, conversation_id, role, content)
+            VALUES (?, ?, ?, ?)
             """,
-            (conversation_id, role, content),
+            (user_id, conversation_id, role, content),
         )
 
-    def _trim_conversation(self, connection: sqlite3.Connection, conversation_id: str) -> None:
+    def _trim_conversation(
+        self,
+        connection: sqlite3.Connection,
+        conversation_id: str,
+        user_id: str = DEFAULT_CONVERSATION_USER_ID,
+    ) -> None:
         connection.execute(
             """
             DELETE FROM conversation_messages
-            WHERE conversation_id = ?
+            WHERE user_id = ?
+              AND conversation_id = ?
               AND id NOT IN (
                   SELECT id
                   FROM conversation_messages
-                  WHERE conversation_id = ?
+                  WHERE user_id = ?
+                    AND conversation_id = ?
                   ORDER BY id DESC
                   LIMIT ?
               )
             """,
-            (conversation_id, conversation_id, self.max_messages),
+            (user_id, conversation_id, user_id, conversation_id, self.max_messages),
         )
+
+
+def conversation_key(conversation_id: str, user_id: str = DEFAULT_CONVERSATION_USER_ID) -> tuple[str, str]:
+    return (str(user_id or DEFAULT_CONVERSATION_USER_ID), str(conversation_id))
 
 
 def create_conversation_store(

@@ -63,7 +63,24 @@
             <span class="mode-icon" aria-hidden="true">#</span>
             面试助手
           </button>
+          <button class="mode-item" type="button" data-mode="文档问答">
+            <span class="mode-icon" aria-hidden="true">D</span>
+            文档问答
+          </button>
         </nav>
+
+        <section class="document-section" aria-label="文档问答">
+          <div class="section-header">
+            <span class="section-label">文档问答</span>
+            <span id="documentStatusText" class="section-count">0</span>
+          </div>
+          <label class="document-upload" for="documentUploadInput">
+            <span class="sr-only">上传文档</span>
+            <input id="documentUploadInput" type="file" accept=".txt,.md,.markdown,.pdf,text/plain,text/markdown,application/pdf" />
+            <button id="documentUploadButton" class="document-upload-button" type="button">上传 txt/md/pdf</button>
+          </label>
+          <div id="documentList" class="document-list"></div>
+        </section>
 
         <section class="side-note">
           <span class="online-dot" aria-hidden="true"></span>
@@ -101,6 +118,16 @@
             <button id="themeToggleButton" class="theme-toggle-button" type="button" aria-label="切换深色主题">
               深色
             </button>
+            <button
+              id="tracePanelToggleButton"
+              class="ghost-button trace-toggle-button"
+              type="button"
+              aria-controls="agentTracePanel"
+              aria-expanded="true"
+            >
+              Trace
+            </button>
+            <button id="authButton" class="ghost-button auth-button" type="button">Log in</button>
             <button id="settingsButton" class="ghost-button" type="button">设置</button>
             <button id="clearConversationButton" class="ghost-button" type="button">清空</button>
           </div>
@@ -159,6 +186,81 @@
           </form>
         </footer>
       </main>
+
+      <aside id="agentTracePanel" class="trace-panel" aria-label="Agent Trace 面板">
+        <header class="trace-header">
+          <div>
+            <span class="eyebrow">Execution Trace</span>
+            <h2>Agent Trace</h2>
+          </div>
+          <span id="traceStateText" class="trace-state idle">Idle</span>
+        </header>
+
+        <section class="trace-summary" aria-label="请求摘要">
+          <div class="trace-summary-item">
+            <span>意图识别</span>
+            <strong id="traceIntentText">等待下一次请求</strong>
+          </div>
+          <div class="trace-summary-grid">
+            <div class="trace-summary-item">
+              <span>工具</span>
+              <strong id="traceToolNameText">未使用</strong>
+            </div>
+            <div class="trace-summary-item">
+              <span>状态</span>
+              <strong id="traceToolStatusText">未开始</strong>
+            </div>
+            <div class="trace-summary-item">
+              <span>耗时</span>
+              <strong id="traceToolDurationText">--</strong>
+            </div>
+          </div>
+          <div id="traceErrorText" class="trace-error is-hidden"></div>
+        </section>
+
+        <section class="trace-section" aria-label="阶段状态">
+          <div class="trace-section-title">阶段状态</div>
+          <div id="traceStageList" class="trace-stage-list"></div>
+        </section>
+
+        <section class="trace-section trace-event-section" aria-label="执行事件">
+          <div class="trace-section-title">执行事件</div>
+          <div id="traceEventList" class="trace-event-list"></div>
+        </section>
+      </aside>
+    </div>
+
+    <div id="authOverlay" class="auth-overlay" hidden>
+      <section
+        class="auth-panel"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="authTitle"
+      >
+        <header class="auth-header">
+          <div>
+            <span class="eyebrow">Account</span>
+            <h2 id="authTitle">Log in</h2>
+          </div>
+        </header>
+
+        <form id="authForm" class="auth-form">
+          <label class="auth-field" for="authUsernameInput">
+            <span>Username</span>
+            <input id="authUsernameInput" type="text" autocomplete="username" minlength="3" maxlength="50" required />
+          </label>
+
+          <label class="auth-field" for="authPasswordInput">
+            <span>Password</span>
+            <input id="authPasswordInput" type="password" autocomplete="current-password" minlength="6" maxlength="72" required />
+          </label>
+
+          <p id="authMessageText" class="auth-message" aria-live="polite"></p>
+
+          <button id="authSubmitButton" class="send-button auth-submit-button" type="submit">Log in</button>
+          <button id="authToggleButton" class="ghost-button auth-toggle-button" type="button">Create account</button>
+        </form>
+      </section>
     </div>
 
     <div id="settingsOverlay" class="settings-overlay" hidden>

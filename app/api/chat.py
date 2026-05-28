@@ -1,11 +1,13 @@
 import json
 from queue import Empty, Queue
 from threading import Lock, Thread
+from time import perf_counter
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, Path
 from fastapi.responses import JSONResponse, StreamingResponse
 
+from app.api.auth import CurrentUser, get_current_user
 from app.core.config import Settings, get_settings
 from app.core.errors import AgentError, InvalidArgumentsError, UnknownAgentError
 from app.core.logger import get_logger
@@ -18,7 +20,9 @@ from app.schemas.chat import (
     ErrorResponse,
 )
 from app.services.conversation_store import ConversationStoreProtocol, create_conversation_store
+from app.services.dashscope_agent import AgentTraceStep as AgentTraceStepData
 from app.services.dashscope_agent import DashScopeAgent
+from app.services.message_builder import MessageBuilder
 
 
 router = APIRouter()
@@ -152,6 +156,7 @@ def health_check() -> dict[str, str]:
 @router.get("/conversations/{conversation_id}/messages", response_model=ConversationMessagesResponse)
 def get_conversation_messages(
     conversation_id: str = Path(..., min_length=1, max_length=100),
+    current_user: CurrentUser = Depends(get_current_user),
     store: ConversationStoreProtocol = Depends(get_conversation_store),
 ) -> ConversationMessagesResponse:
     """Return stored history for one conversation."""
@@ -162,13 +167,14 @@ def get_conversation_messages(
 
     return ConversationMessagesResponse(
         conversation_id=clean_conversation_id,
-        messages=store.get_messages(clean_conversation_id),
+        messages=store.get_messages(clean_conversation_id, user_id=current_user.user_id),
     )
 
 
 @router.delete("/conversations/{conversation_id}", response_model=ConversationClearResponse)
 def clear_conversation(
     conversation_id: str = Path(..., min_length=1, max_length=100),
+    current_user: CurrentUser = Depends(get_current_user),
     store: ConversationStoreProtocol = Depends(get_conversation_store),
 ) -> ConversationClearResponse:
     """Clear stored history for one conversation."""
@@ -177,7 +183,7 @@ def clear_conversation(
     if not clean_conversation_id:
         raise InvalidArgumentsError()
 
-    store.clear(clean_conversation_id)
+    store.clear(clean_conversation_id, user_id=current_user.user_id)
     return ConversationClearResponse(
         conversation_id=clean_conversation_id,
         message="\u4f1a\u8bdd\u5df2\u6e05\u7a7a",
@@ -186,7 +192,7 @@ def clear_conversation(
 
 @router.delete("/conversations", include_in_schema=False)
 @router.delete("/conversations/", include_in_schema=False)
-def clear_conversation_missing_id() -> JSONResponse:
+def clear_conversation_missing_id(current_user: CurrentUser = Depends(get_current_user)) -> JSONResponse:
     """Return a stable error when conversation id is missing."""
 
     return error_response(InvalidArgumentsError())
@@ -195,18 +201,19 @@ def clear_conversation_missing_id() -> JSONResponse:
 @router.post("/chat", response_model=ChatResponse)
 def chat(
     request: ChatRequest,
+    current_user: CurrentUser = Depends(get_current_user),
     agent: DashScopeAgent = Depends(get_agent),
     store: ConversationStoreProtocol = Depends(get_conversation_store),
 ) -> ChatResponse | JSONResponse:
     """Send a user message to the agent and return its reply."""
 
     conversation_id = request.conversation_id or str(uuid4())
-    model_messages = build_model_messages(request, conversation_id, store)
+    model_messages = build_model_messages(request, conversation_id, store, current_user.user_id)
     requested_model = normalize_requested_model(request.model)
 
     try:
         reply = agent.chat(messages=model_messages, model=requested_model)
-        store.append_exchange(conversation_id, request.message, reply.content)
+        store.append_exchange(conversation_id, request.message, reply.content, user_id=current_user.user_id)
         return ChatResponse(
             reply=reply.content,
             model=requested_model or agent.model,
@@ -221,11 +228,12 @@ def chat(
             tool_error_message=reply.tool_result.error_message if reply.tool_result else None,
             tool_retryable=reply.tool_result.retryable if reply.tool_result else None,
             tool_error_detail=tool_error_detail(reply.tool_result),
+            trace=trace_payload(reply.trace),
         )
     except AgentError as exc:
         logger.info("Chat request failed: code=%s status=%s", exc.code, exc.status_code)
         return error_response(exc)
-    except Exception as exc:
+    except Exception:
         logger.exception("Unhandled chat request error")
         return error_response(UnknownAgentError())
 
@@ -233,13 +241,14 @@ def chat(
 @router.post("/chat/stream")
 def stream_chat(
     request: ChatRequest,
+    current_user: CurrentUser = Depends(get_current_user),
     settings: Settings = Depends(get_settings),
     store: ConversationStoreProtocol = Depends(get_conversation_store),
 ) -> StreamingResponse:
     """Stream a chat response using server-sent events."""
 
     conversation_id = request.conversation_id or str(uuid4())
-    model_messages = build_model_messages(request, conversation_id, store)
+    model_messages = build_model_messages(request, conversation_id, store, current_user.user_id)
     requested_model = normalize_requested_model(request.model)
     likely_web_search = _looks_like_search_request(request.message)
 
@@ -259,7 +268,13 @@ def stream_chat(
             if not clean_message or clean_message in sent_statuses:
                 return None
             sent_statuses.add(clean_message)
-            return sse_event("status", {"message": clean_message})
+            return sse_event(
+                "status",
+                {
+                    "message": clean_message,
+                    "trace": [status_trace_step(clean_message)],
+                },
+            )
 
         def drain_status_events():
             while True:
@@ -281,12 +296,12 @@ def stream_chat(
             def prepare_stream() -> None:
                 try:
                     prepared_agent = get_agent(settings)
-                    stream, tool_result = prepared_agent.stream_chat_with_tool_result(
+                    stream, tool_result, trace = prepared_agent.stream_chat_with_tool_result(
                         messages=model_messages,
                         model=requested_model,
                         status_callback=queue_status,
                     )
-                    result_queue.put(("ok", (prepared_agent, stream, tool_result)))
+                    result_queue.put(("ok", (prepared_agent, stream, tool_result, trace)))
                 except Exception as exc:
                     result_queue.put(("error", exc))
 
@@ -309,7 +324,7 @@ def stream_chat(
                     raise result_payload
                 raise UnknownAgentError()
 
-            agent, stream, tool_result = result_payload
+            agent, stream, tool_result, trace = result_payload
 
             yield sse_event(
                 "metadata",
@@ -318,15 +333,35 @@ def stream_chat(
                     "conversation_id": conversation_id,
                     "model": requested_model or agent.model,
                     **tool_response_metadata(tool_result),
+                    "trace": trace_payload(trace),
                 },
             )
 
-            for chunk in stream:
-                assistant_chunks.append(chunk)
-                yield sse_event("chunk", {"content": chunk})
+            model_started_at = perf_counter()
+            try:
+                for chunk in stream:
+                    assistant_chunks.append(chunk)
+                    yield sse_event("chunk", {"content": chunk})
+            except Exception as exc:
+                trace.append(
+                    AgentTraceStepData(
+                        step="model_generate",
+                        status="failed",
+                        message=str(exc),
+                        duration_ms=elapsed_ms(model_started_at),
+                    )
+                )
+                raise
+            trace.append(
+                AgentTraceStepData(
+                    step="model_generate",
+                    status="success",
+                    duration_ms=elapsed_ms(model_started_at),
+                )
+            )
 
             assistant_reply = "".join(assistant_chunks)
-            store.append_exchange(conversation_id, request.message, assistant_reply)
+            store.append_exchange(conversation_id, request.message, assistant_reply, user_id=current_user.user_id)
             yield sse_event(
                 "done",
                 {
@@ -334,6 +369,7 @@ def stream_chat(
                     "conversation_id": conversation_id,
                     "model": requested_model or agent.model,
                     **tool_response_metadata(tool_result),
+                    "trace": trace_payload(trace),
                 },
             )
         except AgentError as exc:
@@ -362,24 +398,17 @@ def build_model_messages(
     request: ChatRequest,
     conversation_id: str,
     store: ConversationStoreProtocol,
+    user_id: str,
 ) -> list[dict[str, str]]:
     """Build system prompt, stored history, and the current user message."""
 
-    history = store.get_messages(conversation_id)
-    if request.max_context_rounds is not None:
-        history = history[-request.max_context_rounds * 2 :] if request.max_context_rounds > 0 else []
-
-    return [
-        {
-            "role": "system",
-            "content": request.system_prompt or DEFAULT_SYSTEM_PROMPT,
-        },
-        *history,
-        {
-            "role": "user",
-            "content": request.message,
-        },
-    ]
+    history = store.get_messages(conversation_id, user_id=user_id)
+    return MessageBuilder().build_chat_messages(
+        system_prompt=request.system_prompt or DEFAULT_SYSTEM_PROMPT,
+        history=history,
+        user_message=request.message,
+        max_context_rounds=request.max_context_rounds,
+    )
 
 
 def normalize_requested_model(model: str | None) -> str | None:
@@ -456,6 +485,28 @@ def tool_response_metadata(tool_result) -> dict:
         "tool_retryable": tool_result.retryable,
         "tool_error_detail": tool_error_detail(tool_result),
     }
+
+
+def trace_payload(trace: list[AgentTraceStepData] | None) -> list[dict]:
+    """Serialize agent trace steps while preserving the stable front-end shape."""
+
+    if not trace:
+        return []
+    return [step.to_dict() if hasattr(step, "to_dict") else dict(step) for step in trace]
+
+
+def status_trace_step(message: str) -> dict:
+    """Represent an in-flight SSE status as a trace-compatible running step."""
+
+    return {
+        "step": "status",
+        "status": "running",
+        "message": message,
+    }
+
+
+def elapsed_ms(started_at: float) -> float:
+    return round((perf_counter() - started_at) * 1000, 2)
 
 
 def tool_error_detail(tool_result) -> dict | None:

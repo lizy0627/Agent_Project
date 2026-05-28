@@ -47,6 +47,7 @@
 
 - 普通对话接口：`POST /chat`
 - 流式对话接口：`POST /chat/stream`
+- 用户注册、登录和当前用户接口：`POST /auth/register`、`POST /auth/login`、`GET /auth/me`
 - FastAPI 自动接口文档：`GET /docs`
 - 本地聊天页面：`GET /ui`
 - 后端多轮上下文管理
@@ -128,6 +129,14 @@
   "message": "DashScope Agent is running"
 }
 ```
+
+### Auth 接口
+
+- `POST /auth/register`：注册用户，成功后返回 JWT token。
+- `POST /auth/login`：登录用户，成功后返回 JWT token。
+- `GET /auth/me`：读取当前登录用户，需要 `Authorization: Bearer <token>`；当 `AUTH_ENABLED=false` 时返回开发用户。
+
+启用 `AUTH_ENABLED=true` 后，`/chat`、`/chat/stream` 和 `/conversations` 相关接口都需要携带 JWT。会话历史会按 `user_id + conversation_id` 隔离，避免不同用户访问到彼此的同名会话。
 
 ### `POST /chat`
 
@@ -215,7 +224,26 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### 3. 配置环境变量
+如需在本地执行代码检查和测试，再安装开发工具：
+
+```bash
+pip install ruff pytest mypy
+```
+
+### 3. 本地代码检查和测试
+
+```bash
+ruff check .
+pytest
+```
+
+可选执行类型检查：
+
+```bash
+mypy app main.py
+```
+
+### 4. 配置环境变量
 
 Windows:
 
@@ -239,6 +267,10 @@ MODEL_TIMEOUT_SECONDS=30
 CORS_ALLOW_ORIGINS=http://127.0.0.1:8000,http://localhost:8000
 CONVERSATION_STORE=memory
 CONVERSATION_DB_PATH=data/conversations.db
+AUTH_ENABLED=false
+AUTH_DB_PATH=data/auth.db
+AUTH_JWT_SECRET=change-this-local-development-secret
+AUTH_TOKEN_EXPIRE_MINUTES=1440
 AUTO_OPEN_BROWSER=true
 TAVILY_API_KEY=your_tavily_api_key_here
 WEB_SEARCH_PROVIDER=tavily
@@ -261,6 +293,10 @@ TOOL_TIMEOUT_SECONDS=20
 - `CORS_ALLOW_ORIGINS`：允许跨域访问的来源，多个地址用英文逗号分隔；不配置时不会使用 `*`，默认只允许 `http://127.0.0.1:8000` 和 `http://localhost:8000`。
 - `CONVERSATION_STORE`：会话存储方式，可选 `memory` 或 `sqlite`；默认 `memory`，保持原有内存会话行为。
 - `CONVERSATION_DB_PATH`：SQLite 会话数据库路径，仅在 `CONVERSATION_STORE=sqlite` 时使用，默认 `data/conversations.db`。
+- `AUTH_ENABLED`：是否启用登录鉴权；本地调试可设为 `false`，接口会使用开发用户。
+- `AUTH_DB_PATH`：用户表 `users` 所在 SQLite 数据库路径，默认 `data/auth.db`。
+- `AUTH_JWT_SECRET`：JWT 签名密钥，生产环境请替换为足够随机的私密字符串。
+- `AUTH_TOKEN_EXPIRE_MINUTES`：JWT 过期时间，单位为分钟，默认 `1440`。
 - `AUTO_OPEN_BROWSER`：直接运行 `python main.py` 时是否自动打开浏览器，默认 `true`；设置为 `false` 时只启动服务。
 - `TAVILY_API_KEY`：Tavily Search API Key，使用联网搜索时需要配置。
 - `WEB_SEARCH_PROVIDER`：联网搜索提供商，当前代码使用 `tavily`。
@@ -272,7 +308,7 @@ TOOL_TIMEOUT_SECONDS=20
 - `MODELSCOPE_MCP_URL`：ModelScope MCP Server 地址。
 - `TOOL_TIMEOUT_SECONDS`：工具相关请求超时时间，单位为秒；当前用于 MCP 连接和 MCP 工具调用，兼容旧配置名 `MCP_TIMEOUT_SECONDS`。
 
-### 4. 启动服务
+### 5. 启动服务
 
 ```bash
 uvicorn main:app --reload

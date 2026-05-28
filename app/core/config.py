@@ -50,6 +50,13 @@ class Settings(BaseSettings):
     )
     conversation_store: str = "memory"
     conversation_db_path: Path = BASE_DIR / "data" / "conversations.db"
+    document_db_path: Path = BASE_DIR / "data" / "documents.db"
+    document_upload_max_bytes: int = 5 * 1024 * 1024
+    auth_enabled: bool = True
+    auth_db_path: Path = BASE_DIR / "data" / "auth.db"
+    auth_jwt_secret: str = "change-this-local-development-secret"
+    auth_token_expire_minutes: int = 60 * 24
+    auth_dev_user_id: str = "__dev__"
     auto_open_browser: bool = True
     mcp_enabled: bool = True
     mcp_default_server: str = "modelscope"

@@ -1,0 +1,42 @@
+[project]
+name = "dashscope-agent-playground"
+version = "0.1.0"
+description = "Minimal FastAPI agent example powered by DashScope."
+requires-python = ">=3.11"
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.8.0",
+    "mypy>=1.13.0",
+]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 120
+extend-exclude = [
+    ".venv",
+    "data",
+    "frontend",
+]
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F"]
+
+[tool.ruff.lint.per-file-ignores]
+"scripts/*.py" = ["E402"]
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-q"
+
+[tool.mypy]
+python_version = "3.11"
+files = ["app", "main.py"]
+ignore_missing_imports = true
+follow_imports = "silent"
+warn_unused_configs = true
+show_error_codes = true

@@ -6,7 +6,11 @@ function debugLog(...args) { if (DEBUG) console.log(...args); }
 const CHAT_API_URL = "http://127.0.0.1:8000/chat";
 const CHAT_STREAM_API_URL = "http://127.0.0.1:8000/chat/stream";
 const CONVERSATIONS_API_URL = "http://127.0.0.1:8000/conversations";
+const DOCUMENTS_API_URL = "http://127.0.0.1:8000/documents";
+const AUTH_API_URL = "http://127.0.0.1:8000/auth";
 
+const AUTH_TOKEN_KEY = "agent_project_auth_token";
+const AUTH_USER_KEY = "agent_project_auth_user";
 const ACTIVE_CONVERSATION_KEY = "agent_project_conversation_id";
 const CONVERSATIONS_KEY = "agent_project_conversations";
 const MESSAGES_KEY_PREFIX = "agent_project_messages_";
@@ -38,6 +42,14 @@ const STREAM_STATUS_MESSAGES = new Set([
   "正在生成回答...",
   WEB_SEARCH_STATUS_DONE,
 ]);
+const TRACE_STAGE_DEFINITIONS = [
+  { key: "intent", label: "意图识别" },
+  { key: "search", label: "搜索阶段" },
+  { key: "read", label: "读取阶段" },
+  { key: "tool", label: "工具调用" },
+  { key: "generate", label: "生成阶段" },
+];
+const TRACE_MAX_EVENTS = 10;
 const CHAT_FAILURE_MESSAGE = "请求失败，请检查后端服务或 API Key";
 const DEFAULT_MODE = "通用助手";
 const DEFAULT_THEME = "light";
@@ -54,6 +66,7 @@ const MODE_PROMPTS = {
   代码助手: "你是一个耐心的编程导师。请优先解释思路，再给出简洁代码，并提醒可能的坑。",
   学习助手: "你是一个学习教练。请把复杂概念拆成小步骤，并给出适合练习的例子、检查点和复习建议。",
   面试助手: "你是一个专业的面试辅导助手。请围绕岗位面试场景回答，优先给出结构化思路、示例回答、追问点和改进建议。",
+  文档问答: "你是一个严谨的文档问答助手。请优先依据上传文档内容回答，没有依据时明确说明。",
 };
 
 const MODE_ALIASES = {
@@ -66,6 +79,7 @@ const MODE_ICONS = {
   代码助手: "{ }",
   学习助手: "A",
   面试助手: "#",
+  文档问答: "D",
 };
 
 const FRIENDLY_ERROR_MESSAGES = [
@@ -130,6 +144,29 @@ const settingsMaxContextInput = getRequiredElement("#settingsMaxContextInput");
 const settingsStreamingToggle = getRequiredElement("#settingsStreamingToggle");
 const settingsModeSelect = getRequiredElement("#settingsModeSelect");
 const clearAllConversationsButton = getRequiredElement("#clearAllConversationsButton");
+const authButton = getRequiredElement("#authButton");
+const authOverlay = getRequiredElement("#authOverlay");
+const authForm = getRequiredElement("#authForm");
+const authTitle = getRequiredElement("#authTitle");
+const authUsernameInput = getRequiredElement("#authUsernameInput");
+const authPasswordInput = getRequiredElement("#authPasswordInput");
+const authSubmitButton = getRequiredElement("#authSubmitButton");
+const authToggleButton = getRequiredElement("#authToggleButton");
+const authMessageText = getRequiredElement("#authMessageText");
+const tracePanelToggleButton = getRequiredElement("#tracePanelToggleButton");
+const agentTracePanel = getRequiredElement("#agentTracePanel");
+const traceStateText = getRequiredElement("#traceStateText");
+const traceIntentText = getRequiredElement("#traceIntentText");
+const traceToolNameText = getRequiredElement("#traceToolNameText");
+const traceToolStatusText = getRequiredElement("#traceToolStatusText");
+const traceToolDurationText = getRequiredElement("#traceToolDurationText");
+const traceErrorText = getRequiredElement("#traceErrorText");
+const traceStageList = getRequiredElement("#traceStageList");
+const traceEventList = getRequiredElement("#traceEventList");
+const documentUploadInput = getRequiredElement("#documentUploadInput");
+const documentUploadButton = getRequiredElement("#documentUploadButton");
+const documentList = getRequiredElement("#documentList");
+const documentStatusText = getRequiredElement("#documentStatusText");
 ensureModeItems();
 ensureModelOptions();
 ensureSettingsModeOptions();
@@ -147,10 +184,17 @@ let selectedModel = normalizeModel(localStorage.getItem(SELECTED_MODEL_KEY));
 let currentTheme = normalizeTheme(localStorage.getItem(THEME_KEY));
 let maxContextRounds = normalizeMaxContextRounds(localStorage.getItem(MAX_CONTEXT_ROUNDS_KEY));
 let streamingEnabled = normalizeBooleanSetting(localStorage.getItem(STREAMING_ENABLED_KEY), false);
+let authToken = localStorage.getItem(AUTH_TOKEN_KEY) || "";
+let currentUser = readJson(AUTH_USER_KEY, null);
+let authMode = "login";
 let isLoading = false;
 let activeAbortController = null;
 let shouldStickToBottom = true;
 let conversationSearchQuery = "";
+let documents = [];
+let selectedDocumentId = "";
+let activeTrace = createEmptyTrace();
+let traceCollapsed = window.matchMedia("(max-width: 1080px)").matches;
 const messageElementMap = new Map();
 
 initPage();
@@ -282,12 +326,17 @@ function initPage() {
   setStreamingEnabled(streamingEnabled);
   renderConversationList();
   renderMessages({ scrollToEnd: false });
+  activeTrace = buildTraceFromMessages();
+  renderAgentTrace();
+  applyTraceCollapsed();
+  updateAuthUi();
   restoreConversationScrollPosition(conversationId);
   updateHeaderTitle();
   updateInputState();
   autoResizeInput();
   updateScrollToBottomButton();
   messageInput.focus();
+  void initializeAuth().then(() => loadDocuments());
 }
 
 // Conversation storage
@@ -376,6 +425,185 @@ function readJson(key, fallback) {
   } catch {
     return fallback;
   }
+}
+
+// Auth
+
+async function initializeAuth() {
+  try {
+    const response = await fetchWithAuth(`${AUTH_API_URL}/me`, {
+      method: "GET",
+      headers: { Accept: "application/json" },
+      skipAuthRedirect: true,
+    });
+    const data = await parseJsonResponse(response);
+    if (!response.ok || !data.success || !data.user) {
+      throw new Error("Authentication required.");
+    }
+    setAuthenticatedUser(data.user, authToken);
+  } catch {
+    clearAuthState({ resetConversations: false });
+    showAuthOverlay("login", "Please log in to continue.");
+  }
+}
+
+function setAuthenticatedUser(user, token) {
+  const previousUserId = currentUser?.id || "";
+  currentUser = user;
+  authToken = token || authToken || "";
+  localStorage.setItem(AUTH_USER_KEY, JSON.stringify(currentUser));
+  if (authToken) {
+    localStorage.setItem(AUTH_TOKEN_KEY, authToken);
+  }
+
+  if (previousUserId && previousUserId !== currentUser.id) {
+    resetLocalConversationState();
+  }
+
+  hideAuthOverlay();
+  updateAuthUi();
+}
+
+function clearAuthState({ resetConversations = true } = {}) {
+  authToken = "";
+  currentUser = null;
+  localStorage.removeItem(AUTH_TOKEN_KEY);
+  localStorage.removeItem(AUTH_USER_KEY);
+  if (resetConversations) {
+    resetLocalConversationState();
+  }
+  updateAuthUi();
+}
+
+function isAuthenticated() {
+  return Boolean(currentUser);
+}
+
+function showAuthOverlay(mode = authMode, message = "") {
+  authMode = mode === "register" ? "register" : "login";
+  syncAuthPanel(message);
+  authOverlay.hidden = false;
+  document.body.classList.add("auth-open");
+  authUsernameInput.focus();
+}
+
+function hideAuthOverlay() {
+  authOverlay.hidden = true;
+  document.body.classList.remove("auth-open");
+  authMessageText.textContent = "";
+}
+
+function syncAuthPanel(message = "") {
+  const isRegister = authMode === "register";
+  authTitle.textContent = isRegister ? "Create account" : "Log in";
+  authSubmitButton.textContent = isRegister ? "Create account" : "Log in";
+  authToggleButton.textContent = isRegister ? "Use existing account" : "Create account";
+  authMessageText.textContent = message;
+}
+
+function updateAuthUi() {
+  if (currentUser) {
+    authButton.textContent = currentUser.auth_enabled === false ? "Dev user" : `Logout ${currentUser.username}`;
+    authButton.dataset.state = "authenticated";
+  } else {
+    authButton.textContent = "Log in";
+    authButton.dataset.state = "anonymous";
+  }
+  updateInputState();
+}
+
+async function submitAuthForm() {
+  const username = authUsernameInput.value.trim();
+  const password = authPasswordInput.value;
+  if (!username || !password) {
+    syncAuthPanel("Username and password are required.");
+    return;
+  }
+
+  authSubmitButton.disabled = true;
+  authMessageText.textContent = authMode === "register" ? "Creating account..." : "Logging in...";
+  try {
+    const response = await fetch(`${AUTH_API_URL}/${authMode}`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+      },
+      body: JSON.stringify({ username, password }),
+    });
+    const data = await parseJsonResponse(response);
+    if (!response.ok || !data.success || !data.access_token || !data.user) {
+      throw new Error(toFriendlyError(data.error || data.message || response.status));
+    }
+    authPasswordInput.value = "";
+    setAuthenticatedUser(data.user, data.access_token);
+    await loadDocuments();
+  } catch (error) {
+    authMessageText.textContent = error instanceof Error ? error.message : "Authentication failed.";
+  } finally {
+    authSubmitButton.disabled = false;
+  }
+}
+
+async function fetchWithAuth(url, options = {}) {
+  const { skipAuthRedirect = false, headers: optionHeaders, ...fetchOptions } = options;
+  const headers = new Headers(optionHeaders || {});
+  if (authToken) {
+    headers.set("Authorization", `Bearer ${authToken}`);
+  }
+
+  const response = await fetch(url, {
+    ...fetchOptions,
+    headers,
+  });
+
+  if (response.status === 401 && !skipAuthRedirect) {
+    clearAuthState();
+    showAuthOverlay("login", "Please log in again.");
+    throw new Error("Please log in first.");
+  }
+
+  return response;
+}
+
+function resetLocalConversationState() {
+  const keysToRemove = [];
+  for (let index = 0; index < localStorage.length; index += 1) {
+    const key = localStorage.key(index);
+    if (
+      key === ACTIVE_CONVERSATION_KEY ||
+      key === CONVERSATIONS_KEY ||
+      key === SCROLL_POSITIONS_KEY ||
+      key?.startsWith(MESSAGES_KEY_PREFIX)
+    ) {
+      keysToRemove.push(key);
+    }
+  }
+  keysToRemove.forEach((key) => localStorage.removeItem(key));
+
+  conversationId = createConversationId();
+  messages = [];
+  conversationScrollPositions = {};
+  conversations = [
+    {
+      id: conversationId,
+      title: "New conversation",
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      messageCount: 0,
+      lastMessageSummary: "",
+    },
+  ];
+  localStorage.setItem(ACTIVE_CONVERSATION_KEY, conversationId);
+  saveConversations();
+  saveMessages();
+  saveConversationScrollPositions();
+  conversationIdText.textContent = conversationId;
+  renderConversationList();
+  renderMessages();
+  activeTrace = createEmptyTrace();
+  renderAgentTrace();
+  updateHeaderTitle();
 }
 
 function loadMessages(id) {
@@ -934,6 +1162,10 @@ function createToolPanel(message) {
 function getToolPanelTitle(message) {
   if (message.toolName === "web_search") {
     return WEB_SEARCH_STATUS_DONE;
+  }
+
+  if (message.toolName === "document_qa") {
+    return "文档检索";
   }
 
   return message.toolName || "工具调用";
@@ -1850,6 +2082,370 @@ function normalizeStreamStatusMessage(message) {
   return STREAM_STATUS_MESSAGES.has(normalized) ? normalized : "";
 }
 
+// Agent trace
+
+function createEmptyTrace(overrides = {}) {
+  return {
+    state: "idle",
+    intent: "等待下一次请求",
+    toolName: "未使用",
+    toolStatus: "未开始",
+    toolDuration: "--",
+    error: "",
+    stages: TRACE_STAGE_DEFINITIONS.map((stage) => ({
+      ...stage,
+      status: "idle",
+      detail: "等待",
+    })),
+    events: [],
+    ...overrides,
+  };
+}
+
+function buildTraceFromMessages() {
+  const latestAgentIndex = findLatestAgentMessageIndex();
+  if (latestAgentIndex < 0) {
+    return createEmptyTrace();
+  }
+
+  const agentMessage = messages[latestAgentIndex];
+  const previousUserMessage = findPreviousUserMessage(latestAgentIndex);
+  const trace = createEmptyTrace({
+    state: agentMessage.role === "error" ? "failed" : "success",
+    intent: inferTraceIntent(previousUserMessage?.content || agentMessage.content || ""),
+  });
+
+  markTraceStage(trace, "intent", "success", "已识别");
+  markTraceStage(trace, "generate", agentMessage.role === "error" ? "failed" : "success", "已返回回复");
+
+  if (agentMessage.usedTool === true) {
+    applyToolMetadataToTrace(trace, agentMessage);
+  } else {
+    markTraceStage(trace, "tool", "idle", "未调用工具");
+  }
+
+  if (agentMessage.role === "error") {
+    trace.error = agentMessage.content || CHAT_FAILURE_MESSAGE;
+  }
+
+  trace.events = [
+    {
+      title: "载入最近一次请求",
+      detail: agentMessage.usedTool === true ? "已恢复工具执行摘要" : "最近回复未调用工具",
+      status: trace.state,
+      time: agentMessage.createdAt || getCurrentTime(),
+    },
+  ];
+  return trace;
+}
+
+function findLatestAgentMessageIndex() {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (messages[index]?.role === "agent" || messages[index]?.role === "error") {
+      return index;
+    }
+  }
+
+  return -1;
+}
+
+function startAgentTrace(userText, { regenerate = false } = {}) {
+  const likelyWebSearch = looksLikeWebSearchRequest(userText);
+  activeTrace = createEmptyTrace({
+    state: "running",
+    intent: inferTraceIntent(userText),
+  });
+  markTraceStage(activeTrace, "intent", "success", "已识别请求意图");
+  markTraceStage(
+    activeTrace,
+    likelyWebSearch ? "search" : "generate",
+    "running",
+    likelyWebSearch ? "等待搜索结果" : "等待模型输出",
+  );
+  addTraceEvent(
+    regenerate ? "重新生成请求" : "接收用户请求",
+    activeTrace.intent,
+    "running",
+  );
+  renderAgentTrace();
+}
+
+function inferTraceIntent(text) {
+  const normalized = String(text || "").trim();
+  if (!normalized) {
+    return "等待下一次请求";
+  }
+
+  if (looksLikeWebSearchRequest(normalized)) {
+    return `联网检索 · ${currentMode}`;
+  }
+
+  if (/\b(code|function|bug|error|api|class|react|vue|python|javascript|typescript)\b/i.test(normalized)) {
+    return `代码分析 · ${currentMode}`;
+  }
+
+  return `对话生成 · ${currentMode}`;
+}
+
+function updateAgentTraceFromStatus(statusMessage) {
+  const normalizedStatus = normalizeStreamStatusMessage(statusMessage);
+  if (!normalizedStatus) {
+    return;
+  }
+
+  if (normalizedStatus === WEB_SEARCH_STATUS_SEARCHING) {
+    updateTraceStage("search", "running", "正在检索外部资料");
+  } else if (normalizedStatus === WEB_SEARCH_STATUS_ORGANIZING) {
+    updateTraceStage("search", "running", "正在整理搜索资料");
+  } else if (normalizedStatus === WEB_SEARCH_STATUS_DONE) {
+    updateTraceStage("search", "success", "搜索完成");
+  } else if (normalizedStatus.includes("读取网页")) {
+    updateTraceStage("read", "running", "正在读取网页内容");
+  } else if (normalizedStatus.includes("生成回答")) {
+    updateTraceStage("generate", "running", "正在生成回复");
+  } else if (normalizedStatus.includes("调用 MCP") || normalizedStatus.includes("连接 MCP")) {
+    updateTraceStage("tool", "running", normalizedStatus);
+  } else if (normalizedStatus.includes("计算") || normalizedStatus.includes("总结") || normalizedStatus.includes("时间")) {
+    updateTraceStage("tool", "running", normalizedStatus);
+  }
+
+  addTraceEvent(normalizedStatus, "流式阶段状态更新", "running");
+  renderAgentTrace();
+}
+
+function updateAgentTraceFromTool(metadata) {
+  if (!metadata || metadata.usedTool !== true) {
+    return;
+  }
+
+  applyToolMetadataToTrace(activeTrace, metadata);
+  addTraceEvent(
+    `工具 ${activeTrace.toolName}`,
+    `${activeTrace.toolStatus}${activeTrace.toolDuration !== "--" ? ` · ${activeTrace.toolDuration}` : ""}`,
+    activeTrace.error ? "failed" : normalizeTraceStatus(metadata.toolStatus, metadata),
+  );
+  renderAgentTrace();
+}
+
+function applyToolMetadataToTrace(trace, metadata) {
+  const status = normalizeTraceStatus(metadata.toolStatus, metadata);
+  const toolError = getToolDisplayError(metadata);
+
+  trace.toolName = metadata.toolName || trace.toolName || "未命名工具";
+  trace.toolStatus = metadata.usedTool === true
+    ? formatToolStatus(metadata.toolStatus, toolError)
+    : "未调用";
+  trace.toolDuration = formatToolDuration(metadata.toolDurationMs);
+  trace.error = toolError || trace.error || "";
+  markTraceStage(trace, "tool", status, status === "running" ? "正在调用工具" : trace.toolStatus);
+
+  if (metadata.toolName === "web_search") {
+    markTraceStage(trace, "search", status === "failed" ? "failed" : "success", status === "failed" ? "搜索失败" : "搜索完成");
+    const root = normalizeToolResultRoot(metadata.toolResult);
+    if (Array.isArray(root.read_pages) && root.read_pages.length > 0) {
+      markTraceStage(trace, "read", "success", `已读取 ${root.read_pages.length} 个页面`);
+    }
+  }
+
+  if (status === "failed") {
+    trace.state = "failed";
+  }
+}
+
+function finalizeAgentTrace(result = {}, { error = "", aborted = false } = {}) {
+  if (result.usedTool === true) {
+    applyToolMetadataToTrace(activeTrace, result);
+  } else if (!activeTrace.error) {
+    activeTrace.toolName = "未使用";
+    activeTrace.toolStatus = "未调用";
+    activeTrace.toolDuration = "--";
+    markTraceStage(activeTrace, "tool", "idle", "未调用工具");
+  }
+
+  if (aborted) {
+    activeTrace.state = "failed";
+    activeTrace.error = "已停止生成";
+    markTraceStage(activeTrace, "generate", "failed", "用户停止生成");
+    addTraceEvent("停止生成", "请求已中止", "failed");
+  } else if (error) {
+    activeTrace.state = "failed";
+    activeTrace.error = error;
+    markTraceStage(activeTrace, "generate", "failed", "生成失败");
+    addTraceEvent("请求失败", error, "failed");
+  } else if (activeTrace.state !== "failed") {
+    activeTrace.state = "success";
+    markRunningTraceStages("success");
+    markTraceStage(activeTrace, "generate", "success", "回复生成完成");
+    addTraceEvent("请求完成", "Agent 已返回最终回复", "success");
+  }
+
+  renderAgentTrace();
+}
+
+function markRunningTraceStages(nextStatus) {
+  activeTrace.stages = activeTrace.stages.map((stage) =>
+    stage.status === "running" ? { ...stage, status: nextStatus, detail: nextStatus === "success" ? "已完成" : stage.detail } : stage,
+  );
+}
+
+function updateTraceStage(key, status, detail) {
+  markTraceStage(activeTrace, key, status, detail);
+}
+
+function markTraceStage(trace, key, status, detail) {
+  trace.stages = trace.stages.map((stage) =>
+    stage.key === key ? { ...stage, status, detail: detail || stage.detail } : stage,
+  );
+}
+
+function addTraceEvent(title, detail = "", status = "running") {
+  activeTrace.events = [
+    {
+      title,
+      detail,
+      status,
+      time: getCurrentTime(),
+    },
+    ...activeTrace.events,
+  ].slice(0, TRACE_MAX_EVENTS);
+}
+
+function normalizeTraceStatus(status, metadata = {}) {
+  if (
+    status === "failed" ||
+    status === false ||
+    metadata.toolError ||
+    metadata.toolErrorCode ||
+    metadata.toolErrorMessage ||
+    metadata.toolErrorDetail
+  ) {
+    return "failed";
+  }
+
+  if (status === "running") {
+    return "running";
+  }
+
+  if (status === "success" || status === true) {
+    return "success";
+  }
+
+  return metadata.usedTool === true ? "running" : "idle";
+}
+
+function renderAgentTrace() {
+  traceStateText.textContent = formatTraceState(activeTrace.state);
+  traceStateText.className = `trace-state ${activeTrace.state}`;
+  traceIntentText.textContent = activeTrace.intent;
+  traceToolNameText.textContent = activeTrace.toolName;
+  traceToolStatusText.textContent = activeTrace.toolStatus;
+  traceToolDurationText.textContent = activeTrace.toolDuration;
+
+  if (activeTrace.error) {
+    traceErrorText.textContent = activeTrace.error;
+    traceErrorText.classList.remove("is-hidden");
+  } else {
+    traceErrorText.textContent = "";
+    traceErrorText.classList.add("is-hidden");
+  }
+
+  traceStageList.replaceChildren(...activeTrace.stages.map(createTraceStageElement));
+  if (activeTrace.events.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "trace-empty";
+    empty.textContent = "尚未开始请求，发送消息后这里会显示执行过程。";
+    traceEventList.replaceChildren(empty);
+  } else {
+    traceEventList.replaceChildren(...activeTrace.events.map(createTraceEventElement));
+  }
+}
+
+function createTraceStageElement(stage) {
+  const item = document.createElement("div");
+  item.className = `trace-stage-item ${stage.status}`;
+
+  const marker = document.createElement("span");
+  marker.className = "trace-stage-marker";
+  marker.setAttribute("aria-hidden", "true");
+
+  const copy = document.createElement("div");
+  copy.className = "trace-stage-copy";
+
+  const title = document.createElement("strong");
+  title.textContent = stage.label;
+
+  const detail = document.createElement("span");
+  detail.textContent = `${formatTraceStageStatus(stage.status)} · ${stage.detail}`;
+
+  copy.append(title, detail);
+  item.append(marker, copy);
+  return item;
+}
+
+function createTraceEventElement(event) {
+  const item = document.createElement("div");
+  item.className = `trace-event-item ${event.status}`;
+
+  const marker = document.createElement("span");
+  marker.className = "trace-event-marker";
+  marker.setAttribute("aria-hidden", "true");
+
+  const copy = document.createElement("div");
+  copy.className = "trace-event-copy";
+
+  const time = document.createElement("div");
+  time.className = "trace-event-time";
+  time.textContent = event.time;
+
+  const title = document.createElement("strong");
+  title.textContent = event.title;
+
+  const detail = document.createElement("span");
+  detail.textContent = event.detail || formatTraceStageStatus(event.status);
+
+  copy.append(time, title, detail);
+  item.append(marker, copy);
+  return item;
+}
+
+function formatTraceState(state) {
+  if (state === "running") {
+    return "Running";
+  }
+  if (state === "success") {
+    return "Success";
+  }
+  if (state === "failed") {
+    return "Failed";
+  }
+  return "Idle";
+}
+
+function formatTraceStageStatus(status) {
+  if (status === "running") {
+    return "执行中";
+  }
+  if (status === "success") {
+    return "已完成";
+  }
+  if (status === "failed") {
+    return "失败";
+  }
+  return "等待";
+}
+
+function applyTraceCollapsed() {
+  document.body.classList.toggle("trace-collapsed", traceCollapsed);
+  tracePanelToggleButton.setAttribute("aria-expanded", String(!traceCollapsed));
+  tracePanelToggleButton.textContent = traceCollapsed ? "Trace" : "隐藏 Trace";
+  agentTracePanel.setAttribute("aria-hidden", String(traceCollapsed));
+}
+
+function toggleTracePanel() {
+  traceCollapsed = !traceCollapsed;
+  applyTraceCollapsed();
+}
+
 // Input state
 
 function maybeRenameConversation(text) {
@@ -1871,6 +2467,7 @@ function setLoading(nextLoading) {
   messageInput.disabled = nextLoading;
   modelSelect.disabled = nextLoading;
   settingsButton.disabled = nextLoading;
+  documentUploadButton.disabled = nextLoading;
   sendButton.textContent = nextLoading ? "停止生成" : "发送";
   newConversationButton.disabled = nextLoading;
   clearConversationButton.disabled = nextLoading;
@@ -1885,9 +2482,12 @@ function autoResizeInput() {
 function updateInputState() {
   const length = messageInput.value.length;
   const hasText = messageInput.value.trim().length > 0;
+  const needsDocument = currentMode === "文档问答";
+  const hasDocument = Boolean(selectedDocumentId);
+  const authReady = isAuthenticated();
 
   charCounter.textContent = `${length} / ${MAX_MESSAGE_LENGTH}`;
-  sendButton.disabled = !isLoading && !hasText;
+  sendButton.disabled = !isLoading && (!authReady || !hasText || (needsDocument && !hasDocument));
 }
 
 function setMode(mode) {
@@ -1896,10 +2496,14 @@ function setMode(mode) {
   localStorage.setItem(MODE_KEY, currentMode);
   currentModeText.textContent = currentMode;
   settingsModeSelect.value = currentMode;
+  messageInput.placeholder = currentMode === "文档问答"
+    ? "基于已选择文档提问，Enter 发送，Shift + Enter 换行"
+    : "输入问题，Enter 发送，Shift + Enter 换行";
 
   modeButtons.forEach((button) => {
     button.classList.toggle("active", button.dataset.mode === currentMode);
   });
+  updateInputState();
   debugLog("mode changed", currentMode);
 }
 
@@ -1945,6 +2549,166 @@ function toggleTheme() {
   applyTheme(currentTheme === "dark" ? "light" : "dark");
 }
 
+// Document question answering
+
+async function loadDocuments() {
+  try {
+    const response = await fetchWithAuth(DOCUMENTS_API_URL, {
+      method: "GET",
+      headers: { Accept: "application/json" },
+    });
+    const data = await parseJsonResponse(response);
+    if (!response.ok || !data.success || !Array.isArray(data.documents)) {
+      throw new Error(toFriendlyError(data.error || response.status));
+    }
+
+    documents = data.documents;
+    if (!documents.some((document) => document.id === selectedDocumentId)) {
+      selectedDocumentId = documents[0]?.id || "";
+    }
+    renderDocumentList();
+    updateInputState();
+  } catch (error) {
+    console.warn("GET /documents request error", error);
+    documentStatusText.textContent = "!";
+    renderDocumentList("文档列表加载失败");
+  }
+}
+
+async function uploadSelectedDocument() {
+  if (guardActionDuringLoading()) {
+    return;
+  }
+
+  const file = documentUploadInput.files?.[0];
+  if (!file) {
+    documentUploadInput.click();
+    return;
+  }
+
+  if (file.size > 5 * 1024 * 1024) {
+    window.alert("文件过大，请上传不超过 5MB 的文档。");
+    documentUploadInput.value = "";
+    return;
+  }
+
+  documentUploadButton.disabled = true;
+  documentUploadButton.textContent = "上传中...";
+  try {
+    const formData = new FormData();
+    formData.append("file", file);
+    const response = await fetchWithAuth(`${DOCUMENTS_API_URL}/upload`, {
+      method: "POST",
+      body: formData,
+    });
+    const data = await parseJsonResponse(response);
+    if (!response.ok || !data.success || !data.document) {
+      throw new Error(toFriendlyError(data.error || response.status));
+    }
+
+    selectedDocumentId = data.document.id;
+    await loadDocuments();
+    setMode("文档问答");
+  } catch (error) {
+    console.warn("POST /documents/upload request error", error);
+    window.alert(error instanceof Error ? error.message : "文档上传失败，请稍后重试。");
+  } finally {
+    documentUploadInput.value = "";
+    documentUploadButton.disabled = false;
+    documentUploadButton.textContent = "上传 txt/md/pdf";
+  }
+}
+
+async function deleteDocument(documentId) {
+  if (guardActionDuringLoading()) {
+    return;
+  }
+
+  const document = documents.find((item) => item.id === documentId);
+  if (!window.confirm(`确定删除“${document?.filename || "该文档"}”吗？`)) {
+    return;
+  }
+
+  try {
+    const response = await fetchWithAuth(`${DOCUMENTS_API_URL}/${encodeURIComponent(documentId)}`, {
+      method: "DELETE",
+    });
+    const data = await parseJsonResponse(response);
+    if (!response.ok || !data.success) {
+      throw new Error(toFriendlyError(data.error || response.status));
+    }
+    if (selectedDocumentId === documentId) {
+      selectedDocumentId = "";
+    }
+    await loadDocuments();
+  } catch (error) {
+    console.warn("DELETE /documents request error", error);
+    window.alert(error instanceof Error ? error.message : "文档删除失败，请稍后重试。");
+  }
+}
+
+function renderDocumentList(errorMessage = "") {
+  documentList.innerHTML = "";
+  documentStatusText.textContent = errorMessage ? "!" : String(documents.length);
+
+  if (errorMessage || documents.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "document-empty";
+    empty.textContent = errorMessage || "上传 txt / md / pdf 后，可切换到文档问答模式提问。";
+    documentList.appendChild(empty);
+    return;
+  }
+
+  documents.forEach((documentItem) => {
+    const item = document.createElement("div");
+    item.className = "document-item";
+    item.classList.toggle("active", documentItem.id === selectedDocumentId);
+
+    const main = document.createElement("button");
+    main.className = "document-main";
+    main.type = "button";
+    main.addEventListener("click", () => {
+      selectedDocumentId = documentItem.id;
+      renderDocumentList();
+      setMode("文档问答");
+      messageInput.focus();
+    });
+
+    const title = document.createElement("span");
+    title.className = "document-title";
+    title.textContent = documentItem.filename || "未命名文档";
+
+    const meta = document.createElement("span");
+    meta.className = "document-meta";
+    meta.textContent = `${formatFileSize(documentItem.size_bytes)} · ${documentItem.chunk_count || 0} chunks`;
+    main.append(title, meta);
+
+    const deleteButton = document.createElement("button");
+    deleteButton.className = "document-delete-button";
+    deleteButton.type = "button";
+    deleteButton.setAttribute("aria-label", `删除 ${documentItem.filename}`);
+    deleteButton.textContent = "×";
+    deleteButton.addEventListener("click", (event) => {
+      event.stopPropagation();
+      void deleteDocument(documentItem.id);
+    });
+
+    item.append(main, deleteButton);
+    documentList.appendChild(item);
+  });
+}
+
+function formatFileSize(sizeBytes) {
+  const size = Number(sizeBytes || 0);
+  if (size < 1024) {
+    return `${size} B`;
+  }
+  if (size < 1024 * 1024) {
+    return `${(size / 1024).toFixed(1)} KB`;
+  }
+  return `${(size / 1024 / 1024).toFixed(1)} MB`;
+}
+
 // Agent request flow
 
 async function clearBackendConversation(conversationId) {
@@ -1954,7 +2718,7 @@ async function clearBackendConversation(conversationId) {
   }
 
   try {
-    const response = await fetch(
+    const response = await fetchWithAuth(
       `${CONVERSATIONS_API_URL}/${encodeURIComponent(targetConversationId)}`,
       { method: "DELETE" },
     );
@@ -1984,7 +2748,7 @@ async function fetchBackendConversationMessages(conversationId) {
   }
 
   try {
-    const response = await fetch(
+    const response = await fetchWithAuth(
       `${CONVERSATIONS_API_URL}/${encodeURIComponent(targetConversationId)}/messages`,
       {
         method: "GET",
@@ -2059,7 +2823,15 @@ async function requestAgentReply(
   }, REQUEST_TIMEOUT_MS);
 
   try {
-    const result = targetStreamingEnabled
+    const result = targetMode === "文档问答"
+      ? await requestDocumentAnswer(
+          message,
+          {
+            model: targetModel,
+            signal: activeAbortController.signal,
+          },
+        )
+      : targetStreamingEnabled
       ? await requestStreamingAgentReply(
           requestBody,
           activeAbortController.signal,
@@ -2093,9 +2865,55 @@ async function requestAgentReply(
   }
 }
 
+async function requestDocumentAnswer(message, { model, signal }) {
+  if (!selectedDocumentId) {
+    throw new Error("请先上传并选择一个文档。");
+  }
+
+  debugLog("POST /documents/{id}/ask request start", {
+    documentId: selectedDocumentId,
+    messageLength: message.length,
+    model,
+  });
+  const response = await fetchWithAuth(`${DOCUMENTS_API_URL}/${encodeURIComponent(selectedDocumentId)}/ask`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Accept: "application/json",
+    },
+    body: JSON.stringify({
+      question: message,
+      model,
+    }),
+    signal,
+  });
+  const data = await parseJsonResponse(response);
+  if (!response.ok || !data.success) {
+    const message = toFriendlyError(data.error || response.status);
+    throw new Error(message || "文档问答请求失败，请稍后重试。");
+  }
+
+  return {
+    aborted: false,
+    reply: data.answer || "",
+    model: data.model || model || "",
+    conversationId,
+    usedTool: true,
+    toolName: "document_qa",
+    toolStatus: "success",
+    toolResult: data.chunks || [],
+    toolError: null,
+    toolErrorCode: null,
+    toolErrorMessage: null,
+    toolRetryable: false,
+    toolErrorDetail: null,
+    toolDurationMs: null,
+  };
+}
+
 async function requestJsonAgentReply(requestBody, signal, fallbackConversationId) {
   debugLog("POST /chat request start", requestBody);
-  const response = await fetch(CHAT_API_URL, {
+  const response = await fetchWithAuth(CHAT_API_URL, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -2151,7 +2969,7 @@ async function requestStreamingAgentReply(
   onStatus,
 ) {
   debugLog("POST /chat/stream request start", requestBody);
-  const response = await fetch(CHAT_STREAM_API_URL, {
+  const response = await fetchWithAuth(CHAT_STREAM_API_URL, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -2341,6 +3159,7 @@ async function regenerateAgentReply(messageId) {
 
   const originalMessage = { ...targetMessage };
   const likelyWebSearch = looksLikeWebSearchRequest(previousUserMessage.content || "");
+  startAgentTrace(previousUserMessage.content || "", { regenerate: true });
   const initialLoadingText = likelyWebSearch ? WEB_SEARCH_STATUS_SEARCHING : "Agent 正在重新生成...";
   const loadingMessage = createMessage("agent", initialLoadingText, "loading");
   let hasReceivedFirstChunk = false;
@@ -2354,6 +3173,7 @@ async function regenerateAgentReply(messageId) {
       window.clearTimeout(searchStatusTimer);
       searchStatusTimer = null;
     }
+    updateAgentTraceFromStatus(normalizedStatus);
     updateMessage(loadingMessage.id, {
       type: "loading",
       role: "agent",
@@ -2368,6 +3188,7 @@ async function regenerateAgentReply(messageId) {
     targetMaxContextRounds: maxContextRounds,
     targetStreamingEnabled: streamingEnabled,
     onToolMetadata: (metadata) => {
+      updateAgentTraceFromTool(metadata);
       const statusContent = getToolStatusContent(metadata);
       const metadataUpdates = {
         role: "agent",
@@ -2393,6 +3214,11 @@ async function regenerateAgentReply(messageId) {
       updateLoadingStatus(statusMessage);
     },
     onChunk: (chunk, partialReply) => {
+      if (!hasReceivedFirstChunk) {
+        updateTraceStage("generate", "running", "正在接收流式输出");
+        addTraceEvent("开始流式输出", "已收到首个内容片段", "running");
+        renderAgentTrace();
+      }
       hasReceivedFirstChunk = true;
       if (searchStatusTimer) {
         window.clearTimeout(searchStatusTimer);
@@ -2439,6 +3265,7 @@ async function regenerateAgentReply(messageId) {
           content: WEB_SEARCH_STATUS_ORGANIZING,
           createdAt: getCurrentTime(),
         });
+        updateAgentTraceFromStatus(WEB_SEARCH_STATUS_ORGANIZING);
       }
     }, 250);
   }
@@ -2450,6 +3277,7 @@ async function regenerateAgentReply(messageId) {
       if (searchStatusTimer) {
         window.clearTimeout(searchStatusTimer);
       }
+      finalizeAgentTrace(result, { aborted: true });
       updateMessage(loadingMessage.id, originalMessage);
       return;
     }
@@ -2483,8 +3311,10 @@ async function regenerateAgentReply(messageId) {
       toolDurationMs: result.toolDurationMs,
       createdAt: getCurrentTime(),
     });
+    finalizeAgentTrace(result);
   } catch (error) {
     console.warn("regenerateAgentReply error", error);
+    finalizeAgentTrace({}, { error: error instanceof Error ? error.message : CHAT_FAILURE_MESSAGE });
     updateMessage(loadingMessage.id, originalMessage);
     window.alert(error instanceof Error ? error.message : CHAT_FAILURE_MESSAGE);
   } finally {
@@ -2603,6 +3433,8 @@ function clearAllLocalConversations() {
   conversationIdText.textContent = conversationId;
   renderConversationList();
   renderMessages();
+  activeTrace = createEmptyTrace();
+  renderAgentTrace();
   updateHeaderTitle();
   closeSettingsPanel();
   messageInput.focus();
@@ -2628,6 +3460,12 @@ async function sendCurrentMessage() {
     return;
   }
 
+  if (!isAuthenticated()) {
+    showAuthOverlay("login", "Please log in to continue.");
+    return;
+  }
+
+  startAgentTrace(userText);
   appendMessage(createMessage("user", userText));
   debugLog("sendCurrentMessage user message appended");
   messageInput.value = "";
@@ -2652,6 +3490,7 @@ async function sendCurrentMessage() {
       window.clearTimeout(searchStatusTimer);
       searchStatusTimer = null;
     }
+    updateAgentTraceFromStatus(normalizedStatus);
     updateMessage(loadingMessage.id, {
       type: "loading",
       role: "agent",
@@ -2668,6 +3507,7 @@ async function sendCurrentMessage() {
           content: WEB_SEARCH_STATUS_ORGANIZING,
           createdAt: getCurrentTime(),
         });
+        updateAgentTraceFromStatus(WEB_SEARCH_STATUS_ORGANIZING);
       }
     }, 250);
   }
@@ -2679,12 +3519,14 @@ async function sendCurrentMessage() {
         content: likelyWebSearch ? WEB_SEARCH_STATUS_ORGANIZING : "模型正在思考中，请稍等...",
         createdAt: getCurrentTime(),
       });
+      updateAgentTraceFromStatus(likelyWebSearch ? WEB_SEARCH_STATUS_ORGANIZING : "正在生成回答...");
     }
   }, THINKING_NOTICE_DELAY_MS);
 
   try {
     const result = await requestAgentReply(userText, {
       onToolMetadata: (metadata) => {
+        updateAgentTraceFromTool(metadata);
         const statusContent = getToolStatusContent(metadata);
         const metadataUpdates = {
           role: "agent",
@@ -2710,6 +3552,11 @@ async function sendCurrentMessage() {
         updateLoadingStatus(statusMessage);
       },
       onChunk: (chunk, partialReply) => {
+        if (!hasReceivedFirstChunk) {
+          updateTraceStage("generate", "running", "正在接收流式输出");
+          addTraceEvent("开始流式输出", "已收到首个内容片段", "running");
+          renderAgentTrace();
+        }
         hasReceivedFirstChunk = true;
         if (searchStatusTimer) {
           window.clearTimeout(searchStatusTimer);
@@ -2728,6 +3575,7 @@ async function sendCurrentMessage() {
     });
     debugLog("sendCurrentMessage received result", result);
     if (result.aborted) {
+      finalizeAgentTrace(result, { aborted: true });
       updateMessage(loadingMessage.id, {
         type: "text",
         role: "error",
@@ -2768,9 +3616,11 @@ async function sendCurrentMessage() {
       toolDurationMs: result.toolDurationMs,
       createdAt: getCurrentTime(),
     });
+    finalizeAgentTrace(result);
     debugLog("sendCurrentMessage agent reply rendered", loadingMessage.id);
   } catch (error) {
     console.warn("sendCurrentMessage error", error);
+    finalizeAgentTrace({}, { error: error instanceof Error ? error.message : CHAT_FAILURE_MESSAGE });
     updateMessage(loadingMessage.id, {
       type: "text",
       role: "error",
@@ -2825,6 +3675,8 @@ function startNewConversation() {
   conversationIdText.textContent = conversationId;
   renderConversationList();
   renderMessages();
+  activeTrace = createEmptyTrace();
+  renderAgentTrace();
   updateHeaderTitle();
   messageInput.value = "";
   autoResizeInput();
@@ -2886,6 +3738,8 @@ function switchConversation(nextId) {
   conversationIdText.textContent = conversationId;
   renderConversationList();
   renderMessages({ scrollToEnd: false });
+  activeTrace = buildTraceFromMessages();
+  renderAgentTrace();
   restoreConversationScrollPosition(conversationId);
   updateHeaderTitle();
   messageInput.value = "";
@@ -2932,6 +3786,8 @@ function deleteConversation(targetId) {
     localStorage.setItem(ACTIVE_CONVERSATION_KEY, conversationId);
     conversationIdText.textContent = conversationId;
     renderMessages({ scrollToEnd: false });
+    activeTrace = buildTraceFromMessages();
+    renderAgentTrace();
     restoreConversationScrollPosition(conversationId);
     updateHeaderTitle();
   }
@@ -2961,6 +3817,8 @@ function clearCurrentConversation() {
     messageCount: 0,
   });
   renderMessages();
+  activeTrace = createEmptyTrace();
+  renderAgentTrace();
   messageInput.focus();
 }
 
@@ -3049,8 +3907,34 @@ themeToggleButton.addEventListener("click", () => {
   messageInput.focus();
 });
 
+tracePanelToggleButton.addEventListener("click", () => {
+  toggleTracePanel();
+  messageInput.focus();
+});
+
 settingsButton.addEventListener("click", () => {
   openSettingsPanel();
+});
+
+authButton.addEventListener("click", () => {
+  if (currentUser) {
+    clearAuthState();
+    showAuthOverlay("login", "Logged out.");
+    return;
+  }
+  showAuthOverlay("login");
+});
+
+authForm.addEventListener("submit", (event) => {
+  event.preventDefault();
+  void submitAuthForm();
+});
+
+authToggleButton.addEventListener("click", () => {
+  authMode = authMode === "login" ? "register" : "login";
+  syncAuthPanel();
+  authPasswordInput.value = "";
+  authUsernameInput.focus();
 });
 
 settingsCloseButton.addEventListener("click", () => {
@@ -3088,6 +3972,14 @@ clearConversationButton.addEventListener("click", () => {
   clearCurrentConversation();
 });
 
+documentUploadButton.addEventListener("click", () => {
+  documentUploadInput.click();
+});
+
+documentUploadInput.addEventListener("change", () => {
+  void uploadSelectedDocument();
+});
+
 modeButtons.forEach((button) => {
   button.addEventListener("click", () => {
     debugLog("modeButton clicked", button.dataset.mode);
@@ -3099,5 +3991,12 @@ modeButtons.forEach((button) => {
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape" && !settingsOverlay.hidden) {
     closeSettingsPanel();
+    return;
+  }
+
+  if (event.key === "Escape" && !traceCollapsed && window.matchMedia("(max-width: 1080px)").matches) {
+    traceCollapsed = true;
+    applyTraceCollapsed();
+    tracePanelToggleButton.focus();
   }
 });

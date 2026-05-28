@@ -38,6 +38,17 @@ class ErrorDetail(BaseModel):
     retryable: bool = False
 
 
+class AgentTraceStep(BaseModel):
+    """One front-end renderable step in an agent request lifecycle."""
+
+    step: str = Field(..., description="Stable step key, for example plan/tool_call/model_generate")
+    status: str = Field(..., description="Step status, for example running/success/failed/skipped")
+    message: str | None = Field(default=None, description="Short human-readable step message")
+    tool_name: str | None = Field(default=None, description="Tool name when this step calls a tool")
+    duration_ms: float | None = Field(default=None, description="Step duration in milliseconds")
+    metadata: dict[str, Any] | None = Field(default=None, description="Optional structured UI hints")
+
+
 class ChatResponse(BaseModel):
     """Response body returned by the chat endpoint."""
 
@@ -55,6 +66,10 @@ class ChatResponse(BaseModel):
     tool_error_message: str | None = None
     tool_retryable: bool | None = None
     tool_error_detail: ErrorDetail | None = None
+    trace: list[AgentTraceStep] = Field(
+        default_factory=list,
+        description="Ordered agent execution trace for UI rendering and debugging.",
+    )
 
 
 class ConversationClearResponse(BaseModel):

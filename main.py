@@ -8,7 +8,9 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 import uvicorn
 
+from app.api.auth import get_user_store, router as auth_router
 from app.api.chat import error_payload, error_response, get_conversation_store, router as chat_router
+from app.api.documents import get_document_store, router as documents_router
 from app.api.mcp import router as mcp_router
 from app.core.config import (
     APP_DESCRIPTION,
@@ -44,7 +46,9 @@ def create_app() -> FastAPI:
     """Create the FastAPI application and register routes/static files."""
 
     settings = get_settings()
+    get_user_store(settings)
     get_conversation_store(settings)
+    get_document_store(settings)
     app = FastAPI(
         title=APP_TITLE,
         description=APP_DESCRIPTION,
@@ -59,7 +63,9 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
+    app.include_router(auth_router)
     app.include_router(chat_router)
+    app.include_router(documents_router)
     app.include_router(mcp_router)
 
     if FRONTEND_DIR.exists():
@@ -89,6 +95,23 @@ def create_app() -> FastAPI:
     @app.exception_handler(HTTPException)
     async def http_error_handler(_, exc: HTTPException) -> JSONResponse:
         logger.info("HTTP error handled: status=%s", exc.status_code)
+        if exc.status_code == 401:
+            return JSONResponse(
+                status_code=401,
+                content={
+                    "success": False,
+                    "message": "Authentication required.",
+                    "error_code": "AUTH_REQUIRED",
+                    "error_message": "Authentication required.",
+                    "retryable": False,
+                    "error": {
+                        "code": "AUTH_REQUIRED",
+                        "message": "Authentication required.",
+                        "retryable": False,
+                    },
+                },
+                headers=exc.headers,
+            )
         error = InvalidArgumentsError() if 400 <= exc.status_code < 500 else UnknownAgentError()
         return JSONResponse(
             status_code=exc.status_code,
