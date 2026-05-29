@@ -43,11 +43,10 @@ const STREAM_STATUS_MESSAGES = new Set([
   WEB_SEARCH_STATUS_DONE,
 ]);
 const TRACE_STAGE_DEFINITIONS = [
-  { key: "intent", label: "意图识别" },
-  { key: "search", label: "搜索阶段" },
-  { key: "read", label: "读取阶段" },
-  { key: "tool", label: "工具调用" },
-  { key: "generate", label: "生成阶段" },
+  { key: "planner", label: "正在规划" },
+  { key: "tool_call", label: "调用工具" },
+  { key: "observation", label: "获取观察结果" },
+  { key: "final_answer", label: "生成最终回答" },
 ];
 const TRACE_MAX_EVENTS = 10;
 const CHAT_FAILURE_MESSAGE = "请求失败，请检查后端服务或 API Key";
@@ -2145,13 +2144,16 @@ function buildTraceFromMessages() {
     intent: inferTraceIntent(previousUserMessage?.content || agentMessage.content || ""),
   });
 
-  markTraceStage(trace, "intent", "success", "已识别");
-  markTraceStage(trace, "generate", agentMessage.role === "error" ? "failed" : "success", "已返回回复");
+  markTraceStage(trace, "planner", "success", "已完成规划");
+  markTraceStage(trace, "final_answer", agentMessage.role === "error" ? "failed" : "success", "已返回回复");
 
-  if (agentMessage.usedTool === true) {
+  if (Array.isArray(agentMessage.trace) && agentMessage.trace.length > 0) {
+    applyApiTraceToTrace(trace, agentMessage.trace);
+  } else if (agentMessage.usedTool === true) {
     applyToolMetadataToTrace(trace, agentMessage);
   } else {
-    markTraceStage(trace, "tool", "idle", "未调用工具");
+    markTraceStage(trace, "tool_call", "idle", "未调用工具");
+    markTraceStage(trace, "observation", "idle", "无工具观察结果");
   }
 
   if (agentMessage.role === "error") {
@@ -2185,13 +2187,7 @@ function startAgentTrace(userText, { regenerate = false } = {}) {
     state: "running",
     intent: inferTraceIntent(userText),
   });
-  markTraceStage(activeTrace, "intent", "success", "已识别请求意图");
-  markTraceStage(
-    activeTrace,
-    likelyWebSearch ? "search" : "generate",
-    "running",
-    likelyWebSearch ? "等待搜索结果" : "等待模型输出",
-  );
+  markTraceStage(activeTrace, "planner", "running", likelyWebSearch ? "正在规划检索任务" : "正在分析任务与可用工具");
   addTraceEvent(
     regenerate ? "重新生成请求" : "接收用户请求",
     activeTrace.intent,
@@ -2224,19 +2220,23 @@ function updateAgentTraceFromStatus(statusMessage) {
   }
 
   if (normalizedStatus === WEB_SEARCH_STATUS_SEARCHING) {
-    updateTraceStage("search", "running", "正在检索外部资料");
+    updateTraceStage("planner", "success", "已完成规划");
+    updateTraceStage("tool_call", "running", "正在检索外部资料");
   } else if (normalizedStatus === WEB_SEARCH_STATUS_ORGANIZING) {
-    updateTraceStage("search", "running", "正在整理搜索资料");
+    updateTraceStage("observation", "running", "正在整理搜索资料");
   } else if (normalizedStatus === WEB_SEARCH_STATUS_DONE) {
-    updateTraceStage("search", "success", "搜索完成");
+    updateTraceStage("tool_call", "success", "搜索完成");
+    updateTraceStage("observation", "success", "已获得搜索结果");
   } else if (normalizedStatus.includes("读取网页")) {
-    updateTraceStage("read", "running", "正在读取网页内容");
+    updateTraceStage("observation", "running", "正在读取网页内容");
   } else if (normalizedStatus.includes("生成回答")) {
-    updateTraceStage("generate", "running", "正在生成回复");
+    updateTraceStage("final_answer", "running", "正在生成最终回答");
   } else if (normalizedStatus.includes("调用 MCP") || normalizedStatus.includes("连接 MCP")) {
-    updateTraceStage("tool", "running", normalizedStatus);
+    updateTraceStage("planner", "success", "已完成规划");
+    updateTraceStage("tool_call", "running", normalizedStatus);
   } else if (normalizedStatus.includes("计算") || normalizedStatus.includes("总结") || normalizedStatus.includes("时间")) {
-    updateTraceStage("tool", "running", normalizedStatus);
+    updateTraceStage("planner", "success", "已完成规划");
+    updateTraceStage("tool_call", "running", normalizedStatus);
   }
 
   addTraceEvent(normalizedStatus, "流式阶段状态更新", "running");
@@ -2245,6 +2245,14 @@ function updateAgentTraceFromStatus(statusMessage) {
 
 function updateAgentTraceFromTool(metadata) {
   if (!metadata || metadata.usedTool !== true) {
+    if (metadata?.trace && applyApiTraceToTrace(activeTrace, metadata.trace)) {
+      renderAgentTrace();
+    }
+    return;
+  }
+
+  if (applyApiTraceToTrace(activeTrace, metadata.trace)) {
+    renderAgentTrace();
     return;
   }
 
@@ -2267,13 +2275,14 @@ function applyToolMetadataToTrace(trace, metadata) {
     : "未调用";
   trace.toolDuration = formatToolDuration(metadata.toolDurationMs);
   trace.error = toolError || trace.error || "";
-  markTraceStage(trace, "tool", status, status === "running" ? "正在调用工具" : trace.toolStatus);
+  markTraceStage(trace, "tool_call", status, status === "running" ? "正在调用工具" : trace.toolStatus);
+  markTraceStage(trace, "observation", status, status === "running" ? "等待观察结果" : "已获取观察结果");
 
   if (metadata.toolName === "web_search") {
-    markTraceStage(trace, "search", status === "failed" ? "failed" : "success", status === "failed" ? "搜索失败" : "搜索完成");
+    markTraceStage(trace, "tool_call", status === "failed" ? "failed" : "success", status === "failed" ? "搜索失败" : "搜索完成");
     const root = normalizeToolResultRoot(metadata.toolResult);
     if (Array.isArray(root.read_pages) && root.read_pages.length > 0) {
-      markTraceStage(trace, "read", "success", `已读取 ${root.read_pages.length} 个页面`);
+      markTraceStage(trace, "observation", "success", `已读取 ${root.read_pages.length} 个页面`);
     }
   }
 
@@ -2283,29 +2292,31 @@ function applyToolMetadataToTrace(trace, metadata) {
 }
 
 function finalizeAgentTrace(result = {}, { error = "", aborted = false } = {}) {
-  if (result.usedTool === true) {
+  const usedApiTrace = applyApiTraceToTrace(activeTrace, result.trace);
+  if (!usedApiTrace && result.usedTool === true) {
     applyToolMetadataToTrace(activeTrace, result);
-  } else if (!activeTrace.error) {
+  } else if (!usedApiTrace && !activeTrace.error) {
     activeTrace.toolName = "未使用";
     activeTrace.toolStatus = "未调用";
     activeTrace.toolDuration = "--";
-    markTraceStage(activeTrace, "tool", "idle", "未调用工具");
+    markTraceStage(activeTrace, "tool_call", "idle", "未调用工具");
+    markTraceStage(activeTrace, "observation", "idle", "无工具观察结果");
   }
 
   if (aborted) {
     activeTrace.state = "failed";
     activeTrace.error = "已停止生成";
-    markTraceStage(activeTrace, "generate", "failed", "用户停止生成");
+    markTraceStage(activeTrace, "final_answer", "failed", "用户停止生成");
     addTraceEvent("停止生成", "请求已中止", "failed");
   } else if (error) {
     activeTrace.state = "failed";
     activeTrace.error = error;
-    markTraceStage(activeTrace, "generate", "failed", "生成失败");
+    markTraceStage(activeTrace, "final_answer", "failed", "生成失败");
     addTraceEvent("请求失败", error, "failed");
   } else if (activeTrace.state !== "failed") {
     activeTrace.state = "success";
     markRunningTraceStages("success");
-    markTraceStage(activeTrace, "generate", "success", "回复生成完成");
+    markTraceStage(activeTrace, "final_answer", "success", "回复生成完成");
     addTraceEvent("请求完成", "Agent 已返回最终回复", "success");
   }
 
@@ -2361,6 +2372,185 @@ function normalizeTraceStatus(status, metadata = {}) {
   }
 
   return metadata.usedTool === true ? "running" : "idle";
+}
+
+function applyApiTraceToTrace(trace, apiTrace) {
+  const steps = Array.isArray(apiTrace) ? apiTrace : [];
+  if (steps.length === 0) {
+    return false;
+  }
+
+  trace.stages = TRACE_STAGE_DEFINITIONS.map((stage) => ({
+    ...stage,
+    status: "idle",
+    detail: "等待",
+  }));
+  trace.events = [];
+  trace.error = "";
+
+  let hasFailed = false;
+  let hasRunning = false;
+  let sawFinalAnswer = false;
+  let sawToolCall = false;
+  let sawObservation = false;
+  let latestToolName = "";
+  let latestToolDuration = null;
+  let latestToolStatus = "";
+
+  steps.forEach((step) => {
+    const normalizedStep = normalizeApiTraceStep(step);
+    if (!normalizedStep) {
+      return;
+    }
+
+    if (normalizedStep.status === "failed") {
+      hasFailed = true;
+      trace.error = normalizedStep.detail || trace.error;
+    } else if (normalizedStep.status === "running") {
+      hasRunning = true;
+    }
+
+    if (normalizedStep.key === "final_answer" && normalizedStep.status === "success") {
+      sawFinalAnswer = true;
+    }
+    if (normalizedStep.key === "tool_call") {
+      sawToolCall = true;
+    }
+    if (normalizedStep.key === "observation") {
+      sawObservation = true;
+    }
+
+    if (normalizedStep.toolName) {
+      latestToolName = normalizedStep.toolName;
+      latestToolDuration = normalizedStep.durationMs ?? latestToolDuration;
+      latestToolStatus = normalizedStep.status;
+    }
+
+    markTraceStage(trace, normalizedStep.key, normalizedStep.status, normalizedStep.detail);
+    trace.events.unshift({
+      title: normalizedStep.title,
+      detail: normalizedStep.detail,
+      status: normalizedStep.status,
+      time: getCurrentTime(),
+    });
+  });
+
+  trace.events = trace.events.slice(0, TRACE_MAX_EVENTS);
+  if (!sawToolCall) {
+    markTraceStage(trace, "tool_call", "idle", "未调用工具");
+  }
+  if (!sawObservation) {
+    markTraceStage(trace, "observation", "idle", "无观察结果");
+  }
+  trace.toolName = latestToolName || "未使用";
+  trace.toolStatus = latestToolName ? formatToolStatus(latestToolStatus, trace.error) : "未调用";
+  trace.toolDuration = latestToolDuration == null ? "--" : formatToolDuration(latestToolDuration);
+  trace.state = hasFailed ? "failed" : hasRunning || !sawFinalAnswer ? "running" : "success";
+  return true;
+}
+
+function normalizeApiTraceStep(step) {
+  if (!step || typeof step !== "object") {
+    return null;
+  }
+
+  const key = normalizeApiTraceKey(step.step);
+  if (!key) {
+    return null;
+  }
+
+  const status = normalizeApiTraceStatus(step.status);
+  const toolName = step.tool_name || step.toolName || step.tool_call?.tool_name || "";
+  const durationMs = step.duration_ms ?? step.durationMs ?? step.tool_call?.duration_ms ?? null;
+  return {
+    key,
+    status,
+    title: traceTitleForKey(key, status, toolName),
+    detail: traceDetailForApiStep(step, key, toolName, durationMs),
+    toolName,
+    durationMs,
+  };
+}
+
+function normalizeApiTraceKey(stepKey) {
+  const key = String(stepKey || "").trim();
+  if (key === "plan" || key === "planner") {
+    return "planner";
+  }
+  if (key === "tool" || key === "tool_call") {
+    return "tool_call";
+  }
+  if (key === "execute" || key === "observation") {
+    return "observation";
+  }
+  if (key === "generate" || key === "model_generate" || key === "final_answer") {
+    return "final_answer";
+  }
+  if (key === "status") {
+    return null;
+  }
+  return null;
+}
+
+function normalizeApiTraceStatus(status) {
+  const normalized = String(status || "").trim();
+  if (["running", "success", "failed", "skipped", "idle"].includes(normalized)) {
+    return normalized;
+  }
+  return "running";
+}
+
+function traceTitleForKey(key, status, toolName) {
+  const suffix = status === "failed" ? "失败" : status === "success" ? "完成" : "";
+  if (key === "planner") {
+    return suffix ? `规划${suffix}` : "正在规划";
+  }
+  if (key === "tool_call") {
+    return toolName ? `调用工具 ${toolName}` : "调用工具";
+  }
+  if (key === "observation") {
+    return "获取观察结果";
+  }
+  return "生成最终回答";
+}
+
+function traceDetailForApiStep(step, key, toolName, durationMs) {
+  const message = step.message || step.description || "";
+  const duration = durationMs == null ? "" : ` · ${formatToolDuration(durationMs)}`;
+  if (message) {
+    return `${message}${duration}`;
+  }
+  if (key === "tool_call" && toolName) {
+    return `工具 ${toolName}${duration}`;
+  }
+  if (key === "observation") {
+    return summarizeObservation(step.observation) || `已获取执行结果${duration}`;
+  }
+  if (key === "final_answer") {
+    return `最终回答生成${duration}`;
+  }
+  return `任务规划${duration}`;
+}
+
+function summarizeObservation(observation) {
+  if (observation == null) {
+    return "";
+  }
+  if (typeof observation === "string") {
+    return observation.slice(0, 90);
+  }
+  if (typeof observation === "object") {
+    if (observation.error_message || observation.error) {
+      return String(observation.error_message || observation.error).slice(0, 90);
+    }
+    if (observation.name) {
+      return `已获取 ${observation.name} 的结果`;
+    }
+    if (observation.message) {
+      return String(observation.message).slice(0, 90);
+    }
+  }
+  return "已获取结构化结果";
 }
 
 function renderAgentTrace() {
@@ -2987,6 +3177,7 @@ async function requestJsonAgentReply(requestBody, signal, fallbackConversationId
     toolRetryable: data.tool_retryable,
     toolErrorDetail: data.tool_error_detail,
     toolDurationMs: data.tool_duration_ms,
+    trace: data.trace || [],
   };
 }
 
@@ -3103,6 +3294,7 @@ async function requestStreamingAgentReply(
     toolRetryable: done.tool_retryable ?? metadata.tool_retryable,
     toolErrorDetail: done.tool_error_detail ?? metadata.tool_error_detail,
     toolDurationMs: done.tool_duration_ms ?? metadata.tool_duration_ms,
+    trace: done.trace || metadata.trace || [],
   };
 }
 
@@ -3118,6 +3310,7 @@ function normalizeToolMetadata(data = {}) {
     toolRetryable: data.tool_retryable,
     toolErrorDetail: data.tool_error_detail,
     toolDurationMs: data.tool_duration_ms,
+    trace: data.trace || [],
   };
 }
 
@@ -3245,7 +3438,7 @@ async function regenerateAgentReply(messageId) {
     },
     onChunk: (chunk, partialReply) => {
       if (!hasReceivedFirstChunk) {
-        updateTraceStage("generate", "running", "正在接收流式输出");
+        updateTraceStage("final_answer", "running", "正在接收流式输出");
         addTraceEvent("开始流式输出", "已收到首个内容片段", "running");
         renderAgentTrace();
       }
@@ -3339,6 +3532,7 @@ async function regenerateAgentReply(messageId) {
       toolRetryable: result.toolRetryable,
       toolErrorDetail: result.toolErrorDetail,
       toolDurationMs: result.toolDurationMs,
+      trace: result.trace || [],
       createdAt: getCurrentTime(),
     });
     finalizeAgentTrace(result);
@@ -3583,7 +3777,7 @@ async function sendCurrentMessage() {
       },
       onChunk: (chunk, partialReply) => {
         if (!hasReceivedFirstChunk) {
-          updateTraceStage("generate", "running", "正在接收流式输出");
+          updateTraceStage("final_answer", "running", "正在接收流式输出");
           addTraceEvent("开始流式输出", "已收到首个内容片段", "running");
           renderAgentTrace();
         }
@@ -3644,6 +3838,7 @@ async function sendCurrentMessage() {
       toolRetryable: result.toolRetryable,
       toolErrorDetail: result.toolErrorDetail,
       toolDurationMs: result.toolDurationMs,
+      trace: result.trace || [],
       createdAt: getCurrentTime(),
     });
     finalizeAgentTrace(result);

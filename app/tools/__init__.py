@@ -5,8 +5,9 @@ from app.mcp.manager import MCPManager
 from app.tools.mcp_tool import MCPTool
 from app.tools.summarize_text import SummarizeTextTool
 from app.tools.time_tool import CurrentTimeTool
+from app.tools.registry import ToolRegistry
 from app.tools.tool_manager import ToolManager
-from app.tools.web_reader import WebReaderTool
+from app.tools.web_reader import ReadWebpageTool, WebReaderTool
 from app.tools.web_search import WebSearchTool
 
 
@@ -30,6 +31,22 @@ def create_default_tool_manager(
         )
     )
     manager.register(WebReaderTool(timeout_seconds=web_reader_timeout_seconds))
+    manager.register(ReadWebpageTool(timeout_seconds=web_reader_timeout_seconds))
     if mcp_enabled:
         manager.register(MCPTool(manager=mcp_manager))
     return manager
+
+
+__all__ = [
+    "CalculateTool",
+    "CurrentTimeTool",
+    "MCPManager",
+    "MCPTool",
+    "ReadWebpageTool",
+    "SummarizeTextTool",
+    "ToolManager",
+    "ToolRegistry",
+    "WebReaderTool",
+    "WebSearchTool",
+    "create_default_tool_manager",
+]

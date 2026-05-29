@@ -7,10 +7,18 @@ from uuid import uuid4
 from fastapi import APIRouter, Depends, Path, Query
 from fastapi.responses import JSONResponse, StreamingResponse
 
+from app.agents import ManagerAgent
 from app.api.auth import CurrentUser, get_current_user
 from app.core.config import Settings, get_settings
-from app.core.errors import AgentError, InvalidArgumentsError, UnknownAgentError
+from app.core.exceptions import (
+    AgentError,
+    InvalidArgumentsError,
+    UnknownAgentError,
+    error_payload,
+    error_response,
+)
 from app.core.logger import get_logger
+from app.memory import MemoryManager
 from app.schemas.chat import (
     ChatRequest,
     ChatResponse,
@@ -18,7 +26,6 @@ from app.schemas.chat import (
     ConversationListResponse,
     ConversationMessagesResponse,
     ErrorDetail,
-    ErrorResponse,
 )
 from app.services.conversation_store import ConversationStoreProtocol, create_conversation_store
 from app.services.dashscope_agent import AgentTraceStep as AgentTraceStepData
@@ -44,9 +51,14 @@ cached_agent_signature: tuple[
     bool,
     str,
     int,
+    int,
 ] | None = None
+cached_manager_agent: ManagerAgent | None = None
+cached_manager_agent_source: DashScopeAgent | None = None
 cached_conversation_store: ConversationStoreProtocol | None = None
 cached_conversation_store_signature: tuple[str, str, str | None, int] | None = None
+cached_memory_manager: MemoryManager | None = None
+cached_memory_manager_signature: tuple[str, int, int] | None = None
 DEFAULT_SYSTEM_PROMPT = "\u4f60\u662f\u4e00\u4e2a\u7b80\u6d01\u3001\u53ef\u9760\u7684\u4e2d\u6587 AI \u52a9\u624b\u3002"
 ALLOWED_CHAT_MODELS = {"qwen-plus", "qwen-turbo", "qwen-max"}
 WEB_SEARCH_STATUS_SEARCHING = "正在联网搜索..."
@@ -104,6 +116,7 @@ def get_agent(settings: Settings = Depends(get_settings)) -> DashScopeAgent:
         settings.mcp_enabled,
         settings.modelscope_mcp_url,
         settings.mcp_timeout_seconds,
+        settings.max_agent_steps,
     )
     with agent_lock:
         if cached_agent is None or cached_agent_signature != signature:
@@ -118,24 +131,40 @@ def get_agent(settings: Settings = Depends(get_settings)) -> DashScopeAgent:
         return cached_agent
 
 
+def get_manager_agent(agent: DashScopeAgent) -> ManagerAgent:
+    """Return a ManagerAgent bound to the current model client and tool manager."""
+
+    global cached_manager_agent, cached_manager_agent_source
+
+    with agent_lock:
+        if cached_manager_agent is None or cached_manager_agent_source is not agent:
+            cached_manager_agent = ManagerAgent(
+                llm_client=agent.llm_client,
+                tool_manager=agent.tool_manager,
+            )
+            cached_manager_agent_source = agent
+            logger.info("ManagerAgent initialized for multi-agent mode")
+
+        return cached_manager_agent
+
+
 def get_conversation_store(settings: Settings = Depends(get_settings)) -> ConversationStoreProtocol:
     """Return the configured conversation store singleton."""
 
     global cached_conversation_store, cached_conversation_store_signature
 
-    max_rounds = 30
     signature = (
         settings.conversation_store,
         str(settings.conversation_db_path),
         settings.conversation_database_url,
-        max_rounds,
+        settings.conversation_max_rounds,
     )
     with store_lock:
         if cached_conversation_store is None or cached_conversation_store_signature != signature:
             cached_conversation_store = create_conversation_store(
                 store_type=settings.conversation_store,
                 db_path=settings.conversation_db_path,
-                max_rounds=max_rounds,
+                max_rounds=settings.conversation_max_rounds,
                 database_url=settings.conversation_database_url,
             )
             cached_conversation_store_signature = signature
@@ -143,10 +172,32 @@ def get_conversation_store(settings: Settings = Depends(get_settings)) -> Conver
                 "Conversation store initialized: type=%s db_path=%s max_rounds=%s",
                 settings.conversation_store,
                 settings.conversation_db_path,
-                max_rounds,
+                settings.conversation_max_rounds,
             )
 
         return cached_conversation_store
+
+
+def get_memory_manager(settings: Settings = Depends(get_settings)) -> MemoryManager:
+    """Return the JSON-backed memory manager singleton."""
+
+    global cached_memory_manager, cached_memory_manager_signature
+
+    signature = (
+        str(settings.memory_json_path),
+        settings.memory_search_limit,
+        settings.memory_recent_context_limit,
+    )
+    with store_lock:
+        if cached_memory_manager is None or cached_memory_manager_signature != signature:
+            cached_memory_manager = MemoryManager(
+                json_path=settings.memory_json_path,
+                short_limit=max(settings.memory_recent_context_limit * 2, 2),
+            )
+            cached_memory_manager_signature = signature
+            logger.info("MemoryManager initialized: json_path=%s", settings.memory_json_path)
+
+        return cached_memory_manager
 
 
 @router.get("/")
@@ -238,20 +289,44 @@ def chat(
     current_user: CurrentUser = Depends(get_current_user),
     agent: DashScopeAgent = Depends(get_agent),
     store: ConversationStoreProtocol = Depends(get_conversation_store),
+    memory: MemoryManager = Depends(get_memory_manager),
+    settings: Settings = Depends(get_settings),
 ) -> ChatResponse | JSONResponse:
     """Send a user message to the agent and return its reply."""
 
     conversation_id = request.conversation_id or str(uuid4())
     model_messages = build_model_messages(request, conversation_id, store, current_user.user_id)
+    model_messages = with_memory_context(
+        model_messages,
+        memory.build_memory_messages(
+            user_id=current_user.user_id,
+            conversation_id=conversation_id,
+            query=request.message,
+            search_limit=settings.memory_search_limit,
+            recent_limit=settings.memory_recent_context_limit,
+        ),
+    )
     requested_model = normalize_requested_model(request.model)
 
     try:
-        reply = agent.chat(messages=model_messages, model=requested_model)
+        reply = (
+            get_manager_agent(agent).chat(messages=model_messages, model=requested_model)
+            if request.multi_agent
+            else agent.chat(messages=model_messages, model=requested_model)
+        )
         store.append_exchange(conversation_id, request.message, reply.content, user_id=current_user.user_id)
+        memory.add_memory(
+            user_id=current_user.user_id,
+            conversation_id=conversation_id,
+            question=request.message,
+            answer=reply.content,
+        )
         return ChatResponse(
             reply=reply.content,
             model=requested_model or agent.model,
             conversation_id=conversation_id,
+            multi_agent=request.multi_agent,
+            agent_results=multi_agent_results_payload(reply.trace) if request.multi_agent else [],
             used_tool=reply.used_tool,
             tool_name=reply.tool_result.name if reply.tool_result else None,
             tool_status=get_tool_status(reply.tool_result),
@@ -278,11 +353,22 @@ def stream_chat(
     current_user: CurrentUser = Depends(get_current_user),
     settings: Settings = Depends(get_settings),
     store: ConversationStoreProtocol = Depends(get_conversation_store),
+    memory: MemoryManager = Depends(get_memory_manager),
 ) -> StreamingResponse:
     """Stream a chat response using server-sent events."""
 
     conversation_id = request.conversation_id or str(uuid4())
     model_messages = build_model_messages(request, conversation_id, store, current_user.user_id)
+    model_messages = with_memory_context(
+        model_messages,
+        memory.build_memory_messages(
+            user_id=current_user.user_id,
+            conversation_id=conversation_id,
+            query=request.message,
+            search_limit=settings.memory_search_limit,
+            recent_limit=settings.memory_recent_context_limit,
+        ),
+    )
     requested_model = normalize_requested_model(request.model)
     likely_web_search = _looks_like_search_request(request.message)
 
@@ -322,6 +408,32 @@ def stream_chat(
                     yield event
 
         try:
+            if request.multi_agent:
+                prepared_agent = get_agent(settings)
+                reply = get_manager_agent(prepared_agent).chat(messages=model_messages, model=requested_model)
+                metadata = {
+                    "success": True,
+                    "conversation_id": conversation_id,
+                    "model": requested_model or prepared_agent.model,
+                    "multi_agent": True,
+                    "agent_results": multi_agent_results_payload(reply.trace),
+                    **tool_response_metadata(None),
+                    "trace": trace_payload(reply.trace),
+                }
+                yield sse_event("metadata", metadata)
+                assistant_reply = reply.content
+                if assistant_reply:
+                    yield sse_event("chunk", {"content": assistant_reply})
+                store.append_exchange(conversation_id, request.message, assistant_reply, user_id=current_user.user_id)
+                memory.add_memory(
+                    user_id=current_user.user_id,
+                    conversation_id=conversation_id,
+                    question=request.message,
+                    answer=assistant_reply,
+                )
+                yield sse_event("done", metadata)
+                return
+
             if likely_web_search:
                 event = status_event(WEB_SEARCH_STATUS_SEARCHING)
                 if event is not None:
@@ -379,7 +491,7 @@ def stream_chat(
             except Exception as exc:
                 trace.append(
                     AgentTraceStepData(
-                        step="model_generate",
+                        step="final_answer",
                         status="failed",
                         message=str(exc),
                         duration_ms=elapsed_ms(model_started_at),
@@ -388,7 +500,7 @@ def stream_chat(
                 raise
             trace.append(
                 AgentTraceStepData(
-                    step="model_generate",
+                    step="final_answer",
                     status="success",
                     duration_ms=elapsed_ms(model_started_at),
                 )
@@ -396,6 +508,12 @@ def stream_chat(
 
             assistant_reply = "".join(assistant_chunks)
             store.append_exchange(conversation_id, request.message, assistant_reply, user_id=current_user.user_id)
+            memory.add_memory(
+                user_id=current_user.user_id,
+                conversation_id=conversation_id,
+                question=request.message,
+                answer=assistant_reply,
+            )
             yield sse_event(
                 "done",
                 {
@@ -443,6 +561,19 @@ def build_model_messages(
         user_message=request.message,
         max_context_rounds=request.max_context_rounds,
     )
+
+
+def with_memory_context(
+    messages: list[dict[str, str]],
+    memory_messages: list[dict[str, str]],
+) -> list[dict[str, str]]:
+    """Insert memory context after the system prompt without moving the latest user message."""
+
+    if not memory_messages:
+        return messages
+    if messages and messages[0].get("role") == "system":
+        return [messages[0], *memory_messages, *messages[1:]]
+    return [*memory_messages, *messages]
 
 
 def normalize_requested_model(model: str | None) -> str | None:
@@ -529,6 +660,21 @@ def trace_payload(trace: list[AgentTraceStepData] | None) -> list[dict]:
     return [step.to_dict() if hasattr(step, "to_dict") else dict(step) for step in trace]
 
 
+def multi_agent_results_payload(trace: list[AgentTraceStepData] | None) -> list[dict]:
+    """Extract structured sub-agent outputs from the execution trace."""
+
+    results: list[dict] = []
+    if not trace:
+        return results
+
+    for step in trace:
+        step_name = getattr(step, "step", None)
+        observation = getattr(step, "observation", None)
+        if step_name == "multi_agent_sub_agent" and isinstance(observation, dict):
+            results.append(observation)
+    return results
+
+
 def status_trace_step(message: str) -> dict:
     """Represent an in-flight SSE status as a trace-compatible running step."""
 
@@ -549,7 +695,7 @@ def tool_error_detail(tool_result) -> dict | None:
 
     code = tool_result.error_code or "TOOL_EXECUTION_ERROR"
     message = tool_result.error_message or tool_result.error or "工具调用失败，请调整问题后重试。"
-    return ErrorDetail(code=code, message=message, retryable=tool_result.retryable).model_dump()
+    return ErrorDetail(code=code, message=message).model_dump()
 
 
 def sse_event(event: str, data: dict) -> str:
@@ -557,53 +703,3 @@ def sse_event(event: str, data: dict) -> str:
 
     payload = json.dumps(data, ensure_ascii=False)
     return f"event: {event}\ndata: {payload}\n\n"
-
-
-def error_response(error: AgentError) -> JSONResponse:
-    """Return all chat errors in a stable JSON shape."""
-
-    body = ErrorResponse(
-        error=ErrorDetail(
-            code=str(error.code),
-            message=public_error_message(error),
-            retryable=error.retryable,
-        ),
-        message=public_error_message(error),
-        error_code=str(error.code),
-        error_message=public_error_message(error),
-        retryable=error.retryable,
-    )
-    return JSONResponse(
-        status_code=error.status_code,
-        content=body.model_dump(),
-    )
-
-
-def error_payload(error: AgentError) -> dict:
-    """Return the API/SSE error payload without exposing low-level exception details."""
-
-    return ErrorResponse(
-        error=ErrorDetail(
-            code=str(error.code),
-            message=public_error_message(error),
-            retryable=error.retryable,
-        ),
-        message=public_error_message(error),
-        error_code=str(error.code),
-        error_message=public_error_message(error),
-        retryable=error.retryable,
-    ).model_dump()
-
-
-def public_error_message(error: AgentError) -> str:
-    messages = {
-        "API_KEY_MISSING": "DashScope API Key 未配置，请在 .env 中设置 DASHSCOPE_API_KEY。",
-        "API_KEY_INVALID": "DashScope API Key 无效或没有权限，请检查配置。",
-        "MODEL_TIMEOUT": "模型请求超时，请稍后重试。",
-        "NETWORK_ERROR": "网络连接失败，请检查网络或稍后重试。",
-        "TOOL_EXECUTION_ERROR": "工具调用失败，请调整问题后重试。",
-        "MCP_SERVER_UNAVAILABLE": "MCP 服务不可用，请确认 MCP Server 已启动并可访问。",
-        "INVALID_ARGUMENTS": "请求参数非法，请检查请求内容。",
-        "UNKNOWN_ERROR": "服务暂时异常，请稍后重试。",
-    }
-    return messages.get(str(error.code), "服务暂时异常，请稍后重试。")

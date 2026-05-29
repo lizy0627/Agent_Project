@@ -1,12 +1,13 @@
 from copy import deepcopy
-import os
 from threading import Lock
 from time import time
 from typing import Any
 
 import httpx
 
+from app.config.settings import get_settings
 from app.core.logger import get_logger
+from app.tools.base import BaseTool
 
 
 logger = get_logger(__name__)
@@ -17,11 +18,32 @@ _WEB_SEARCH_CACHE: dict[str, tuple[float, dict]] = {}
 _WEB_SEARCH_CACHE_LOCK = Lock()
 
 
-class WebSearchTool:
+class WebSearchTool(BaseTool):
     """Search the web through the Tavily Search API."""
 
     name = "web_search"
     description = "Search the web for current information."
+    args_schema = {
+        "type": "object",
+        "properties": {
+            "query": {
+                "type": "string",
+                "description": "Search query.",
+            },
+            "max_results": {
+                "type": "integer",
+                "default": 3,
+                "minimum": 1,
+                "maximum": 10,
+            },
+            "search_depth": {
+                "type": "string",
+                "enum": ["basic", "advanced"],
+                "default": "basic",
+            },
+        },
+        "required": ["query"],
+    }
     endpoint = "https://api.tavily.com/search"
     default_timeout_seconds = 5.0
 
@@ -31,8 +53,9 @@ class WebSearchTool:
         provider: str | None = None,
         timeout_seconds: float | int | None = None,
     ) -> None:
-        self.api_key = api_key or os.getenv("TAVILY_API_KEY")
-        self.provider = provider or os.getenv("WEB_SEARCH_PROVIDER", "tavily")
+        settings = get_settings()
+        self.api_key = api_key or settings.search_api_key
+        self.provider = provider or settings.web_search_provider
         self.timeout_seconds = self._normalize_timeout(timeout_seconds, self.default_timeout_seconds)
 
     def run(
@@ -49,7 +72,7 @@ class WebSearchTool:
             raise ValueError(f"Unsupported web search provider: {self.provider}")
 
         if not self.api_key:
-            raise ValueError("TAVILY_API_KEY is not configured.")
+            raise ValueError("SEARCH_API_KEY is not configured. Add SEARCH_API_KEY to .env.")
 
         safe_max_results = min(max(int(max_results), 1), 10)
         safe_search_depth = search_depth if search_depth in {"basic", "advanced"} else "basic"

@@ -1,142 +1,14 @@
-from threading import Timer
-import webbrowser
+"""Compatibility entry point for the backend.app FastAPI application."""
 
-from fastapi import FastAPI, HTTPException
-from fastapi.exceptions import RequestValidationError
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, Response
-from fastapi.staticfiles import StaticFiles
-import uvicorn
-
-from app.api.auth import get_user_store, router as auth_router
-from app.api.chat import error_payload, error_response, get_conversation_store, router as chat_router
-from app.api.documents import get_document_store, router as documents_router
-from app.api.mcp import router as mcp_router
-from app.core.config import (
-    APP_DESCRIPTION,
-    APP_TITLE,
-    APP_VERSION,
-    FRONTEND_DIR,
-    FRONTEND_URL,
-    HOST,
-    PORT,
-    get_settings,
-)
-from app.core.errors import AgentError, InvalidArgumentsError, UnknownAgentError
-from app.core.logger import get_logger, setup_logging
-
-
-setup_logging()
-logger = get_logger(__name__)
-
-
-def frontend_page() -> Response:
-    """Return the frontend entry page."""
-
-    index_file = FRONTEND_DIR / "index.html"
-    if not index_file.exists():
-        logger.warning("Frontend entry file is missing: %s", index_file)
-        error = UnknownAgentError()
-        return JSONResponse(status_code=404, content=error_payload(error))
-
-    return FileResponse(index_file)
-
-
-def create_app() -> FastAPI:
-    """Create the FastAPI application and register routes/static files."""
-
-    settings = get_settings()
-    get_user_store(settings)
-    get_conversation_store(settings)
-    get_document_store(settings)
-    app = FastAPI(
-        title=APP_TITLE,
-        description=APP_DESCRIPTION,
-        version=APP_VERSION,
-    )
-
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=settings.cors_allow_origins,
-        allow_credentials=False,
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
-
-    app.include_router(auth_router)
-    app.include_router(chat_router)
-    app.include_router(documents_router)
-    app.include_router(mcp_router)
-
-    if FRONTEND_DIR.exists():
-        app.mount(
-            "/frontend",
-            StaticFiles(directory=FRONTEND_DIR),
-            name="frontend",
-        )
-    else:
-        logger.warning(
-            "Skip static file mount because frontend directory is missing: %s",
-            FRONTEND_DIR,
-        )
-
-    app.add_api_route("/ui", frontend_page, methods=["GET"], include_in_schema=False)
-
-    @app.exception_handler(AgentError)
-    async def agent_error_handler(_, exc: AgentError) -> JSONResponse:
-        logger.info("Agent error handled: code=%s status=%s", exc.code, exc.status_code)
-        return error_response(exc)
-
-    @app.exception_handler(RequestValidationError)
-    async def validation_error_handler(_, exc: RequestValidationError) -> JSONResponse:
-        logger.info("Request validation failed: errors=%s", len(exc.errors()))
-        return error_response(InvalidArgumentsError())
-
-    @app.exception_handler(HTTPException)
-    async def http_error_handler(_, exc: HTTPException) -> JSONResponse:
-        logger.info("HTTP error handled: status=%s", exc.status_code)
-        if exc.status_code == 401:
-            return JSONResponse(
-                status_code=401,
-                content={
-                    "success": False,
-                    "message": "Authentication required.",
-                    "error_code": "AUTH_REQUIRED",
-                    "error_message": "Authentication required.",
-                    "retryable": False,
-                    "error": {
-                        "code": "AUTH_REQUIRED",
-                        "message": "Authentication required.",
-                        "retryable": False,
-                    },
-                },
-                headers=exc.headers,
-            )
-        error = InvalidArgumentsError() if 400 <= exc.status_code < 500 else UnknownAgentError()
-        return JSONResponse(
-            status_code=exc.status_code,
-            content=error_payload(error),
-        )
-
-    @app.exception_handler(Exception)
-    async def unknown_error_handler(_, exc: Exception) -> JSONResponse:
-        logger.exception("Unhandled application error")
-        error = UnknownAgentError()
-        return error_response(error)
-
-    return app
-
-
-app = create_app()
-
-
-def open_browser() -> None:
-    """Open the local frontend after the development server starts."""
-
-    webbrowser.open(FRONTEND_URL)
+from backend.app.main import app, create_app, frontend_page, open_browser
+from backend.app.core.config import HOST, PORT, get_settings
 
 
 if __name__ == "__main__":
+    from threading import Timer
+
+    import uvicorn
+
     settings = get_settings()
     if settings.auto_open_browser:
         Timer(1.0, open_browser).start()

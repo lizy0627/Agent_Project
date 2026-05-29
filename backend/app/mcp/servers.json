@@ -1,0 +1,72 @@
+{
+  "modelscope": {
+    "name": "ModelScope MCP Server",
+    "transport": "http",
+    "url": "http://127.0.0.1:8001/mcp",
+    "enabled": true,
+    "keywords": [
+      "魔搭",
+      "ModelScope",
+      "模型",
+      "数据集",
+      "论文",
+      "创空间",
+      "Qwen",
+      "通义千问"
+    ],
+    "description": "用于搜索魔搭模型、数据集、论文、创空间和 MCP 服务",
+    "timeout_seconds": 20,
+    "command": null,
+    "args": [],
+    "env": {
+      "MODELSCOPE_API_TOKEN": "${MODELSCOPE_API_TOKEN}"
+    },
+    "headers": {},
+    "category": "model-community"
+  },
+  "fetch": {
+    "name": "Fetch MCP",
+    "transport": "sse",
+    "url": "https://mcp.api-inference.modelscope.net/519ddd65e9fd4b/sse",
+    "enabled": true,
+    "keywords": [
+      "网页",
+      "网站",
+      "抓取",
+      "读取网页",
+      "总结网页",
+      "文章"
+    ],
+    "description": "网页抓取和读取工具",
+    "timeout_seconds": 60,
+    "command": null,
+    "args": [],
+    "env": {},
+    "headers": {},
+    "category": "web"
+  },
+  "tavily": {
+    "name": "Tavily MCP",
+    "transport": "sse",
+    "url": "https://mcp.api-inference.modelscope.net/cb0009a2091541/sse",
+    "enabled": true,
+    "keywords": [
+      "搜索",
+      "联网",
+      "新闻",
+      "网页",
+      "查一下",
+      "今日",
+      "AI新闻",
+      "实时",
+      "Tavily"
+    ],
+    "description": "联网搜索、网页检索、实时新闻工具",
+    "timeout_seconds": 60,
+    "command": null,
+    "args": [],
+    "env": {},
+    "headers": {},
+    "category": "search"
+  }
+}

@@ -6,7 +6,7 @@ from fastapi.responses import JSONResponse
 from app.api.auth import CurrentUser, get_current_user
 from app.api.chat import get_agent, normalize_requested_model
 from app.core.config import Settings, get_settings
-from app.core.errors import InvalidArgumentsError, UnknownAgentError
+from app.core.exceptions import ErrorCode, InvalidArgumentsError, NotFoundError, UnknownAgentError, error_response
 from app.core.logger import get_logger
 from app.schemas.documents import (
     DocumentAskRequest,
@@ -209,56 +209,14 @@ def document_summary(document: StoredDocument) -> DocumentSummary:
 
 
 def invalid_document_response(message: str) -> JSONResponse:
-    error = InvalidArgumentsError()
-    return JSONResponse(
-        status_code=error.status_code,
-        content={
-            "success": False,
-            "message": message,
-            "error_code": str(error.code),
-            "error_message": message,
-            "retryable": error.retryable,
-            "error": {
-                "code": str(error.code),
-                "message": message,
-                "retryable": error.retryable,
-            },
-        },
-    )
+    return error_response(InvalidArgumentsError(message), message=message)
 
 
 def document_not_found_response() -> JSONResponse:
-    return JSONResponse(
-        status_code=404,
-        content={
-            "success": False,
-            "message": "文档不存在或已被删除。",
-            "error_code": "DOCUMENT_NOT_FOUND",
-            "error_message": "文档不存在或已被删除。",
-            "retryable": False,
-            "error": {
-                "code": "DOCUMENT_NOT_FOUND",
-                "message": "文档不存在或已被删除。",
-                "retryable": False,
-            },
-        },
+    return error_response(
+        NotFoundError(message="文档不存在或已被删除。", code=ErrorCode.DOCUMENT_NOT_FOUND),
     )
 
 
 def unknown_document_response() -> JSONResponse:
-    error = UnknownAgentError()
-    return JSONResponse(
-        status_code=error.status_code,
-        content={
-            "success": False,
-            "message": "文档服务暂时异常，请稍后重试。",
-            "error_code": str(error.code),
-            "error_message": "文档服务暂时异常，请稍后重试。",
-            "retryable": error.retryable,
-            "error": {
-                "code": str(error.code),
-                "message": "文档服务暂时异常，请稍后重试。",
-                "retryable": error.retryable,
-            },
-        },
-    )
+    return error_response(UnknownAgentError(), message="文档服务暂时异常，请稍后重试。")

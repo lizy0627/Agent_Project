@@ -1,6 +1,8 @@
 from time import perf_counter
-from typing import Iterator
+from typing import Any, Iterator
 
+from app.agent.executor import AgentExecutor, AgentTrace, tool_result_to_observation
+from app.agent.planner import AgentPlan, Planner
 from app.core.config import Settings
 from app.core.logger import get_logger
 from app.core.safe_logging import safe_log_data
@@ -23,7 +25,6 @@ from app.services.agent_types import (
 from app.services.llm_client import LLMClient
 from app.services.message_builder import MessageBuilder
 from app.services.search_workflow import SearchWorkflow
-from app.services.tool_executor import ToolExecutor
 from app.tools import create_default_tool_manager
 from app.tools.base import ToolResult
 from app.tools.mcp_tool import MCPTool
@@ -54,29 +55,55 @@ class AgentService:
         )
         self._inject_mcp_manager_into_tool()
         self.mcp_router = MCPRouter(self.mcp_manager)
-        self.planner = AgentPlanner(settings=self.settings, mcp_router=self.mcp_router)
+        self.tool_route_planner = AgentPlanner(settings=self.settings, mcp_router=self.mcp_router)
+        self.planner = Planner(max_steps=settings.max_agent_steps)
+        self.executor = AgentExecutor(self.tool_manager)
         self.message_builder = MessageBuilder()
-        self.tool_executor = ToolExecutor(self.tool_manager, self.mcp_manager)
-        self.search_workflow = SearchWorkflow(self.tool_manager, self.message_builder)
+        self.search_workflow = SearchWorkflow(
+            self.tool_manager,
+            self.message_builder,
+            read_top_k=settings.search_workflow_read_top_k,
+        )
 
     def _inject_mcp_manager_into_tool(self) -> None:
-        mcp_tool = self.tool_manager.get("mcp_tool")
+        mcp_tool = self.tool_manager.get_tool("mcp_tool")
         if isinstance(mcp_tool, MCPTool) and mcp_tool.manager is None:
             mcp_tool.manager = self.mcp_manager
 
     def chat(self, messages: list[ChatMessage], model: str | None = None) -> AgentReply:
         """Send a chat request with complete context and return model text."""
 
+        started_at = perf_counter()
+        status = "failed"
         trace: list[AgentTraceStep] = []
-        planned_call = self._trace_plan_tool_call(messages, trace)
-        if planned_call and planned_call.name == "web_search":
-            return self._handle_search_workflow(messages, planned_call, model=model, trace=trace)
+        try:
+            planned_call, agent_plan = self._trace_plan_tool_call(messages, trace)
+            if planned_call and planned_call.name == "web_search":
+                reply = self._handle_search_workflow(messages, planned_call, model=model, trace=trace)
+                status = "success"
+                return reply
 
-        tool_result = self.tool_executor.call_planned_tool(planned_call)
-        self._append_tool_trace(trace, planned_call, tool_result)
-        model_messages = self.message_builder.with_tool_result(messages, tool_result)
-        reply = self._complete_chat_with_trace(model_messages, trace, model=model)
-        return AgentReply(content=reply, tool_result=tool_result, trace=trace)
+            executor_trace = self.executor.execute(agent_plan)
+            tool_result = self.executor.last_tool_result(executor_trace)
+            self._append_executor_trace(trace, executor_trace)
+            model_messages = self.message_builder.with_tool_result(messages, tool_result)
+            reply = self._complete_chat_with_trace(model_messages, trace, model=model)
+            status = "success"
+            return AgentReply(content=reply, tool_result=tool_result, trace=trace)
+        except Exception:
+            logger.exception(
+                "Agent execution failed: model=%s duration_ms=%.2f",
+                model or self.model,
+                self._elapsed_ms(started_at),
+            )
+            raise
+        finally:
+            logger.info(
+                "Agent execution finished: model=%s status=%s duration_ms=%.2f",
+                model or self.model,
+                status,
+                self._elapsed_ms(started_at),
+            )
 
     def stream_chat(self, messages: list[ChatMessage], model: str | None = None) -> Iterator[str]:
         """Stream a chat request with complete context."""
@@ -94,40 +121,61 @@ class AgentService:
 
         trace: list[AgentTraceStep] = []
         emitted_statuses: set[str] = set()
+        started_at = perf_counter()
         initial_tool_name = self._emit_initial_tool_status(messages, status_callback, emitted_statuses)
-        planned_call = self._trace_plan_tool_call(messages, trace)
-        if planned_call and planned_call.name == "web_search":
-            if initial_tool_name != "web_search":
-                self._emit_status(status_callback, STATUS_WEB_SEARCHING, emitted_statuses)
-            model_messages, workflow_result, performance = self.search_workflow.prepare(
-                messages,
-                planned_call,
-                status_callback=status_callback,
-                emitted_statuses=emitted_statuses,
-            )
-            self._append_tool_trace(trace, planned_call, workflow_result)
-            self._emit_status(status_callback, STATUS_GENERATING, emitted_statuses)
-            logger.info("[SearchWorkflow] streaming summarize start")
-            stream = self.search_workflow.stream_summary(
-                model_messages,
-                performance,
-                self.llm_client,
-                model=model,
-            )
-            return stream, workflow_result, trace
+        try:
+            planned_call, agent_plan = self._trace_plan_tool_call(messages, trace)
+            if planned_call and planned_call.name == "web_search":
+                if initial_tool_name != "web_search":
+                    self._emit_status(status_callback, STATUS_WEB_SEARCHING, emitted_statuses)
+                model_messages, workflow_result, performance = self.search_workflow.prepare(
+                    messages,
+                    planned_call,
+                    status_callback=status_callback,
+                    emitted_statuses=emitted_statuses,
+                )
+                self._append_tool_trace(trace, planned_call, workflow_result)
+                self._emit_status(status_callback, STATUS_GENERATING, emitted_statuses)
+                logger.info("[SearchWorkflow] streaming summarize start")
+                stream = self.search_workflow.stream_summary(
+                    model_messages,
+                    performance,
+                    self.llm_client,
+                    model=model,
+                )
+                logger.info(
+                    "Agent stream prepared: model=%s duration_ms=%.2f",
+                    model or self.model,
+                    self._elapsed_ms(started_at),
+                )
+                return stream, workflow_result, trace
 
-        self._emit_planned_tool_status(
-            planned_call,
-            status_callback,
-            emitted_statuses,
-            initial_tool_name=initial_tool_name,
-        )
-        tool_result = self.tool_executor.call_planned_tool(planned_call)
-        self._append_tool_trace(trace, planned_call, tool_result)
-        if tool_result is not None:
-            self._emit_status(status_callback, STATUS_GENERATING, emitted_statuses)
-        model_messages = self.message_builder.with_tool_result(messages, tool_result)
-        return self.llm_client.stream_complete_chat(model_messages, model=model), tool_result, trace
+            self._emit_planned_tool_status(
+                planned_call,
+                status_callback,
+                emitted_statuses,
+                initial_tool_name=initial_tool_name,
+            )
+            executor_trace = self.executor.execute(agent_plan)
+            tool_result = self.executor.last_tool_result(executor_trace)
+            self._append_executor_trace(trace, executor_trace)
+            if tool_result is not None:
+                self._emit_status(status_callback, STATUS_GENERATING, emitted_statuses)
+            model_messages = self.message_builder.with_tool_result(messages, tool_result)
+            stream = self.llm_client.stream_complete_chat(model_messages, model=model)
+            logger.info(
+                "Agent stream prepared: model=%s duration_ms=%.2f",
+                model or self.model,
+                self._elapsed_ms(started_at),
+            )
+            return stream, tool_result, trace
+        except Exception:
+            logger.exception(
+                "Agent stream preparation failed: model=%s duration_ms=%.2f",
+                model or self.model,
+                self._elapsed_ms(started_at),
+            )
+            raise
 
     def prepare_chat_messages(
         self,
@@ -136,7 +184,9 @@ class AgentService:
         """Apply optional local tool context before calling the model."""
 
         planned_call = self._plan_tool_call(messages)
-        tool_result = self.tool_executor.call_planned_tool(planned_call)
+        agent_plan = self._plan_agent_steps(messages, planned_call)
+        executor_trace = self.executor.execute(agent_plan)
+        tool_result = self.executor.last_tool_result(executor_trace)
         return self.message_builder.with_tool_result(messages, tool_result), tool_result
 
     def _handle_search_workflow(
@@ -176,7 +226,7 @@ class AgentService:
         trace: list[AgentTraceStep],
         model: str | None = None,
     ) -> str:
-        """Call the model and append a model_generate trace step."""
+        """Call the model and append a final_answer trace step."""
 
         started_at = perf_counter()
         try:
@@ -192,16 +242,17 @@ class AgentService:
         self,
         messages: list[ChatMessage],
         trace: list[AgentTraceStep],
-    ) -> PlannedToolCall | None:
+    ) -> tuple[PlannedToolCall | None, AgentPlan]:
         """Plan the optional tool call and append a front-end friendly trace step."""
 
         started_at = perf_counter()
         try:
             planned_call = self._plan_tool_call(messages)
+            agent_plan = self._plan_agent_steps(messages, planned_call)
         except Exception as exc:
             trace.append(
                 AgentTraceStep(
-                    step="plan",
+                    step="planner",
                     status="failed",
                     message=str(exc),
                     duration_ms=self._elapsed_ms(started_at),
@@ -209,34 +260,31 @@ class AgentService:
             )
             raise
 
+        metadata = self._plan_trace_metadata(agent_plan, planned_call)
+        logger.info("Planner output: %s", safe_log_data(metadata))
         if planned_call is None:
             trace.append(
                 AgentTraceStep(
-                    step="plan",
+                    step="planner",
                     status="success",
-                    message="No tool needed",
+                    message="Planned direct answer.",
                     duration_ms=self._elapsed_ms(started_at),
+                    metadata=metadata,
                 )
             )
-            return None
-
-        metadata: dict[str, int | str] = {}
-        if planned_call.route_score:
-            metadata["route_score"] = planned_call.route_score
-        if planned_call.route_reason:
-            metadata["route_reason"] = planned_call.route_reason
+            return None, agent_plan
 
         trace.append(
             AgentTraceStep(
-                step="plan",
+                step="planner",
                 status="success",
-                message=f"Selected tool: {planned_call.name}",
+                message=f"Selected tool: {planned_call.name}.",
                 tool_name=planned_call.name,
                 duration_ms=self._elapsed_ms(started_at),
                 metadata=metadata or None,
             )
         )
-        return planned_call
+        return planned_call, agent_plan
 
     def _append_tool_trace(
         self,
@@ -262,11 +310,71 @@ class AgentService:
             AgentTraceStep(
                 step="tool_call",
                 status=status,
-                message=message,
+                message=message or f"Tool call finished: {tool_name}",
                 tool_name=tool_name,
+                duration_ms=tool_result.duration_ms if tool_result is not None else None,
+                metadata={
+                    "tool_args": dict(getattr(planned_call, "arguments", {}) or {}),
+                }
+                if planned_call is not None
+                else None,
+            )
+        )
+        trace.append(
+            AgentTraceStep(
+                step="observation",
+                status=status,
+                message=message or "Observed tool result.",
+                tool_name=tool_name,
+                observation=tool_result_to_observation(tool_result),
                 duration_ms=tool_result.duration_ms if tool_result is not None else None,
             )
         )
+
+    def _append_executor_trace(self, trace: list[AgentTraceStep], executor_trace: AgentTrace) -> None:
+        """Expose every executor observation through the API trace field."""
+
+        for step in executor_trace.steps:
+            metadata: dict[str, Any] = {
+                "step_id": step.step_id,
+                "description": step.description,
+                "tool_args": step.tool_args,
+                "depends_on": step.depends_on,
+            }
+            if step.tool_name:
+                trace.append(
+                    AgentTraceStep(
+                        step="tool_call",
+                        status=step.status,
+                        message=step.error or f"Tool call finished: {step.tool_name}",
+                        tool_name=step.tool_name,
+                        duration_ms=step.duration_ms,
+                        metadata=metadata,
+                    )
+                )
+                trace.append(
+                    AgentTraceStep(
+                        step="observation",
+                        status=step.status,
+                        message=step.error or "Observed tool result.",
+                        tool_name=step.tool_name,
+                        observation=self._serialize_observation(step.observation),
+                        duration_ms=step.duration_ms,
+                        metadata=metadata,
+                    )
+                )
+                continue
+
+            trace.append(
+                AgentTraceStep(
+                    step="observation",
+                    status=step.status,
+                    message=step.error or step.description,
+                    observation=self._serialize_observation(step.observation),
+                    duration_ms=step.duration_ms,
+                    metadata=metadata,
+                )
+            )
 
     def _append_model_trace(
         self,
@@ -279,7 +387,7 @@ class AgentService:
 
         trace.append(
             AgentTraceStep(
-                step="model_generate",
+                step="final_answer",
                 status=status,
                 message=message,
                 duration_ms=self._elapsed_ms(started_at),
@@ -334,7 +442,7 @@ class AgentService:
         user_message = self._latest_user_message(messages)
         if not user_message:
             return None
-        return self.planner.likely_tool_name_for_status(user_message)
+        return self.tool_route_planner.likely_tool_name_for_status(user_message)
 
     def _status_message_for_tool(self, tool_name: str) -> str | None:
         return {
@@ -363,10 +471,40 @@ class AgentService:
         status_callback(clean_message)
 
     def _plan_tool_call(self, messages: list[ChatMessage]) -> PlannedToolCall | None:
-        return self.planner.plan(messages)
+        return self.tool_route_planner.plan(messages)
+
+    def _plan_agent_steps(
+        self,
+        messages: list[ChatMessage],
+        planned_call: PlannedToolCall | None,
+    ) -> AgentPlan:
+        """Build the structured Pydantic plan used by traces and debugging."""
+
+        return self.planner.plan(self._latest_user_message(messages), planned_call)
 
     def _latest_user_message(self, messages: list[ChatMessage]) -> str:
-        return self.planner.latest_user_message(messages)
+        return self.tool_route_planner.latest_user_message(messages)
+
+    def _plan_trace_metadata(
+        self,
+        agent_plan: AgentPlan,
+        planned_call: PlannedToolCall | None,
+    ) -> dict[str, Any]:
+        """Attach the structured plan without changing the legacy trace shape."""
+
+        metadata: dict[str, Any] = {"plan": agent_plan.model_dump()}
+        if planned_call is None:
+            return metadata
+        if planned_call.route_score:
+            metadata["route_score"] = planned_call.route_score
+        if planned_call.route_reason:
+            metadata["route_reason"] = planned_call.route_reason
+        return metadata
+
+    def _serialize_observation(self, observation: Any) -> Any:
+        if isinstance(observation, ToolResult):
+            return tool_result_to_observation(observation)
+        return observation
 
     def _elapsed_seconds(self, started_at: float) -> float:
         return round(perf_counter() - started_at, 2)

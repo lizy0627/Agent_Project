@@ -1,208 +1,134 @@
-# DashScope Agent Playground
+# AgentOS
 
-一个基于 **FastAPI + DashScope OpenAI 兼容接口** 构建的轻量级 Agent 对话项目。项目包含后端对话接口、内存会话管理、规则式工具规划、工具调用层、联网搜索与网页读取能力，以及原生 HTML/CSS/JavaScript 实现的聊天前端。
+## 项目简介
 
-这个项目适合作为简历项目或面试讲解案例：它不是复杂的通用 Agent 平台，而是围绕“用户输入 -> 工具判断 -> 工具执行 -> 模型总结 -> 前端展示”实现了一条可运行、可调试、便于扩展的基础 Agent 工作流。
+一个基于 **FastAPI + DashScope/OpenAI-Compatible API** 的工程化 Agent 智能体框架。项目围绕「任务规划、工具调用、网页检索、记忆管理、执行轨迹、流式响应」构建，提供可运行、可扩展、可观测的智能体后端，并内置一个轻量 Web UI 用于本地调试和演示。
 
-## 项目架构
+AgentOS 不是一次性的聊天 Demo，而是一个面向真实应用集成的 Agent Runtime：你可以在统一的工具注册表中扩展能力，在 Planner/Executor/ReAct/Reflector 链路中调整智能体行为，并通过 FastAPI 接口把 Agent 能力暴露给前端、业务系统或其他服务。
 
-核心链路如下：
+## 核心特性
 
-```text
-用户输入
-  -> FastAPI 接口
-  -> ConversationStore
-  -> Agent 规划
-  -> ToolManager 工具调用
-  -> DashScope 模型回答
-  -> 前端展示
-```
-
-各模块职责：
-
-- `frontend/`：原生前端页面，负责消息输入、流式响应展示、会话切换、本地会话缓存、Markdown 基础渲染和代码块复制。
-- `app/api/chat.py`：FastAPI 路由层，提供健康检查、普通聊天和流式聊天接口，并组装请求上下文。
-- `app/services/conversation_store.py`：会话存储层，默认使用内存存储，也可以通过配置切换为 SQLite 持久化存储。
-- `app/services/dashscope_agent.py`：Agent 核心逻辑，负责判断是否需要工具、执行搜索工作流、拼接工具结果并调用 DashScope。
-- `app/tools/`：本地工具层，包含时间、计算、文本总结、Tavily 搜索、网页读取和 MCP 工具包装。
-- `app/tools/tool_manager.py`：统一管理工具注册、调用、日志和异常隔离。
-- `app/mcp/`：MCP 配置、客户端、管理器和路由逻辑，用于接入外部 MCP Server。
-- `app/core/`：配置、日志和错误处理。
+- **工程化 Agent 分层**：Planner、Executor、Reactor、Reflector、State 独立拆分，便于测试、替换和扩展。
+- **统一工具系统**：所有工具通过 `ToolRegistry` / `ToolManager` 注册和调用，返回标准化 `ToolResult`。
+- **联网研究工作流**：支持 Tavily Web Search、网页正文读取、搜索结果整理和模型总结。
+- **MCP 工具接入**：可通过配置接入外部 MCP Server，并将 MCP 能力包装为本地工具。
+- **短期与长期记忆**：内置 JSON 存储的会话短期记忆和用户长期记忆检索。
+- **Agent Trace 可观测性**：每次请求可返回 planner、tool_call、observation、final_answer 等执行轨迹。
+- **流式响应**：`/chat/stream` 基于 Server-Sent Events 输出状态、文本片段、元数据和完成事件。
+- **认证与会话隔离**：支持注册、登录、JWT 鉴权，以及按用户隔离的 conversation/document 数据。
+- **多存储选项**：会话默认内存存储，也支持 SQLite 和 SQLAlchemy 数据库 URL。
+- **前端调试界面**：内置原生 HTML/CSS/JavaScript UI，可直接访问 `/ui` 体验 Agent。
 
 ## 技术栈
 
-- **后端框架**：FastAPI
-- **模型调用**：DashScope OpenAI-Compatible API，使用 `openai` Python SDK
-- **配置管理**：Pydantic Settings + `.env`
-- **前端实现**：原生 HTML、CSS、JavaScript
-- **会话管理**：后端内存会话历史 + 前端 `localStorage`
-- **工具系统**：自定义 `ToolManager`
-- **联网能力**：Tavily Search API + 网页正文读取
-- **MCP 接入**：支持通过 `app/mcp/servers.json` 配置 MCP Server
-- **运行服务**：Uvicorn
+| 模块 | 技术 |
+| --- | --- |
+| Web Framework | FastAPI, Uvicorn |
+| LLM Provider | DashScope OpenAI-Compatible API |
+| Schema & Config | Pydantic, Pydantic Settings |
+| Persistence | SQLite, SQLAlchemy, JSON |
+| Tooling | Custom ToolRegistry, MCP Adapter, Tavily Search |
+| Frontend | Vanilla HTML, CSS, JavaScript |
+| Testing | Pytest |
+| Migration | Alembic |
 
-## 功能说明
+## 系统架构图
 
-当前项目已实现：
+```mermaid
+flowchart TD
+    User["User / Client"] --> API["FastAPI API Layer"]
+    API --> Auth["Auth & User Context"]
+    API --> Conversation["Conversation Store"]
+    API --> AgentService["Agent Service"]
 
-- 普通对话接口：`POST /chat`
-- 流式对话接口：`POST /chat/stream`
-- 用户注册、登录和当前用户接口：`POST /auth/register`、`POST /auth/login`、`GET /auth/me`
-- FastAPI 自动接口文档：`GET /docs`
-- 本地聊天页面：`GET /ui`
-- 后端多轮上下文管理
-- 前端多会话切换与本地保存
-- 可选模型参数，支持请求时指定 DashScope 模型名称
-- 可选系统提示词，支持请求时覆盖默认 system prompt
-- 可选上下文轮数限制，避免一次请求携带过长历史
-- 基础工具调用：
-  - `get_current_time`：获取当前时间
-  - `calculate`：执行数学计算
-  - `summarize_text`：总结文本内容
-  - `web_search`：通过 Tavily Search API 搜索网页
-  - `web_reader`：读取网页正文，用于补充搜索材料
-  - `mcp_tool`：调用已配置 MCP Server 暴露的工具
-- 联网搜索工作流：默认搜索 3 条结果，并按需读取前 2 个网页正文用于模型总结
-- 工具调用日志和耗时记录
-- 工具失败时返回错误信息，不直接中断整个服务
-- 统一异常处理，覆盖 API Key 缺失、鉴权失败、网络异常、模型超时等常见场景
+    AgentService --> Planner["Planner<br/>intent and tool route"]
+    Planner --> Executor["Executor<br/>plan execution"]
+    Planner --> Reactor["ReAct Agent<br/>thought/action loop"]
+    Executor --> Registry["Tool Registry"]
+    Reactor --> Registry
 
-## 项目结构
+    Registry --> LocalTools["Local Tools<br/>time / calculate / summarize"]
+    Registry --> WebTools["Web Tools<br/>web_search / read_webpage"]
+    Registry --> MCP["MCP Tool Adapter"]
+
+    WebTools --> Tavily["Tavily Search API"]
+    WebTools --> WebPage["Web Pages"]
+    MCP --> MCPServer["External MCP Servers"]
+
+    AgentService --> Memory["Memory Manager<br/>short / long memory"]
+    AgentService --> LLM["DashScope LLM"]
+    LLM --> AgentService
+    AgentService --> Trace["Agent Trace"]
+    AgentService --> API
+```
+
+## Agent 执行流程
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant A as FastAPI
+    participant M as Memory
+    participant P as Planner
+    participant E as Executor
+    participant T as ToolRegistry
+    participant L as LLM
+
+    C->>A: POST /chat
+    A->>M: Load recent and long-term context
+    A->>P: Plan task and route tool
+    P-->>A: AgentPlan + PlannedToolCall
+    A->>E: Execute plan
+    E->>T: Run selected tool
+    T-->>E: ToolResult
+    E-->>A: Observation trace
+    A->>L: Build model messages with tool result
+    L-->>A: Final answer
+    A->>M: Persist safe memory
+    A-->>C: Reply + tool metadata + trace
+```
+
+典型步骤：
+
+1. API 层接收请求，完成鉴权、会话读取和上下文组装。
+2. Memory Manager 注入相关历史记忆和近期对话。
+3. Planner 基于用户意图生成结构化 `AgentPlan`，并判断是否需要工具。
+4. Executor 按计划调用工具，工具统一通过 `ToolRegistry` 执行。
+5. 搜索类任务会进入 Web Search -> Read Webpage -> Summarize 的研究工作流。
+6. LLM 接收用户输入、历史上下文和工具观察结果，生成最终回答。
+7. API 返回回答、工具元数据和 Agent Trace，流式接口则持续推送状态事件。
+
+## 目录结构
 
 ```text
 .
-├── app
-│   ├── api
-│   │   └── chat.py
-│   ├── core
-│   │   ├── config.py
-│   │   ├── errors.py
-│   │   └── logger.py
-│   ├── mcp
-│   │   ├── client.py
-│   │   ├── config.py
-│   │   ├── manager.py
-│   │   ├── router.py
-│   │   ├── schema.py
-│   │   └── servers.json
-│   ├── schemas
-│   │   └── chat.py
-│   ├── services
-│   │   ├── conversation_store.py
-│   │   └── dashscope_agent.py
-│   └── tools
-│       ├── base.py
-│       ├── calculator.py
-│       ├── mcp_tool.py
-│       ├── summarize_text.py
-│       ├── time_tool.py
-│       ├── tool_manager.py
-│       ├── web_reader.py
-│       └── web_search.py
-├── frontend
-│   ├── index.html
-│   ├── main.js
-│   └── style.css
-├── scripts
-│   ├── add_mcp_server.py
-│   ├── list_mcp_tools.py
-│   ├── test_mcp_connection.py
-│   ├── test_mcp_server.py
-│   └── test_mcp_tool_call.py
-├── .env.example
-├── main.py
+├── backend/
+│   └── app/
+│       ├── main.py                 # FastAPI application factory and runtime entry
+│       ├── api/                    # HTTP routes: auth, chat, documents, mcp
+│       ├── core/                   # config, logging, exceptions, safe logging
+│       ├── agent/                  # planner, executor, reactor, reflector, state
+│       ├── tools/                  # tool base, registry, web search, webpage reader
+│       ├── memory/                 # short memory, long memory, memory manager
+│       ├── services/               # orchestration, LLM client, stores, workflows
+│       ├── schemas/                # request and response schemas
+│       ├── config/                 # settings exports
+│       ├── mcp/                    # MCP client, manager, router and server config
+│       └── workflow/               # reusable workflow graph and research workflow
+├── app/                            # backward-compatible import namespace
+├── frontend/                       # local web UI
+├── scripts/                        # MCP and search test utilities
+├── tests/                          # unit and API tests
+├── alembic/                        # database migrations
+├── main.py                         # compatibility entry for uvicorn main:app
 ├── requirements.txt
+├── pyproject.toml
 └── README.md
 ```
 
-## 接口说明
+## 快速开始
 
-### `GET /`
-
-健康检查接口。
-
-响应示例：
-
-```json
-{
-  "status": "ok",
-  "message": "DashScope Agent is running"
-}
-```
-
-### Auth 接口
-
-- `POST /auth/register`：注册用户，成功后返回 JWT token。
-- `POST /auth/login`：登录用户，成功后返回 JWT token。
-- `GET /auth/me`：读取当前登录用户，需要 `Authorization: Bearer <token>`；当 `AUTH_ENABLED=false` 时返回开发用户。
-
-启用 `AUTH_ENABLED=true` 后，`/chat`、`/chat/stream` 和 `/conversations` 相关接口都需要携带 JWT。会话历史会按 `user_id + conversation_id` 隔离，避免不同用户访问到彼此的同名会话。
-
-### `POST /chat`
-
-普通聊天接口，一次性返回完整回复。
-
-请求体字段：
-
-| 字段 | 类型 | 必填 | 说明 |
-| --- | --- | --- | --- |
-| `message` | string | 是 | 用户输入内容 |
-| `system_prompt` | string | 否 | 自定义 system prompt，不传则使用默认中文助手提示词 |
-| `model` | string | 否 | 指定 DashScope 模型，不传则使用 `.env` 中的默认模型 |
-| `conversation_id` | string | 否 | 会话 ID，不传则后端自动生成 |
-| `max_context_rounds` | number | 否 | 本次请求最多携带的历史轮数，范围为 0 到 30 |
-
-请求示例：
-
-```bash
-curl -X POST "http://127.0.0.1:8000/chat" \
-  -H "Content-Type: application/json" \
-  -d "{\"message\":\"帮我计算 23 * 17 + 8 等于多少\"}"
-```
-
-响应示例：
-
-```json
-{
-  "success": true,
-  "reply": "23 * 17 + 8 的计算结果是 399。",
-  "model": "qwen-plus",
-  "conversation_id": "example-conversation-id",
-  "used_tool": true,
-  "tool_name": "calculate",
-  "tool_status": "success",
-  "tool_result": {
-    "expression": "23 * 17 + 8",
-    "value": 399
-  },
-  "tool_error": null,
-  "tool_duration_ms": 1.23
-}
-```
-
-### `POST /chat/stream`
-
-流式聊天接口，使用 Server-Sent Events 返回状态、元数据、文本片段和完成事件。前端页面默认使用该接口，以获得逐字输出体验。
-
-事件类型包括：
-
-- `status`：工具或联网搜索阶段提示
-- `metadata`：模型、会话和工具调用元信息
-- `chunk`：模型生成的文本片段
-- `done`：回复完成
-- `error`：异常信息
-
-### `GET /ui`
-
-返回本地聊天前端页面。
-
-### `GET /docs`
-
-FastAPI 自动生成的接口文档页面。
-
-## 本地运行
-
-### 1. 创建并激活虚拟环境
+### 1. 创建虚拟环境
 
 Windows:
 
@@ -224,28 +150,13 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-如需在本地执行代码检查和测试，再安装开发工具：
+开发和测试依赖：
 
 ```bash
-pip install ruff pytest mypy
+pip install pytest ruff mypy
 ```
 
-### 3. 本地代码检查和测试
-
-```bash
-ruff check .
-pytest
-```
-
-可选执行类型检查：
-
-```bash
-mypy app main.py
-```
-
-### 4. 配置环境变量
-
-Windows:
+### 3. 配置环境变量
 
 ```bash
 copy .env.example .env
@@ -257,68 +168,35 @@ macOS / Linux:
 cp .env.example .env
 ```
 
-编辑 `.env`：
+至少需要配置：
 
 ```env
-DASHSCOPE_API_KEY=your_dashscope_api_key_here
-DASHSCOPE_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
-DASHSCOPE_MODEL=qwen-plus
-MODEL_TIMEOUT_SECONDS=30
-CORS_ALLOW_ORIGINS=http://127.0.0.1:8000,http://localhost:8000
-CONVERSATION_STORE=memory
-CONVERSATION_DB_PATH=data/conversations.db
+API_KEY=your_model_api_key_here
+BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
+MODEL_NAME=qwen-plus
 AUTH_ENABLED=false
-AUTH_DB_PATH=data/auth.db
-AUTH_JWT_SECRET=change-this-local-development-secret
-AUTH_TOKEN_EXPIRE_MINUTES=1440
-AUTO_OPEN_BROWSER=true
-TAVILY_API_KEY=your_tavily_api_key_here
-WEB_SEARCH_PROVIDER=tavily
-WEB_SEARCH_TIMEOUT_SECONDS=5
-WEB_READER_TIMEOUT_SECONDS=5
-SEARCH_WORKFLOW_READ_TOP_K=2
-MCP_ENABLED=true
-MCP_DEFAULT_SERVER=modelscope
-MODELSCOPE_API_TOKEN=
-MODELSCOPE_MCP_URL=http://127.0.0.1:8001/mcp
-TOOL_TIMEOUT_SECONDS=20
 ```
 
-主要配置说明：
+如果需要联网搜索，还需要配置：
 
-- `DASHSCOPE_API_KEY`：DashScope API Key，必填，不要提交到 GitHub。
-- `DASHSCOPE_BASE_URL`：DashScope OpenAI 兼容模式接口地址。
-- `DASHSCOPE_MODEL`：默认模型名称，例如 `qwen-plus`。
-- `MODEL_TIMEOUT_SECONDS`：模型请求超时时间，单位为秒；兼容旧配置名 `DASHSCOPE_TIMEOUT_SECONDS`。
-- `CORS_ALLOW_ORIGINS`：允许跨域访问的来源，多个地址用英文逗号分隔；不配置时不会使用 `*`，默认只允许 `http://127.0.0.1:8000` 和 `http://localhost:8000`。
-- `CONVERSATION_STORE`：会话存储方式，可选 `memory` 或 `sqlite`；默认 `memory`，保持原有内存会话行为。
-- `CONVERSATION_DB_PATH`：SQLite 会话数据库路径，仅在 `CONVERSATION_STORE=sqlite` 时使用，默认 `data/conversations.db`。
-- `AUTH_ENABLED`：是否启用登录鉴权；本地调试可设为 `false`，接口会使用开发用户。
-- `AUTH_DB_PATH`：用户表 `users` 所在 SQLite 数据库路径，默认 `data/auth.db`。
-- `AUTH_JWT_SECRET`：JWT 签名密钥，生产环境请替换为足够随机的私密字符串。
-- `AUTH_TOKEN_EXPIRE_MINUTES`：JWT 过期时间，单位为分钟，默认 `1440`。
-- `AUTO_OPEN_BROWSER`：直接运行 `python main.py` 时是否自动打开浏览器，默认 `true`；设置为 `false` 时只启动服务。
-- `TAVILY_API_KEY`：Tavily Search API Key，使用联网搜索时需要配置。
-- `WEB_SEARCH_PROVIDER`：联网搜索提供商，当前代码使用 `tavily`。
-- `WEB_SEARCH_TIMEOUT_SECONDS`：联网搜索请求超时时间，单位为秒，默认 `5`。
-- `WEB_READER_TIMEOUT_SECONDS`：网页读取请求超时时间，单位为秒，默认 `5`。
-- `SEARCH_WORKFLOW_READ_TOP_K`：深度搜索问题最多读取的网页数量，默认 `2`。
-- `MCP_ENABLED`：是否注册 MCP 工具。
-- `MCP_DEFAULT_SERVER`：默认 MCP Server 名称。
-- `MODELSCOPE_MCP_URL`：ModelScope MCP Server 地址。
-- `TOOL_TIMEOUT_SECONDS`：工具相关请求超时时间，单位为秒；当前用于 MCP 连接和 MCP 工具调用，兼容旧配置名 `MCP_TIMEOUT_SECONDS`。
+```env
+SEARCH_API_KEY=your_tavily_api_key_here
+WEB_SEARCH_PROVIDER=tavily
+```
 
-### 5. 启动服务
+### 4. 启动服务
+
+推荐使用新的后端入口：
+
+```bash
+uvicorn backend.app.main:app --reload
+```
+
+兼容旧入口：
 
 ```bash
 uvicorn main:app --reload
 ```
-
-启动后访问：
-
-- 后端健康检查：<http://127.0.0.1:8000/>
-- API 文档：<http://127.0.0.1:8000/docs>
-- 前端页面：<http://127.0.0.1:8000/ui>
 
 也可以直接运行：
 
@@ -326,104 +204,332 @@ uvicorn main:app --reload
 python main.py
 ```
 
-## MCP 使用说明
+启动后访问：
 
-项目默认在 `app/mcp/servers.json` 中配置了 `modelscope` 服务：
+- Web UI: <http://127.0.0.1:8000/ui>
+- API Docs: <http://127.0.0.1:8000/docs>
+- Health Check: <http://127.0.0.1:8000/>
+
+### 5. 运行测试
+
+```bash
+pytest
+```
+
+或使用项目虚拟环境：
+
+```bash
+.venv\Scripts\python.exe -m pytest
+```
+
+## 环境变量说明
+
+| 变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `API_KEY` | - | 模型服务 API Key，兼容 `DASHSCOPE_API_KEY` |
+| `BASE_URL` | `https://dashscope.aliyuncs.com/compatible-mode/v1` | OpenAI-Compatible API 地址 |
+| `MODEL_NAME` | `qwen-plus` | 默认模型名称，兼容 `DASHSCOPE_MODEL` |
+| `MODEL_TIMEOUT_SECONDS` | `60` | 模型请求超时时间 |
+| `MAX_AGENT_STEPS` | `8` | 单次 Agent 计划最大步骤数 |
+| `CORS_ALLOW_ORIGINS` | `http://127.0.0.1:8000,http://localhost:8000` | 允许跨域来源 |
+| `CONVERSATION_STORE` | `memory` | 会话存储类型：`memory` 或 `sqlite` |
+| `CONVERSATION_DB_PATH` | `data/conversations.db` | SQLite 会话数据库路径 |
+| `CONVERSATION_DATABASE_URL` | - | SQLAlchemy 数据库 URL，可接 PostgreSQL/MySQL |
+| `CONVERSATION_MAX_ROUNDS` | `30` | 每个会话保留的最大轮数 |
+| `DOCUMENT_DB_PATH` | `data/documents.db` | 文档索引数据库路径 |
+| `DOCUMENT_UPLOAD_MAX_BYTES` | `5242880` | 文档上传大小限制 |
+| `AUTH_ENABLED` | `false` | 是否启用 JWT 鉴权 |
+| `AUTH_DB_PATH` | `data/auth.db` | 用户认证数据库路径 |
+| `AUTH_JWT_SECRET` | `change-this-local-development-secret` | JWT 签名密钥，生产环境必须替换 |
+| `AUTH_TOKEN_EXPIRE_MINUTES` | `1440` | JWT 有效期 |
+| `AUTH_DEV_USER_ID` | `__dev__` | 关闭鉴权时使用的开发用户 ID |
+| `AUTO_OPEN_BROWSER` | `true` | `python main.py` 启动时是否自动打开浏览器 |
+| `SEARCH_API_KEY` | - | Tavily 搜索 API Key，兼容 `TAVILY_API_KEY` |
+| `WEB_SEARCH_PROVIDER` | `tavily` | 搜索服务提供商 |
+| `WEB_SEARCH_TIMEOUT_SECONDS` | `5` | 搜索工具超时时间 |
+| `WEB_READER_TIMEOUT_SECONDS` | `5` | 网页读取工具超时时间 |
+| `SEARCH_WORKFLOW_READ_TOP_K` | `2` | 搜索工作流最多读取的网页数量 |
+| `MEMORY_PATH` | `data/memories.json` | 记忆 JSON 存储路径 |
+| `MEMORY_SEARCH_LIMIT` | `5` | 长期记忆检索数量 |
+| `MEMORY_RECENT_CONTEXT_LIMIT` | `6` | 注入模型的近期上下文数量 |
+| `MCP_ENABLED` | `true` | 是否启用 MCP 工具适配 |
+| `MCP_DEFAULT_SERVER` | `modelscope` | 默认 MCP Server 名称 |
+| `MODELSCOPE_API_TOKEN` | - | ModelScope 相关服务 Token |
+| `MODELSCOPE_MCP_URL` | `http://127.0.0.1:8001/mcp` | ModelScope MCP Server 地址 |
+| `TOOL_TIMEOUT_SECONDS` | `60` | 工具/MCP 请求超时时间，兼容 `MCP_TIMEOUT_SECONDS` |
+
+## Docker 部署
+
+如果项目中尚未提交 Dockerfile，可以使用下面的生产化基础模板。
+
+### Dockerfile
+
+```dockerfile
+FROM python:3.11-slim
+
+WORKDIR /app
+
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY . .
+
+EXPOSE 8000
+
+CMD ["uvicorn", "backend.app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+```
+
+### docker-compose.yml
+
+```yaml
+services:
+  agentos:
+    build: .
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    restart: unless-stopped
+```
+
+### 构建与启动
+
+```bash
+docker compose up --build -d
+```
+
+查看日志：
+
+```bash
+docker compose logs -f agentos
+```
+
+停止服务：
+
+```bash
+docker compose down
+```
+
+## API 示例
+
+### 健康检查
+
+```bash
+curl http://127.0.0.1:8000/
+```
+
+响应示例：
 
 ```json
 {
-  "modelscope": {
-    "name": "ModelScope MCP Server",
-    "transport": "http",
-    "url": "http://127.0.0.1:8001/mcp",
-    "enabled": true,
-    "description": "用于搜索魔搭模型、数据集、创空间、论文和 MCP 服务"
-  }
+  "status": "ok",
+  "message": "DashScope Agent is running"
 }
 ```
 
-如果需要使用 MCP 工具，需要先在本地启动对应 MCP Server。例如 ModelScope MCP Server 可监听在 `http://127.0.0.1:8001/mcp`，再启动本项目。
+### 用户注册与登录
 
-测试 MCP 连接：
-
-```bash
-python scripts/test_mcp_connection.py
-```
-
-查看 MCP 工具：
+当 `AUTH_ENABLED=true` 时，需要先注册或登录并携带 Bearer Token。
 
 ```bash
-python scripts/list_mcp_tools.py
+curl -X POST http://127.0.0.1:8000/auth/register \
+  -H "Content-Type: application/json" \
+  -d "{\"username\":\"alice\",\"password\":\"password123\"}"
 ```
-
-测试一次工具调用：
 
 ```bash
-python scripts/test_mcp_tool_call.py --server modelscope --tool search_models --arguments "{\"query\":\"Qwen\"}"
+curl -X POST http://127.0.0.1:8000/auth/login \
+  -H "Content-Type: application/json" \
+  -d "{\"username\":\"alice\",\"password\":\"password123\"}"
 ```
 
-工具名称请以 `scripts/list_mcp_tools.py` 或 `scripts/test_mcp_server.py` 的输出为准。
+### 普通聊天
 
-## Agent 工具调用流程
-
-当前项目使用轻量级规则进行工具规划，主要流程是：
-
-1. FastAPI 接收用户消息，并通过 `ConversationStore` 读取历史上下文。
-2. `DashScopeAgent` 根据最新用户输入判断是否需要工具。
-3. 如果是时间、计算、总结、联网搜索或 ModelScope 相关问题，Agent 会生成对应工具调用计划。
-4. `ToolManager` 执行工具，并记录日志、耗时、成功状态或错误信息。
-5. Agent 将工具结果追加到模型上下文。
-6. DashScope 生成最终中文回复。
-7. 后端将回复和工具元信息返回给前端，前端负责展示。
-
-需要说明的是，当前工具选择主要依赖规则和关键词判断，并非模型原生 Function Calling / Tool Calling。这种实现简单直接，便于展示 Agent 的基础工程链路，也方便后续替换为更标准的工具调用机制。
-
-## 会话存储
-
-项目默认使用内存版 `ConversationStore`，不需要额外配置，服务重启后历史会话会丢失。
-
-如果希望在本地保留会话历史，可以在 `.env` 中切换为 SQLite：
-
-```env
-CONVERSATION_STORE=sqlite
-CONVERSATION_DB_PATH=data/conversations.db
+```bash
+curl -X POST http://127.0.0.1:8000/chat \
+  -H "Content-Type: application/json" \
+  -d "{\"message\":\"帮我计算 23 * 17 + 8 等于多少\",\"conversation_id\":\"demo\"}"
 ```
 
-启用 SQLite 后，项目启动时会自动创建 `data` 目录和 `conversation_messages` 表。接口层仍然使用同一套 `get_messages`、`append_exchange` 调用方式，不需要修改聊天接口。
+响应示例：
 
-## 项目亮点
-
-- **完整前后端闭环**：从浏览器输入、FastAPI 接口、Agent 处理到前端流式展示，形成可运行的最小闭环。
-- **清晰的分层结构**：接口层、服务层、工具层、配置层和前端资源相互独立，方便讲解和维护。
-- **可扩展工具系统**：通过 `ToolManager` 统一注册和调用工具，新增工具不需要改动接口层。
-- **基础 Agent 工作流**：实现了任务判断、工具调用、工具结果注入模型上下文、最终回答生成的基本流程。
-- **联网资料整理能力**：对于搜索类问题，支持先调用 Tavily，再按需读取网页正文，最后交给模型汇总。
-- **MCP 扩展入口**：支持把外部 MCP Server 暴露的能力包装成项目内工具。
-- **工程化细节**：包含配置管理、日志、异常封装、流式响应、请求参数校验和会话上下文控制。
-
-## 当前限制
-
-- 默认内存会话在服务重启后会丢失；如需本地持久化，可将 `CONVERSATION_STORE` 切换为 `sqlite`。
-- 工具规划以规则和关键词为主，复杂意图识别能力有限。
-- 联网搜索依赖 Tavily API Key，网页读取效果受目标网站结构和访问限制影响。
-- MCP 工具需要外部 MCP Server 正常启动后才能使用。
-- 当前项目未内置用户登录、多用户隔离、数据库持久化和完整自动化测试。
-
-## 后续优化方向
-
-- 接入模型原生 Function Calling / Tool Calling，替代当前规则式工具选择。
-- 将会话历史迁移到 SQLite、PostgreSQL 或 Redis，实现持久化存储。
-- 增加用户登录与多用户会话隔离。
-- 为工具调用增加更完整的执行轨迹，例如 tool call id、参数脱敏、耗时统计和前端时间线展示。
-- 补充单元测试和接口测试，覆盖工具执行、异常处理、流式输出和会话上下文。
-- 增加 Dockerfile 和 Docker Compose，简化部署流程。
-- 优化前端体验，例如会话搜索、消息重新生成、工具调用详情展开。
-- 扩展更多实用工具，例如知识库检索、文件总结、数据库查询等。
-
-## 简历描述参考
-
-可以在简历中这样描述本项目：
-
-```text
-基于 FastAPI 和 DashScope OpenAI 兼容接口实现轻量级 Agent 对话应用，支持多轮会话、流式输出、规则式工具规划、Tavily 联网搜索、网页正文读取和 MCP 工具接入。项目通过 ConversationStore 管理上下文，通过 ToolManager 统一封装工具注册、调用、日志和异常隔离，并使用原生 HTML/CSS/JavaScript 实现可交互聊天前端。
+```json
+{
+  "success": true,
+  "reply": "23 * 17 + 8 = 399。",
+  "model": "qwen-plus",
+  "conversation_id": "demo",
+  "used_tool": true,
+  "tool_name": "calculate",
+  "tool_status": "success",
+  "tool_result": {
+    "expression": "23 * 17 + 8",
+    "value": 399
+  },
+  "tool_error": null,
+  "tool_duration_ms": 1.24,
+  "trace": []
+}
 ```
+
+### 流式聊天
+
+```bash
+curl -N -X POST http://127.0.0.1:8000/chat/stream \
+  -H "Content-Type: application/json" \
+  -d "{\"message\":\"搜索 qwen-plus 的最新资料并总结\",\"conversation_id\":\"research-demo\"}"
+```
+
+SSE 事件类型包括：
+
+- `status`：工具调用、联网搜索、网页读取等阶段状态。
+- `metadata`：模型、会话、工具和 trace 元数据。
+- `chunk`：模型生成的文本片段。
+- `done`：回答完成事件。
+- `error`：异常事件。
+
+### 会话管理
+
+```bash
+curl http://127.0.0.1:8000/conversations
+```
+
+```bash
+curl http://127.0.0.1:8000/conversations/demo/messages
+```
+
+```bash
+curl -X DELETE http://127.0.0.1:8000/conversations/demo
+```
+
+### 文档问答
+
+```bash
+curl -X POST http://127.0.0.1:8000/documents/upload \
+  -F "file=@notes.txt"
+```
+
+```bash
+curl -X POST http://127.0.0.1:8000/documents/{document_id}/ask \
+  -H "Content-Type: application/json" \
+  -d "{\"question\":\"总结这份文档的关键结论\"}"
+```
+
+### MCP 健康检查
+
+```bash
+curl http://127.0.0.1:8000/mcp/health
+```
+
+## Agent Trace 示例
+
+AgentOS 会将关键执行阶段序列化为稳定的 trace，便于前端展示、日志分析和问题排查。
+
+```json
+[
+  {
+    "step": "planner",
+    "status": "success",
+    "message": "Selected tool: web_search.",
+    "tool_name": "web_search",
+    "duration_ms": 2.18,
+    "metadata": {
+      "route_score": 90,
+      "route_reason": "检测到最新/搜索/官网/github等关键词",
+      "plan": {
+        "question": "搜索 qwen-plus 的最新资料并总结",
+        "steps": [
+          {
+            "step_id": "tool_1",
+            "description": "Call the web_search tool with the planned arguments.",
+            "tool_name": "web_search",
+            "tool_args": {
+              "query": "搜索 qwen-plus 的最新资料并总结",
+              "max_results": 3,
+              "search_depth": "basic"
+            },
+            "depends_on": []
+          },
+          {
+            "step_id": "final_answer",
+            "description": "Generate the final answer from the available context and tool result.",
+            "tool_name": null,
+            "tool_args": {},
+            "depends_on": ["tool_1"]
+          }
+        ]
+      }
+    }
+  },
+  {
+    "step": "tool_call",
+    "status": "success",
+    "message": "Tool call finished: web_search",
+    "tool_name": "web_search",
+    "duration_ms": 482.31,
+    "metadata": {
+      "tool_args": {
+        "query": "搜索 qwen-plus 的最新资料并总结",
+        "max_results": 3,
+        "search_depth": "basic"
+      }
+    }
+  },
+  {
+    "step": "observation",
+    "status": "success",
+    "message": "Observed tool result.",
+    "tool_name": "web_search",
+    "observation": {
+      "name": "web_search",
+      "success": true,
+      "result": {
+        "query": "搜索 qwen-plus 的最新资料并总结",
+        "results": [
+          {
+            "title": "Example Result",
+            "url": "https://example.com",
+            "content": "Search result snippet..."
+          }
+        ]
+      },
+      "duration_ms": 482.31
+    }
+  },
+  {
+    "step": "final_answer",
+    "status": "success",
+    "duration_ms": 1320.52
+  }
+]
+```
+
+Trace 中常见字段：
+
+| 字段 | 说明 |
+| --- | --- |
+| `step` | 执行阶段，例如 `planner`、`tool_call`、`observation`、`final_answer` |
+| `status` | 阶段状态：`running`、`success`、`failed`、`skipped` |
+| `tool_name` | 当前阶段关联的工具名称 |
+| `duration_ms` | 阶段耗时 |
+| `metadata` | 计划、路由原因、工具参数等调试信息 |
+| `observation` | 工具执行结果或执行观察 |
+
+## 后续规划 Roadmap
+
+- [ ] 支持模型原生 Function Calling / Tool Calling，并保留当前规则路由作为 fallback。
+- [ ] 引入向量数据库，增强长期记忆和知识库检索能力。
+- [ ] 为 Agent Trace 增加持久化检索、前端时间线和失败重放能力。
+- [ ] 将 ToolRegistry 扩展为插件化工具市场，支持动态加载和权限控制。
+- [ ] 支持多 Agent 协作编排，包括 researcher、coder、reviewer 等专业角色。
+- [ ] 增加任务队列和后台执行模式，支持长任务、异步回调和定时任务。
+- [ ] 完善 Dockerfile、Compose、健康检查和生产部署配置。
+- [ ] 增加 OpenTelemetry 指标、结构化日志和链路追踪。
+- [ ] 扩展文档问答能力，支持 PDF、DOCX、Markdown 和多文件知识库。
+- [ ] 增强安全策略，包括工具沙箱、参数脱敏、速率限制和用户级权限。

@@ -56,7 +56,13 @@ def test_chat_requires_auth_when_enabled(monkeypatch, tmp_path):
     response = client.post("/chat", json={"message": "hello"})
 
     assert response.status_code == 401
-    assert response.json()["error_code"] == "AUTH_REQUIRED"
+    assert response.json() == {
+        "success": False,
+        "error": {
+            "code": "AUTH_REQUIRED",
+            "message": "Authentication required.",
+        },
+    }
 
 
 def test_auth_disabled_uses_dev_user(monkeypatch, tmp_path):
@@ -91,7 +97,13 @@ def test_documents_require_auth(monkeypatch, tmp_path):
     response = client.get("/documents")
 
     assert response.status_code == 401
-    assert response.json()["error_code"] == "AUTH_REQUIRED"
+    assert response.json() == {
+        "success": False,
+        "error": {
+            "code": "AUTH_REQUIRED",
+            "message": "Authentication required.",
+        },
+    }
 
 
 def test_documents_are_scoped_by_user(tmp_path):

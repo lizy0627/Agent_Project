@@ -9,8 +9,11 @@ if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
 
 from app.core.config import get_settings
-from app.core.logger import setup_logging
+from app.core.logger import get_logger, setup_logging
 from app.services.dashscope_agent import DashScopeAgent
+
+
+logger = get_logger(__name__)
 
 
 USER_MESSAGE = "请使用 MCP fetch 工具抓取 https://docs.python.org/3/tutorial/"
@@ -21,19 +24,19 @@ def print_diagnostics(agent: DashScopeAgent, user_message: str, planned: Any) ->
     summarize_result = agent._extract_text_to_summarize(user_message)
     web_search_result = agent._looks_like_search_request(user_message)
 
-    print("user_message=", user_message)
-    print("route结果=", pformat(route_result))
-    print("summarize结果=", summarize_result)
-    print("web_search结果=", web_search_result)
+    logger.info("user_message=%s", user_message)
+    logger.info("route_result=%s", pformat(route_result))
+    logger.info("summarize_result=%s", summarize_result)
+    logger.info("web_search_result=%s", web_search_result)
 
     if planned is None:
-        print("reason=", "_plan_tool_call returned None")
+        logger.info("reason=%s", "_plan_tool_call returned None")
     elif getattr(planned, "name", None) != "mcp_tool":
-        print("reason=", f"_plan_tool_call selected {getattr(planned, 'name', None)!r}, expected 'mcp_tool'")
+        logger.info("reason=%s", f"_plan_tool_call selected {getattr(planned, 'name', None)!r}, expected 'mcp_tool'")
     elif planned.arguments.get("server_name") != "fetch":
-        print("reason=", f"server_name is {planned.arguments.get('server_name')!r}, expected 'fetch'")
+        logger.info("reason=%s", f"server_name is {planned.arguments.get('server_name')!r}, expected 'fetch'")
     elif planned.arguments.get("tool_name") != "fetch":
-        print("reason=", f"tool_name is {planned.arguments.get('tool_name')!r}, expected 'fetch'")
+        logger.info("reason=%s", f"tool_name is {planned.arguments.get('tool_name')!r}, expected 'fetch'")
 
 
 def main() -> None:
@@ -52,13 +55,13 @@ def main() -> None:
 
     planned = agent._plan_tool_call(messages)
     if planned is None:
-        print("name=", None)
-        print("arguments=", None)
+        logger.info("name=%s", None)
+        logger.info("arguments=%s", None)
         print_diagnostics(agent, USER_MESSAGE, planned)
         return
 
-    print("name=", planned.name)
-    print("arguments=", planned.arguments)
+    logger.info("name=%s", planned.name)
+    logger.info("arguments=%s", planned.arguments)
 
     if (
         planned.name != "mcp_tool"

@@ -8,6 +8,7 @@ from urllib.parse import urlsplit, urlunsplit
 import httpx
 
 from app.core.logger import get_logger
+from app.tools.base import BaseTool
 
 try:
     import trafilatura
@@ -167,11 +168,21 @@ class _ReadableHTMLParser(HTMLParser):
         return deduped
 
 
-class WebReaderTool:
+class WebReaderTool(BaseTool):
     """Fetch a web page and return readable text."""
 
     name = "web_reader"
     description = "Read a web page and extract readable text."
+    args_schema = {
+        "type": "object",
+        "properties": {
+            "url": {
+                "type": "string",
+                "description": "HTTP or HTTPS URL to read.",
+            },
+        },
+        "required": ["url"],
+    }
     default_timeout_seconds = 5.0
     max_content_chars = 3000
 
@@ -334,3 +345,10 @@ class WebReaderTool:
             while len(_WEB_READER_CACHE) > WEB_READER_CACHE_MAX_SIZE:
                 oldest_key = min(_WEB_READER_CACHE, key=lambda key: _WEB_READER_CACHE[key][0])
                 del _WEB_READER_CACHE[oldest_key]
+
+
+class ReadWebpageTool(WebReaderTool):
+    """Alias for WebReaderTool using the registry-facing read_webpage name."""
+
+    name = "read_webpage"
+    description = "Read a web page and extract readable text."

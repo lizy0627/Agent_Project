@@ -3,12 +3,24 @@ import math
 import operator
 from typing import Any
 
+from app.tools.base import BaseTool
 
-class CalculateTool:
+
+class CalculateTool(BaseTool):
     """Safely evaluate a mathematical expression with a small AST allowlist."""
 
     name = "calculate"
     description = "Safely calculate a mathematical expression."
+    args_schema = {
+        "type": "object",
+        "properties": {
+            "expression": {
+                "type": "string",
+                "description": "Mathematical expression to evaluate.",
+            },
+        },
+        "required": ["expression"],
+    }
     max_abs_value = 1e100
     max_power_exponent = 1000
 

@@ -10,6 +10,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, status
 from fastapi.responses import JSONResponse
 
 from app.core.config import Settings, get_settings
+from app.core.exceptions import AgentError, ErrorCode, error_response
 from app.schemas.auth import (
     AuthLoginRequest,
     AuthLogoutResponse,
@@ -218,18 +219,7 @@ def unauthorized() -> HTTPException:
 
 
 def auth_error(message: str, status_code: int) -> JSONResponse:
-    return JSONResponse(
-        status_code=status_code,
-        content={
-            "success": False,
-            "message": message,
-            "error_code": "AUTH_ERROR",
-            "error_message": message,
-            "retryable": False,
-            "error": {
-                "code": "AUTH_ERROR",
-                "message": message,
-                "retryable": False,
-            },
-        },
+    return error_response(
+        AgentError(message=message, code=ErrorCode.AUTH_ERROR, status_code=status_code),
+        message=message,
     )

@@ -10,7 +10,7 @@ from openai import (
 )
 
 from app.core.config import Settings
-from app.core.errors import (
+from app.core.exceptions import (
     ApiKeyInvalidError,
     ApiKeyMissingError,
     ModelNetworkError,
@@ -28,13 +28,13 @@ class LLMClient:
     """DashScope OpenAI-compatible client for blocking and streaming calls only."""
 
     def __init__(self, settings: Settings) -> None:
-        if not settings.dashscope_api_key:
+        if not settings.api_key:
             raise ApiKeyMissingError()
 
-        self.model = settings.dashscope_model
+        self.model = settings.model_name
         self.client = OpenAI(
-            api_key=settings.dashscope_api_key,
-            base_url=settings.dashscope_base_url,
+            api_key=settings.api_key,
+            base_url=settings.base_url,
             timeout=settings.dashscope_timeout_seconds,
         )
 

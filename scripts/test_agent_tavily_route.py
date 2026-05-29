@@ -8,9 +8,12 @@ if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
 
 from app.core.config import get_settings
-from app.core.logger import setup_logging
+from app.core.logger import get_logger, setup_logging
 from app.mcp.schema import MCPToolInfo
 from app.services.dashscope_agent import DashScopeAgent
+
+
+logger = get_logger(__name__)
 
 
 USER_MESSAGE = "请使用 Tavily 搜索今天AI新闻"
@@ -50,9 +53,9 @@ def main() -> None:
         ]
     )
 
-    print("name=", planned.name if planned else None)
-    print(
-        "arguments=",
+    logger.info("name=%s", planned.name if planned else None)
+    logger.info(
+        "arguments=%s",
         json.dumps(planned.arguments if planned else None, ensure_ascii=False, indent=2),
     )
 

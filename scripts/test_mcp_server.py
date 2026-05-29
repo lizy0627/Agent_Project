@@ -8,8 +8,11 @@ BASE_DIR = Path(__file__).resolve().parents[1]
 if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
 
-from app.core.logger import setup_logging
+from app.core.logger import get_logger, setup_logging
 from app.mcp.manager import MCPManager
+
+
+logger = get_logger(__name__)
 
 
 def main() -> None:
@@ -21,11 +24,15 @@ def main() -> None:
     manager = MCPManager()
     server = manager.get_server(args.server)
     if server is None:
-        print(json.dumps({"success": False, "error": f"Server not found: {args.server}"}, ensure_ascii=False, indent=2))
+        logger.info(
+            "%s",
+            json.dumps({"success": False, "error": f"Server not found: {args.server}"}, ensure_ascii=False, indent=2),
+        )
         return
 
     result = manager.client.list_tools(server)
-    print(
+    logger.info(
+        "%s",
         json.dumps(
             {
                 "server_name": server.key,

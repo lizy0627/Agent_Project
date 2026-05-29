@@ -1,14 +1,23 @@
 import argparse
 import json
 from pathlib import Path
+import sys
 from typing import Any
 
 
 BASE_DIR = Path(__file__).resolve().parents[1]
+if str(BASE_DIR) not in sys.path:
+    sys.path.insert(0, str(BASE_DIR))
+
+from app.core.logger import get_logger, setup_logging
+
+
 SERVERS_FILE = BASE_DIR / "app" / "mcp" / "servers.json"
+logger = get_logger(__name__)
 
 
 def main() -> None:
+    setup_logging()
     parser = argparse.ArgumentParser(description="Add or update an MCP server in app/mcp/servers.json.")
     parser.add_argument("--id", required=True, help="Server id, for example amap.")
     parser.add_argument("--name", required=True, help="Human-readable server name.")
@@ -38,7 +47,7 @@ def main() -> None:
         "category": args.category or None,
     }
     SERVERS_FILE.write_text(json.dumps(servers, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    print(f"Added MCP server `{server_id}` to {SERVERS_FILE}")
+    logger.info("Added MCP server `%s` to %s", server_id, SERVERS_FILE)
 
 
 def _read_servers() -> dict[str, Any]:

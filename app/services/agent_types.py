@@ -52,6 +52,7 @@ class AgentTraceStep:
     message: str | None = None
     duration_ms: float | None = None
     tool_name: str | None = None
+    observation: Any | None = None
     metadata: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
@@ -65,6 +66,8 @@ class AgentTraceStep:
             payload["message"] = self.message
         if self.tool_name is not None:
             payload["tool_name"] = self.tool_name
+        if self.observation is not None:
+            payload["observation"] = self.observation
         if self.duration_ms is not None:
             payload["duration_ms"] = self.duration_ms
         if self.metadata is not None:

@@ -9,8 +9,11 @@ BASE_DIR = Path(__file__).resolve().parents[1]
 if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
 
-from app.core.logger import setup_logging
+from app.core.logger import get_logger, setup_logging
 from app.mcp.manager import MCPManager
+
+
+logger = get_logger(__name__)
 
 
 def main() -> None:
@@ -24,7 +27,7 @@ def main() -> None:
     arguments = _parse_arguments(args.arguments)
     manager = MCPManager()
     result = manager.call_tool(args.server, args.tool, arguments)
-    print(json.dumps(result, ensure_ascii=False, indent=2))
+    logger.info("%s", json.dumps(result, ensure_ascii=False, indent=2))
 
 
 def _parse_arguments(raw: str) -> dict[str, Any]:

@@ -1,0 +1,41 @@
+"""Compatibility exports for older imports of app.core.errors."""
+
+from backend.app.core.exceptions import (
+    AgentError,
+    ApiKeyInvalidError,
+    ApiKeyMissingError,
+    AuthenticationRequiredError,
+    ErrorCode,
+    InvalidArgumentsError,
+    MCPServerUnavailableError,
+    MemoryError,
+    ModelNetworkError,
+    ModelProviderError,
+    ModelTimeoutError,
+    NotFoundError,
+    ToolExecutionError,
+    UnknownAgentError,
+    error_payload,
+    error_response,
+    public_error_message,
+)
+
+__all__ = [
+    "AgentError",
+    "ApiKeyInvalidError",
+    "ApiKeyMissingError",
+    "AuthenticationRequiredError",
+    "ErrorCode",
+    "InvalidArgumentsError",
+    "MCPServerUnavailableError",
+    "MemoryError",
+    "ModelNetworkError",
+    "ModelProviderError",
+    "ModelTimeoutError",
+    "NotFoundError",
+    "ToolExecutionError",
+    "UnknownAgentError",
+    "error_payload",
+    "error_response",
+    "public_error_message",
+]

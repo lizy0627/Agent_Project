@@ -1,6 +1,5 @@
 import json
 import sys
-import traceback
 from pathlib import Path
 from typing import Any
 
@@ -10,10 +9,11 @@ if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
 
 from app.core.config import get_settings
-from app.core.logger import setup_logging
+from app.core.logger import get_logger, setup_logging
 from app.mcp.manager import MCPManager
 
 
+logger = get_logger(__name__)
 SERVER_NAME = "fetch"
 PREFERRED_TOOL_NAME = "fetch"
 TEST_URL = "https://docs.python.org/3/tutorial/"
@@ -34,24 +34,24 @@ def main() -> None:
     tool_names = _tool_names(tools)
     tool_name = _select_fetch_tool_name(tool_names)
 
-    print("tools:")
+    logger.info("tools:")
     for name in tool_names:
-        print(f"- {name}")
+        logger.info("- %s", name)
     if tool_name != PREFERRED_TOOL_NAME:
-        print(f"selected_tool_name: {tool_name}")
+        logger.info("selected_tool_name: %s", tool_name)
 
     call_result = manager.call_tool(SERVER_NAME, tool_name, FETCH_ARGUMENTS)
     if not call_result.get("success"):
-        print("success: false")
-        print(f"error: {call_result.get('error') or call_result}")
+        logger.info("success: false")
+        logger.info("error: %s", call_result.get("error") or call_result)
         _raise_if_failed(call_result, f"call {tool_name} tool")
 
     text = _extract_text(call_result.get("data"))
-    print("success: true")
-    print("error:")
-    print(f"content_length: {len(text)}")
-    print("first_500_chars:")
-    print(text[:500])
+    logger.info("success: true")
+    logger.info("error:")
+    logger.info("content_length: %s", len(text))
+    logger.info("first_500_chars:")
+    logger.info("%s", text[:500])
 
 
 def _tool_names(tools: Any) -> list[str]:
@@ -104,5 +104,5 @@ if __name__ == "__main__":
     try:
         main()
     except Exception:
-        traceback.print_exc()
+        logger.exception("Fetch connection test failed")
         raise
