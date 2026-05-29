@@ -50,6 +50,7 @@ class Settings(BaseSettings):
     )
     conversation_store: str = "memory"
     conversation_db_path: Path = BASE_DIR / "data" / "conversations.db"
+    conversation_database_url: str | None = None
     document_db_path: Path = BASE_DIR / "data" / "documents.db"
     document_upload_max_bytes: int = 5 * 1024 * 1024
     auth_enabled: bool = True

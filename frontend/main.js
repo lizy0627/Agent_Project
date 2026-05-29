@@ -336,7 +336,11 @@ function initPage() {
   autoResizeInput();
   updateScrollToBottomButton();
   messageInput.focus();
-  void initializeAuth().then(() => loadDocuments());
+  void initializeAuth().then(() => {
+    if (isAuthenticated()) {
+      void loadDocuments();
+    }
+  });
 }
 
 // Conversation storage
@@ -458,6 +462,7 @@ function setAuthenticatedUser(user, token) {
 
   if (previousUserId && previousUserId !== currentUser.id) {
     resetLocalConversationState();
+    resetDocumentState();
   }
 
   hideAuthOverlay();
@@ -471,6 +476,7 @@ function clearAuthState({ resetConversations = true } = {}) {
   localStorage.removeItem(AUTH_USER_KEY);
   if (resetConversations) {
     resetLocalConversationState();
+    resetDocumentState();
   }
   updateAuthUi();
 }
@@ -566,6 +572,23 @@ async function fetchWithAuth(url, options = {}) {
   return response;
 }
 
+async function logoutCurrentUser() {
+  try {
+    if (authToken) {
+      await fetchWithAuth(`${AUTH_API_URL}/logout`, {
+        method: "POST",
+        headers: { Accept: "application/json" },
+        skipAuthRedirect: true,
+      });
+    }
+  } catch (error) {
+    console.warn("POST /auth/logout request error", error);
+  } finally {
+    clearAuthState();
+    showAuthOverlay("login", "Logged out.");
+  }
+}
+
 function resetLocalConversationState() {
   const keysToRemove = [];
   for (let index = 0; index < localStorage.length; index += 1) {
@@ -604,6 +627,13 @@ function resetLocalConversationState() {
   activeTrace = createEmptyTrace();
   renderAgentTrace();
   updateHeaderTitle();
+}
+
+function resetDocumentState() {
+  documents = [];
+  selectedDocumentId = "";
+  renderDocumentList();
+  updateInputState();
 }
 
 function loadMessages(id) {
@@ -3918,8 +3948,7 @@ settingsButton.addEventListener("click", () => {
 
 authButton.addEventListener("click", () => {
   if (currentUser) {
-    clearAuthState();
-    showAuthOverlay("login", "Logged out.");
+    void logoutCurrentUser();
     return;
   }
   showAuthOverlay("login");

@@ -12,6 +12,7 @@ from fastapi.responses import JSONResponse
 from app.core.config import Settings, get_settings
 from app.schemas.auth import (
     AuthLoginRequest,
+    AuthLogoutResponse,
     AuthMeResponse,
     AuthRegisterRequest,
     AuthTokenResponse,
@@ -112,6 +113,13 @@ def get_me(current_user: CurrentUser = Depends(get_current_user)) -> AuthMeRespo
     """Return the current user profile."""
 
     return AuthMeResponse(user=public_user(current_user))
+
+
+@router.post("/logout", response_model=AuthLogoutResponse)
+def logout(_: CurrentUser = Depends(get_current_user)) -> AuthLogoutResponse:
+    """Acknowledge logout for stateless JWT clients."""
+
+    return AuthLogoutResponse(message="Logged out.")
 
 
 def token_response(user: User, settings: Settings) -> AuthTokenResponse:
@@ -215,6 +223,9 @@ def auth_error(message: str, status_code: int) -> JSONResponse:
         content={
             "success": False,
             "message": message,
+            "error_code": "AUTH_ERROR",
+            "error_message": message,
+            "retryable": False,
             "error": {
                 "code": "AUTH_ERROR",
                 "message": message,

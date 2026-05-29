@@ -4,6 +4,7 @@ from fastapi.testclient import TestClient
 
 from app.core.config import get_settings
 from app.services.conversation_store import create_conversation_store
+from app.services.document_store import DocumentNotFoundError, DocumentStore
 
 
 def create_client(monkeypatch, tmp_path, auth_enabled: bool = True) -> TestClient:
@@ -43,6 +44,11 @@ def test_register_login_and_me(monkeypatch, tmp_path):
     assert me_response.status_code == 200
     assert me_response.json()["user"]["username"] == "alice"
 
+    logout_response = client.post("/auth/logout", headers={"Authorization": f"Bearer {token}"})
+
+    assert logout_response.status_code == 200
+    assert logout_response.json()["success"] is True
+
 
 def test_chat_requires_auth_when_enabled(monkeypatch, tmp_path):
     client = create_client(monkeypatch, tmp_path)
@@ -77,3 +83,34 @@ def test_conversations_are_scoped_by_user(tmp_path):
         {"role": "assistant", "content": "hi alice"},
     ]
     assert store.get_messages("shared", user_id="2") == []
+
+
+def test_documents_require_auth(monkeypatch, tmp_path):
+    client = create_client(monkeypatch, tmp_path)
+
+    response = client.get("/documents")
+
+    assert response.status_code == 401
+    assert response.json()["error_code"] == "AUTH_REQUIRED"
+
+
+def test_documents_are_scoped_by_user(tmp_path):
+    store = DocumentStore(tmp_path / "documents.db")
+
+    alice_document = store.create_document(
+        filename="notes.txt",
+        content_type="text/plain",
+        size_bytes=11,
+        text="hello alice",
+        user_id="1",
+    )
+
+    assert [document.id for document in store.list_documents(user_id="1")] == [alice_document.id]
+    assert store.list_documents(user_id="2") == []
+
+    try:
+        store.get_document(alice_document.id, user_id="2")
+    except DocumentNotFoundError:
+        pass
+    else:
+        raise AssertionError("Document should not be visible to another user.")

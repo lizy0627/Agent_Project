@@ -37,3 +37,10 @@ class AuthMeResponse(BaseModel):
 
     success: bool = True
     user: AuthUserResponse
+
+
+class AuthLogoutResponse(BaseModel):
+    """Response body returned after client-side logout."""
+
+    success: bool = True
+    message: str

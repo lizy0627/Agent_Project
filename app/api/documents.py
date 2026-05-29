@@ -3,6 +3,7 @@ from threading import Lock
 from fastapi import APIRouter, Depends, File, Path, UploadFile
 from fastapi.responses import JSONResponse
 
+from app.api.auth import CurrentUser, get_current_user
 from app.api.chat import get_agent, normalize_requested_model
 from app.core.config import Settings, get_settings
 from app.core.errors import InvalidArgumentsError, UnknownAgentError
@@ -52,6 +53,7 @@ def get_document_store(settings: Settings = Depends(get_settings)) -> DocumentSt
 @router.post("/upload", response_model=DocumentUploadResponse)
 async def upload_document(
     file: UploadFile = File(...),
+    current_user: CurrentUser = Depends(get_current_user),
     settings: Settings = Depends(get_settings),
     store: DocumentStore = Depends(get_document_store),
 ) -> DocumentUploadResponse | JSONResponse:
@@ -72,6 +74,7 @@ async def upload_document(
             content_type=content_type,
             size_bytes=len(data),
             text=text,
+            user_id=current_user.user_id,
         )
         return DocumentUploadResponse(document=document_summary(document))
     except DocumentValidationError as exc:
@@ -86,12 +89,15 @@ async def upload_document(
 
 @router.get("", response_model=DocumentListResponse)
 @router.get("/", response_model=DocumentListResponse, include_in_schema=False)
-def list_documents(store: DocumentStore = Depends(get_document_store)) -> DocumentListResponse | JSONResponse:
+def list_documents(
+    current_user: CurrentUser = Depends(get_current_user),
+    store: DocumentStore = Depends(get_document_store),
+) -> DocumentListResponse | JSONResponse:
     """Return uploaded documents."""
 
     try:
         return DocumentListResponse(
-            documents=[document_summary(document) for document in store.list_documents()],
+            documents=[document_summary(document) for document in store.list_documents(user_id=current_user.user_id)],
         )
     except Exception:
         logger.exception("Unhandled document list error")
@@ -101,6 +107,7 @@ def list_documents(store: DocumentStore = Depends(get_document_store)) -> Docume
 @router.delete("/{document_id}", response_model=DocumentDeleteResponse)
 def delete_document(
     document_id: str = Path(..., min_length=1, max_length=100),
+    current_user: CurrentUser = Depends(get_current_user),
     store: DocumentStore = Depends(get_document_store),
 ) -> DocumentDeleteResponse | JSONResponse:
     """Delete one document and its chunks."""
@@ -109,7 +116,7 @@ def delete_document(
         clean_document_id = document_id.strip()
         if not clean_document_id:
             return invalid_document_response("document_id 不能为空。")
-        store.delete_document(clean_document_id)
+        store.delete_document(clean_document_id, user_id=current_user.user_id)
         return DocumentDeleteResponse(document_id=clean_document_id, message="文档已删除")
     except DocumentNotFoundError:
         return document_not_found_response()
@@ -122,6 +129,7 @@ def delete_document(
 def ask_document(
     request: DocumentAskRequest,
     document_id: str = Path(..., min_length=1, max_length=100),
+    current_user: CurrentUser = Depends(get_current_user),
     store: DocumentStore = Depends(get_document_store),
     agent: DashScopeAgent = Depends(get_agent),
 ) -> DocumentAskResponse | JSONResponse:
@@ -132,8 +140,13 @@ def ask_document(
         if not clean_document_id:
             return invalid_document_response("document_id 不能为空。")
 
-        document = store.get_document(clean_document_id)
-        chunks = store.search_chunks(clean_document_id, request.question, top_k=request.top_k)
+        document = store.get_document(clean_document_id, user_id=current_user.user_id)
+        chunks = store.search_chunks(
+            clean_document_id,
+            request.question,
+            top_k=request.top_k,
+            user_id=current_user.user_id,
+        )
         prompt = build_document_prompt(request.question, document, chunks)
         requested_model = normalize_requested_model(request.model)
         reply = agent.chat(

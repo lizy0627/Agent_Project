@@ -80,12 +80,39 @@ class ConversationClearResponse(BaseModel):
     message: str
 
 
+class ConversationSummary(BaseModel):
+    """One conversation item in the paginated list."""
+
+    id: str
+    user_id: str
+    title: str
+    last_message_summary: str
+    message_count: int
+    created_at: str
+    updated_at: str
+
+
+class ConversationListResponse(BaseModel):
+    """Response body returned when reading the current user's conversations."""
+
+    success: bool = True
+    conversations: list[ConversationSummary]
+    total: int
+    limit: int
+    offset: int
+    has_more: bool
+
+
 class ConversationMessagesResponse(BaseModel):
     """Response body returned when reading one conversation history."""
 
     success: bool = True
     conversation_id: str
     messages: list[dict[str, str]]
+    total: int | None = None
+    limit: int | None = None
+    offset: int | None = None
+    has_more: bool | None = None
 
 
 class ErrorResponse(BaseModel):

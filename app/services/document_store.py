@@ -9,6 +9,7 @@ from app.core.logger import get_logger
 
 
 logger = get_logger(__name__)
+DEFAULT_DOCUMENT_USER_ID = "__dev__"
 
 TEXT_CONTENT_TYPES = {
     "text/plain",
@@ -62,27 +63,29 @@ class DocumentStore:
         self._configure_connection()
         self._initialize_database()
 
-    def list_documents(self) -> list[StoredDocument]:
+    def list_documents(self, user_id: str = DEFAULT_DOCUMENT_USER_ID) -> list[StoredDocument]:
         with self._lock:
             rows = self._connection.execute(
                 """
                 SELECT id, filename, content_type, size_bytes, chunk_count, created_at
                 FROM documents
+                WHERE user_id = ?
                 ORDER BY created_at DESC
-                """
+                """,
+                (user_id,),
             ).fetchall()
 
         return [self._row_to_document(row) for row in rows]
 
-    def get_document(self, document_id: str) -> StoredDocument:
+    def get_document(self, document_id: str, user_id: str = DEFAULT_DOCUMENT_USER_ID) -> StoredDocument:
         with self._lock:
             row = self._connection.execute(
                 """
                 SELECT id, filename, content_type, size_bytes, chunk_count, created_at
                 FROM documents
-                WHERE id = ?
+                WHERE id = ? AND user_id = ?
                 """,
-                (document_id,),
+                (document_id, user_id),
             ).fetchone()
 
         if row is None:
@@ -95,6 +98,7 @@ class DocumentStore:
         content_type: str,
         size_bytes: int,
         text: str,
+        user_id: str = DEFAULT_DOCUMENT_USER_ID,
     ) -> StoredDocument:
         chunks = split_text_into_chunks(text)
         if not chunks:
@@ -105,10 +109,10 @@ class DocumentStore:
         with self._lock, self._connection:
             self._connection.execute(
                 """
-                INSERT INTO documents (id, filename, content_type, size_bytes, chunk_count)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO documents (id, user_id, filename, content_type, size_bytes, chunk_count)
+                VALUES (?, ?, ?, ?, ?, ?)
                 """,
-                (document_id, clean_filename, content_type, size_bytes, len(chunks)),
+                (document_id, user_id, clean_filename, content_type, size_bytes, len(chunks)),
             )
             self._connection.executemany(
                 """
@@ -125,21 +129,27 @@ class DocumentStore:
             size_bytes,
             len(chunks),
         )
-        return self.get_document(document_id)
+        return self.get_document(document_id, user_id=user_id)
 
-    def delete_document(self, document_id: str) -> None:
+    def delete_document(self, document_id: str, user_id: str = DEFAULT_DOCUMENT_USER_ID) -> None:
         with self._lock, self._connection:
             cursor = self._connection.execute(
-                "DELETE FROM documents WHERE id = ?",
-                (document_id,),
+                "DELETE FROM documents WHERE id = ? AND user_id = ?",
+                (document_id, user_id),
             )
 
         if cursor.rowcount == 0:
             raise DocumentNotFoundError(document_id)
         logger.info("Document deleted: id=%s", document_id)
 
-    def search_chunks(self, document_id: str, question: str, top_k: int = 5) -> list[DocumentChunk]:
-        self.get_document(document_id)
+    def search_chunks(
+        self,
+        document_id: str,
+        question: str,
+        top_k: int = 5,
+        user_id: str = DEFAULT_DOCUMENT_USER_ID,
+    ) -> list[DocumentChunk]:
+        self.get_document(document_id, user_id=user_id)
         terms = extract_search_terms(question)
         with self._lock:
             rows = self._connection.execute(
@@ -184,6 +194,7 @@ class DocumentStore:
                 """
                 CREATE TABLE IF NOT EXISTS documents (
                     id TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL DEFAULT '__dev__',
                     filename TEXT NOT NULL,
                     content_type TEXT NOT NULL,
                     size_bytes INTEGER NOT NULL,
@@ -192,6 +203,7 @@ class DocumentStore:
                 )
                 """
             )
+            self._ensure_document_user_id_column()
             self._connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS document_chunks (
@@ -206,10 +218,22 @@ class DocumentStore:
             )
             self._connection.execute(
                 """
+                CREATE INDEX IF NOT EXISTS idx_documents_user_created_at
+                ON documents (user_id, created_at DESC)
+                """
+            )
+            self._connection.execute(
+                """
                 CREATE INDEX IF NOT EXISTS idx_document_chunks_document_id_index
                 ON document_chunks (document_id, chunk_index)
                 """
             )
+
+    def _ensure_document_user_id_column(self) -> None:
+        columns = {row["name"] for row in self._connection.execute("PRAGMA table_info(documents)").fetchall()}
+        if "user_id" in columns:
+            return
+        self._connection.execute("ALTER TABLE documents ADD COLUMN user_id TEXT NOT NULL DEFAULT '__dev__'")
 
     def _row_to_document(self, row: sqlite3.Row) -> StoredDocument:
         return StoredDocument(

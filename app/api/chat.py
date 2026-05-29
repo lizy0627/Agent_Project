@@ -4,7 +4,7 @@ from threading import Lock, Thread
 from time import perf_counter
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, Path
+from fastapi import APIRouter, Depends, Path, Query
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from app.api.auth import CurrentUser, get_current_user
@@ -15,6 +15,7 @@ from app.schemas.chat import (
     ChatRequest,
     ChatResponse,
     ConversationClearResponse,
+    ConversationListResponse,
     ConversationMessagesResponse,
     ErrorDetail,
     ErrorResponse,
@@ -45,7 +46,7 @@ cached_agent_signature: tuple[
     int,
 ] | None = None
 cached_conversation_store: ConversationStoreProtocol | None = None
-cached_conversation_store_signature: tuple[str, str, int] | None = None
+cached_conversation_store_signature: tuple[str, str, str | None, int] | None = None
 DEFAULT_SYSTEM_PROMPT = "\u4f60\u662f\u4e00\u4e2a\u7b80\u6d01\u3001\u53ef\u9760\u7684\u4e2d\u6587 AI \u52a9\u624b\u3002"
 ALLOWED_CHAT_MODELS = {"qwen-plus", "qwen-turbo", "qwen-max"}
 WEB_SEARCH_STATUS_SEARCHING = "正在联网搜索..."
@@ -126,6 +127,7 @@ def get_conversation_store(settings: Settings = Depends(get_settings)) -> Conver
     signature = (
         settings.conversation_store,
         str(settings.conversation_db_path),
+        settings.conversation_database_url,
         max_rounds,
     )
     with store_lock:
@@ -134,6 +136,7 @@ def get_conversation_store(settings: Settings = Depends(get_settings)) -> Conver
                 store_type=settings.conversation_store,
                 db_path=settings.conversation_db_path,
                 max_rounds=max_rounds,
+                database_url=settings.conversation_database_url,
             )
             cached_conversation_store_signature = signature
             logger.info(
@@ -153,9 +156,30 @@ def health_check() -> dict[str, str]:
     return {"status": "ok", "message": "DashScope Agent is running"}
 
 
+@router.get("/conversations", response_model=ConversationListResponse)
+def list_conversations(
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+    current_user: CurrentUser = Depends(get_current_user),
+    store: ConversationStoreProtocol = Depends(get_conversation_store),
+) -> ConversationListResponse:
+    """Return paginated conversations owned by the current user."""
+
+    page = store.list_conversations(user_id=current_user.user_id, limit=limit, offset=offset)
+    return ConversationListResponse(
+        conversations=[conversation.__dict__ for conversation in page.conversations],
+        total=page.total,
+        limit=page.limit,
+        offset=page.offset,
+        has_more=page.has_more,
+    )
+
+
 @router.get("/conversations/{conversation_id}/messages", response_model=ConversationMessagesResponse)
 def get_conversation_messages(
     conversation_id: str = Path(..., min_length=1, max_length=100),
+    limit: int = Query(default=60, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
     current_user: CurrentUser = Depends(get_current_user),
     store: ConversationStoreProtocol = Depends(get_conversation_store),
 ) -> ConversationMessagesResponse:
@@ -165,9 +189,19 @@ def get_conversation_messages(
     if not clean_conversation_id:
         raise InvalidArgumentsError()
 
+    page = store.get_message_page(
+        clean_conversation_id,
+        user_id=current_user.user_id,
+        limit=limit,
+        offset=offset,
+    )
     return ConversationMessagesResponse(
         conversation_id=clean_conversation_id,
-        messages=store.get_messages(clean_conversation_id, user_id=current_user.user_id),
+        messages=page.messages,
+        total=page.total,
+        limit=page.limit,
+        offset=page.offset,
+        has_more=page.has_more,
     )
 
 
