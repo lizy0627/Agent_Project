@@ -1,8 +1,11 @@
 from typing import Any
 
 from app.agents import ManagerAgent
+from app.api.chat import resolve_agent_mode
 from app.schemas.chat import ChatRequest
 from app.tools.base import ToolResult
+from backend.app.api.chat import resolve_agent_mode as resolve_backend_agent_mode
+from backend.app.schemas.chat import ChatRequest as BackendChatRequest
 
 
 class FakeLLMClient:
@@ -100,3 +103,23 @@ def test_chat_request_accepts_multi_agent_flag():
     request = ChatRequest(message="hello", multi_agent=True)
 
     assert request.multi_agent is True
+
+
+def test_chat_request_accepts_multi_agent_agent_mode():
+    request = ChatRequest(message="hello", agent_mode="multi_agent")
+
+    assert request.agent_mode == "multi_agent"
+    assert request.multi_agent is False
+    assert resolve_agent_mode(request) == "multi_agent"
+
+
+def test_multi_agent_flag_overrides_agent_mode_for_compatibility():
+    request = ChatRequest(message="hello", multi_agent=True, agent_mode="react")
+
+    assert resolve_agent_mode(request) == "multi_agent"
+
+
+def test_backend_chat_request_uses_same_agent_mode_compatibility_rule():
+    request = BackendChatRequest(message="hello", multi_agent=True, agent_mode="react")
+
+    assert resolve_backend_agent_mode(request) == "multi_agent"

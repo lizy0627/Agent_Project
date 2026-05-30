@@ -1,15 +1,29 @@
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
+
+
+AgentMode = Literal["plan_execute", "react", "multi_agent"]
 
 
 class ChatRequest(BaseModel):
     """Request body for the chat endpoint."""
 
     message: str = Field(..., min_length=1, max_length=4000, description="User message")
+    # Compatibility field for older clients. Prefer agent_mode="multi_agent" for new requests.
     multi_agent: bool = Field(
         default=False,
-        description="Enable ManagerAgent orchestration with specialized sub agents.",
+        description=(
+            "Deprecated compatibility flag. When true, it is equivalent to "
+            'agent_mode="multi_agent".'
+        ),
+    )
+    agent_mode: AgentMode = Field(
+        default="plan_execute",
+        description=(
+            "Agent execution mode. Use plan_execute for planner/executor, react for ReAct, "
+            "or multi_agent for ManagerAgent orchestration."
+        ),
     )
     system_prompt: str | None = Field(
         default=None,

@@ -1,0 +1,422 @@
+{
+  "pack_id": "codex_white_bear_desktop_pet",
+  "display_name": "Codex White Bear Desktop Pet",
+  "character_reference": "uploaded white bear image only",
+  "style": "cute minimalist white bear desktop pet, sticker/game asset style",
+  "layout": {
+    "columns": 5,
+    "rows": 4,
+    "state_count": 20,
+    "cell_width": 280,
+    "cell_height": 280
+  },
+  "master_sheet": "codex-bear-20-state-sheet-1400x1120.png",
+  "source_chroma_sheet": "codex-bear-20-state-sheet-chroma.png",
+  "states": [
+    {
+      "index": 1,
+      "id": "idle",
+      "name": "Idle",
+      "file": "states/01_idle.png",
+      "grid": {
+        "row": 1,
+        "column": 1
+      },
+      "size": {
+        "width": 280,
+        "height": 280
+      },
+      "alpha_bbox": {
+        "left": 82,
+        "top": 62,
+        "right": 229,
+        "bottom": 263
+      }
+    },
+    {
+      "index": 2,
+      "id": "thinking",
+      "name": "Thinking",
+      "file": "states/02_thinking.png",
+      "grid": {
+        "row": 1,
+        "column": 2
+      },
+      "size": {
+        "width": 280,
+        "height": 280
+      },
+      "alpha_bbox": {
+        "left": 73,
+        "top": 59,
+        "right": 229,
+        "bottom": 263
+      }
+    },
+    {
+      "index": 3,
+      "id": "coding",
+      "name": "Coding",
+      "file": "states/03_coding.png",
+      "grid": {
+        "row": 1,
+        "column": 3
+      },
+      "size": {
+        "width": 280,
+        "height": 280
+      },
+      "alpha_bbox": {
+        "left": 52,
+        "top": 62,
+        "right": 239,
+        "bottom": 263
+      }
+    },
+    {
+      "index": 4,
+      "id": "debugging",
+      "name": "Debugging",
+      "file": "states/04_debugging.png",
+      "grid": {
+        "row": 1,
+        "column": 4
+      },
+      "size": {
+        "width": 280,
+        "height": 280
+      },
+      "alpha_bbox": {
+        "left": 29,
+        "top": 63,
+        "right": 213,
+        "bottom": 263
+      }
+    },
+    {
+      "index": 5,
+      "id": "bug_fixed",
+      "name": "Bug Fixed",
+      "file": "states/05_bug_fixed.png",
+      "grid": {
+        "row": 1,
+        "column": 5
+      },
+      "size": {
+        "width": 280,
+        "height": 280
+      },
+      "alpha_bbox": {
+        "left": 10,
+        "top": 59,
+        "right": 213,
+        "bottom": 262
+      }
+    },
+    {
+      "index": 6,
+      "id": "build_in_progress",
+      "name": "Build In Progress",
+      "file": "states/06_build_in_progress.png",
+      "grid": {
+        "row": 2,
+        "column": 1
+      },
+      "size": {
+        "width": 280,
+        "height": 280
+      },
+      "alpha_bbox": {
+        "left": 79,
+        "top": 44,
+        "right": 227,
+        "bottom": 243
+      }
+    },
+    {
+      "index": 7,
+      "id": "build_failed",
+      "name": "Build Failed",
+      "file": "states/07_build_failed.png",
+      "grid": {
+        "row": 2,
+        "column": 2
+      },
+      "size": {
+        "width": 280,
+        "height": 280
+      },
+      "alpha_bbox": {
+        "left": 54,
+        "top": 45,
+        "right": 262,
+        "bottom": 245
+      }
+    },
+    {
+      "index": 8,
+      "id": "build_success",
+      "name": "Build Success",
+      "file": "states/08_build_success.png",
+      "grid": {
+        "row": 2,
+        "column": 3
+      },
+      "size": {
+        "width": 280,
+        "height": 280
+      },
+      "alpha_bbox": {
+        "left": 55,
+        "top": 48,
+        "right": 253,
+        "bottom": 243
+      }
+    },
+    {
+      "index": 9,
+      "id": "reading_code",
+      "name": "Reading Code",
+      "file": "states/09_reading_code.png",
+      "grid": {
+        "row": 2,
+        "column": 4
+      },
+      "size": {
+        "width": 280,
+        "height": 280
+      },
+      "alpha_bbox": {
+        "left": 37,
+        "top": 46,
+        "right": 191,
+        "bottom": 243
+      }
+    },
+    {
+      "index": 10,
+      "id": "searching_project",
+      "name": "Searching Project",
+      "file": "states/10_searching_project.png",
+      "grid": {
+        "row": 2,
+        "column": 5
+      },
+      "size": {
+        "width": 280,
+        "height": 280
+      },
+      "alpha_bbox": {
+        "left": 17,
+        "top": 48,
+        "right": 167,
+        "bottom": 244
+      }
+    },
+    {
+      "index": 11,
+      "id": "git_commit",
+      "name": "Git Commit",
+      "file": "states/11_git_commit.png",
+      "grid": {
+        "row": 3,
+        "column": 1
+      },
+      "size": {
+        "width": 280,
+        "height": 280
+      },
+      "alpha_bbox": {
+        "left": 79,
+        "top": 33,
+        "right": 222,
+        "bottom": 226
+      }
+    },
+    {
+      "index": 12,
+      "id": "git_push",
+      "name": "Git Push",
+      "file": "states/12_git_push.png",
+      "grid": {
+        "row": 3,
+        "column": 2
+      },
+      "size": {
+        "width": 280,
+        "height": 280
+      },
+      "alpha_bbox": {
+        "left": 62,
+        "top": 34,
+        "right": 206,
+        "bottom": 226
+      }
+    },
+    {
+      "index": 13,
+      "id": "pull_request",
+      "name": "Pull Request",
+      "file": "states/13_pull_request.png",
+      "grid": {
+        "row": 3,
+        "column": 3
+      },
+      "size": {
+        "width": 280,
+        "height": 280
+      },
+      "alpha_bbox": {
+        "left": 54,
+        "top": 33,
+        "right": 199,
+        "bottom": 226
+      }
+    },
+    {
+      "index": 14,
+      "id": "code_review",
+      "name": "Code Review",
+      "file": "states/14_code_review.png",
+      "grid": {
+        "row": 3,
+        "column": 4
+      },
+      "size": {
+        "width": 280,
+        "height": 280
+      },
+      "alpha_bbox": {
+        "left": 35,
+        "top": 34,
+        "right": 183,
+        "bottom": 280
+      }
+    },
+    {
+      "index": 15,
+      "id": "architect_mode",
+      "name": "Architect Mode",
+      "file": "states/15_architect_mode.png",
+      "grid": {
+        "row": 3,
+        "column": 5
+      },
+      "size": {
+        "width": 280,
+        "height": 280
+      },
+      "alpha_bbox": {
+        "left": 14,
+        "top": 33,
+        "right": 170,
+        "bottom": 280
+      }
+    },
+    {
+      "index": 16,
+      "id": "learning_mode",
+      "name": "Learning Mode",
+      "file": "states/16_learning_mode.png",
+      "grid": {
+        "row": 4,
+        "column": 1
+      },
+      "size": {
+        "width": 280,
+        "height": 280
+      },
+      "alpha_bbox": {
+        "left": 78,
+        "top": 9,
+        "right": 233,
+        "bottom": 209
+      }
+    },
+    {
+      "index": 17,
+      "id": "resting",
+      "name": "Resting",
+      "file": "states/17_resting.png",
+      "grid": {
+        "row": 4,
+        "column": 2
+      },
+      "size": {
+        "width": 280,
+        "height": 280
+      },
+      "alpha_bbox": {
+        "left": 52,
+        "top": 9,
+        "right": 208,
+        "bottom": 210
+      }
+    },
+    {
+      "index": 18,
+      "id": "sleeping",
+      "name": "Sleeping",
+      "file": "states/18_sleeping.png",
+      "grid": {
+        "row": 4,
+        "column": 3
+      },
+      "size": {
+        "width": 280,
+        "height": 280
+      },
+      "alpha_bbox": {
+        "left": 14,
+        "top": 33,
+        "right": 227,
+        "bottom": 206
+      }
+    },
+    {
+      "index": 19,
+      "id": "error_explosion",
+      "name": "Error Explosion",
+      "file": "states/19_error_explosion.png",
+      "grid": {
+        "row": 4,
+        "column": 4
+      },
+      "size": {
+        "width": 280,
+        "height": 280
+      },
+      "alpha_bbox": {
+        "left": 2,
+        "top": 0,
+        "right": 280,
+        "bottom": 210
+      }
+    },
+    {
+      "index": 20,
+      "id": "codex_god_mode",
+      "name": "Codex God Mode",
+      "file": "states/20_codex_god_mode.png",
+      "grid": {
+        "row": 4,
+        "column": 5
+      },
+      "size": {
+        "width": 280,
+        "height": 280
+      },
+      "alpha_bbox": {
+        "left": 0,
+        "top": 0,
+        "right": 229,
+        "bottom": 223
+      }
+    }
+  ],
+  "notes": [
+    "Transparent PNG exports produced from chroma-key removal.",
+    "All states are ordered left-to-right, top-to-bottom from the generated master sheet.",
+    "No readable text is present in the state art."
+  ]
+}

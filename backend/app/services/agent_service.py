@@ -1,8 +1,10 @@
 from time import perf_counter
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
 
 from backend.app.agent.executor import AgentExecutor, AgentTrace, tool_result_to_observation
 from backend.app.agent.planner import AgentPlan, Planner
+from backend.app.agent.reactor import ReActAgent, ReActReasoningStep, ReActResult
+from backend.app.agent.state import AgentStep as ReActTraceStep
 from backend.app.core.config import Settings
 from backend.app.core.logger import get_logger
 from backend.app.core.safe_logging import safe_log_data
@@ -58,6 +60,11 @@ class AgentService:
         self.tool_route_planner = AgentPlanner(settings=self.settings, mcp_router=self.mcp_router)
         self.planner = Planner(max_steps=settings.max_agent_steps)
         self.executor = AgentExecutor(self.tool_manager)
+        self.react_agent = ReActAgent(
+            llm_client=self.llm_client,
+            tool_registry=self.tool_manager,
+            max_tool_calls=settings.max_agent_steps,
+        )
         self.message_builder = MessageBuilder()
         self.search_workflow = SearchWorkflow(
             self.tool_manager,
@@ -70,8 +77,16 @@ class AgentService:
         if isinstance(mcp_tool, MCPTool) and mcp_tool.manager is None:
             mcp_tool.manager = self.mcp_manager
 
-    def chat(self, messages: list[ChatMessage], model: str | None = None) -> AgentReply:
+    def chat(
+        self,
+        messages: list[ChatMessage],
+        model: str | None = None,
+        agent_mode: str = "plan_execute",
+    ) -> AgentReply:
         """Send a chat request with complete context and return model text."""
+
+        if agent_mode == "react":
+            return self._chat_react(messages, model=model)
 
         started_at = perf_counter()
         status = "failed"
@@ -105,10 +120,19 @@ class AgentService:
                 self._elapsed_ms(started_at),
             )
 
-    def stream_chat(self, messages: list[ChatMessage], model: str | None = None) -> Iterator[str]:
+    def stream_chat(
+        self,
+        messages: list[ChatMessage],
+        model: str | None = None,
+        agent_mode: str = "plan_execute",
+    ) -> Iterator[str]:
         """Stream a chat request with complete context."""
 
-        stream, _tool_result, _trace = self.stream_chat_with_tool_result(messages, model=model)
+        stream, _tool_result, _trace = self.stream_chat_with_tool_result(
+            messages,
+            model=model,
+            agent_mode=agent_mode,
+        )
         yield from stream
 
     def stream_chat_with_tool_result(
@@ -116,8 +140,14 @@ class AgentService:
         messages: list[ChatMessage],
         model: str | None = None,
         status_callback: StatusCallback | None = None,
+        agent_mode: str = "plan_execute",
+        trace_callback: Callable[[AgentTraceStep], None] | None = None,
     ) -> tuple[Iterator[str], ToolResult | None, list[AgentTraceStep]]:
         """Return a streaming iterator and the tool metadata used to build it."""
+
+        if agent_mode == "react":
+            reply = self._chat_react(messages, model=model, trace_callback=trace_callback)
+            return iter([reply.content]), reply.tool_result, reply.trace or []
 
         trace: list[AgentTraceStep] = []
         emitted_statuses: set[str] = set()
@@ -188,6 +218,82 @@ class AgentService:
         executor_trace = self.executor.execute(agent_plan)
         tool_result = self.executor.last_tool_result(executor_trace)
         return self.message_builder.with_tool_result(messages, tool_result), tool_result
+
+    def _chat_react(
+        self,
+        messages: list[ChatMessage],
+        model: str | None = None,
+        trace_callback: Callable[[AgentTraceStep], None] | None = None,
+    ) -> AgentReply:
+        """Run the Thought -> Action -> Observation -> Final Answer loop."""
+
+        started_at = perf_counter()
+        try:
+            result = self.react_agent.run(
+                messages,
+                model=model,
+                callback=self._react_reasoning_callback(trace_callback),
+            )
+        except Exception:
+            logger.exception(
+                "ReAct execution failed: model=%s duration_ms=%.2f",
+                model or self.model,
+                self._elapsed_ms(started_at),
+            )
+            raise
+
+        return AgentReply(
+            content=result.final_answer,
+            tool_result=self._last_react_tool_result(result),
+            trace=self._react_trace_steps(result),
+        )
+
+    def _react_reasoning_callback(
+        self,
+        trace_callback: Callable[[AgentTraceStep], None] | None,
+    ) -> Callable[[ReActReasoningStep], None] | None:
+        if trace_callback is None:
+            return None
+
+        def emit(reasoning_step: ReActReasoningStep) -> None:
+            trace_callback(self._react_reasoning_step_to_trace_step(reasoning_step))
+
+        return emit
+
+    def _react_reasoning_step_to_trace_step(self, step: ReActReasoningStep) -> AgentTraceStep:
+        if step.type == "thought":
+            return AgentTraceStep(
+                step="thought",
+                status="success",
+                message=str(step.content or ""),
+            )
+
+        if step.type == "action":
+            return AgentTraceStep(
+                step="action",
+                status="running",
+                message=f"Selected tool: {step.tool_name}.",
+                tool_name=step.tool_name,
+                metadata={"tool_args": step.tool_args or {}},
+            )
+
+        if step.type == "observation":
+            status = step.status or ("failed" if step.error else "success")
+            return AgentTraceStep(
+                step="observation",
+                status=status,
+                message=step.error or "Observed tool result.",
+                tool_name=step.tool_name,
+                observation=step.observation,
+            )
+
+        metadata = {"reason": step.status} if step.status else None
+        return AgentTraceStep(
+            step="final_answer",
+            status="success",
+            message=str(step.content or ""),
+            metadata=metadata,
+        )
 
     def _handle_search_workflow(
         self,
@@ -505,6 +611,56 @@ class AgentService:
         if isinstance(observation, ToolResult):
             return tool_result_to_observation(observation)
         return observation
+
+    def _react_trace_steps(self, result: ReActResult) -> list[AgentTraceStep]:
+        """Convert AgentTrace steps into the legacy API trace dataclass."""
+
+        if result.trace is None:
+            return []
+
+        trace_steps: list[AgentTraceStep] = []
+        for step in result.trace.steps:
+            trace_steps.append(
+                AgentTraceStep(
+                    step=step.step,
+                    status=step.status,
+                    message=step.message or step.error,
+                    tool_name=step.tool_name,
+                    observation=self._serialize_react_observation(step),
+                    duration_ms=step.duration_ms,
+                    metadata=self._react_step_metadata(step),
+                )
+            )
+        return trace_steps
+
+    def _react_step_metadata(self, step: ReActTraceStep) -> dict[str, Any] | None:
+        metadata = dict(step.metadata or {})
+        if step.tool_args:
+            metadata["tool_args"] = step.tool_args
+        if step.tool_call is not None:
+            metadata["tool_call"] = step.tool_call.model_dump(exclude_none=True)
+        return metadata or None
+
+    def _serialize_react_observation(self, step: ReActTraceStep) -> Any:
+        if isinstance(step.observation, ToolResult):
+            return tool_result_to_observation(step.observation)
+        return step.observation
+
+    def _last_react_tool_result(self, result: ReActResult) -> ToolResult | None:
+        if not result.tool_calls:
+            return None
+
+        tool_call = result.tool_calls[-1]
+        return ToolResult(
+            name=tool_call.tool_name,
+            success=tool_call.status == "success",
+            result=tool_call.result,
+            error=tool_call.error,
+            duration_ms=tool_call.duration_ms,
+            error_code=tool_call.error_code,
+            error_message=tool_call.error,
+            retryable=bool(tool_call.retryable),
+        )
 
     def _elapsed_seconds(self, started_at: float) -> float:
         return round(perf_counter() - started_at, 2)

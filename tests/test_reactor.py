@@ -59,6 +59,31 @@ def test_react_agent_runs_tool_and_appends_observation():
     assert result.tool_calls[0].status == "success"
 
 
+def test_react_agent_callback_receives_reasoning_steps_as_they_are_produced():
+    registry = ToolRegistry()
+    registry.register(EchoTool())
+    llm = FakeLLM(
+        [
+            'Thought: I should echo it.\nAction: {"tool": "echo", "args": {"text": "hello"}}',
+            "Thought: I have the observation.\nFinal Answer: hello",
+        ]
+    )
+    events = []
+
+    result = ReActAgent(llm, registry).run("say hello", callback=events.append)
+
+    assert result.final_answer == "hello"
+    assert [event.type for event in events] == [
+        "thought",
+        "action",
+        "observation",
+        "thought",
+        "final_answer",
+    ]
+    assert events[1].tool_name == "echo"
+    assert events[2].observation["result"] == {"text": "hello"}
+
+
 def test_react_agent_accepts_structured_json_turns_and_writes_trace():
     registry = ToolRegistry()
     registry.register(EchoTool())

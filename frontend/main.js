@@ -3465,6 +3465,7 @@ async function requestStreamingAgentReply(
   let reply = "";
   let metadata = {};
   let done = {};
+  let streamTrace = [];
   const handleStreamEvent = (event) => {
     if (!event) {
       return;
@@ -3474,6 +3475,21 @@ async function requestStreamingAgentReply(
       metadata = event.data || {};
       if (typeof onToolMetadata === "function") {
         onToolMetadata(normalizeToolMetadata(metadata));
+      }
+      return;
+    }
+
+    if (event.event === "trace") {
+      const steps = Array.isArray(event.data?.trace)
+        ? event.data.trace
+        : event.data?.step
+        ? [event.data.step]
+        : [];
+      if (steps.length > 0) {
+        streamTrace = [...streamTrace, ...steps];
+        if (typeof onToolMetadata === "function") {
+          onToolMetadata(normalizeToolMetadata({ ...metadata, trace: streamTrace }));
+        }
       }
       return;
     }
@@ -3542,7 +3558,7 @@ async function requestStreamingAgentReply(
     toolRetryable: done.tool_retryable ?? metadata.tool_retryable,
     toolErrorDetail: done.tool_error_detail ?? metadata.tool_error_detail,
     toolDurationMs: done.tool_duration_ms ?? metadata.tool_duration_ms,
-    trace: done.trace || metadata.trace || [],
+    trace: done.trace || metadata.trace || streamTrace,
   };
 }
 

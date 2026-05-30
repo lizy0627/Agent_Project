@@ -2,125 +2,119 @@
 
 ## 项目简介
 
-一个基于 **FastAPI + DashScope/OpenAI-Compatible API** 的工程化 Agent 智能体框架。项目围绕「任务规划、工具调用、网页检索、记忆管理、执行轨迹、流式响应」构建，提供可运行、可扩展、可观测的智能体后端，并内置一个轻量 Web UI 用于本地调试和演示。
+AgentOS 是一个基于 **FastAPI + DashScope/OpenAI-Compatible API** 的工程化 Agent 后端示例。当前代码围绕任务规划、工具调用、执行轨迹、记忆、MCP 工具适配、多 Agent 路由和流式聊天构建，并提供一个轻量 Web UI 用于本地调试。
 
-AgentOS 不是一次性的聊天 Demo，而是一个面向真实应用集成的 Agent Runtime：你可以在统一的工具注册表中扩展能力，在 Planner/Executor/ReAct/Reflector 链路中调整智能体行为，并通过 FastAPI 接口把 Agent 能力暴露给前端、业务系统或其他服务。
+这个项目不是完整的生产级 Agent 平台。README 只描述当前代码中已经存在或正在实验的能力；Reflector、通用 Workflow 编排、任务队列、插件市场、OpenTelemetry 等没有接入主链路的内容不会写成已完成能力。
 
-## 核心特性
+> 注意：仓库里同时保留了 `app/` 和 `backend/app/` 两套相近命名空间。新增能力主要集中在顶层 `app/` 主实现；`backend/app` 中有兼容入口和部分镜像文件，个别文件可能滞后。部署前请以实际启动入口和 OpenAPI schema 为准。
 
-- **工程化 Agent 分层**：Planner、Executor、Reactor、Reflector、State 独立拆分，便于测试、替换和扩展。
-- **统一工具系统**：所有工具通过 `ToolRegistry` / `ToolManager` 注册和调用，返回标准化 `ToolResult`。
-- **联网研究工作流**：支持 Tavily Web Search、网页正文读取、搜索结果整理和模型总结。
-- **MCP 工具接入**：可通过配置接入外部 MCP Server，并将 MCP 能力包装为本地工具。
-- **短期与长期记忆**：内置 JSON 存储的会话短期记忆和用户长期记忆检索。
-- **Agent Trace 可观测性**：每次请求可返回 planner、tool_call、observation、final_answer 等执行轨迹。
-- **流式响应**：`/chat/stream` 基于 Server-Sent Events 输出状态、文本片段、元数据和完成事件。
-- **认证与会话隔离**：支持注册、登录、JWT 鉴权，以及按用户隔离的 conversation/document 数据。
-- **多存储选项**：会话默认内存存储，也支持 SQLite 和 SQLAlchemy 数据库 URL。
-- **前端调试界面**：内置原生 HTML/CSS/JavaScript UI，可直接访问 `/ui` 体验 Agent。
+## 当前能力边界
+
+### 已实现能力
+
+- **LLM Planner**：`app.agent.planner.LLMPlanGenerator` 会让模型生成结构化 `AgentPlan` JSON，并用 Pydantic、依赖顺序和 `ToolRegistry.list_tools()` 校验计划；失败时回退到规则规划。
+- **Plan-Execute**：默认执行模式是规划 -> `AgentExecutor` -> `ToolRegistry` -> 工具观察结果 -> LLM 最终回答。
+- **ReAct Loop**：`app.agent.reactor.ReActAgent` 实现 Thought / Action / Observation / Final Answer 循环，并通过 `agent_mode="react"` 在 AgentService 中接入。
+- **ToolRegistry**：统一注册、列举和执行工具，返回标准化 `ToolResult`，并包含错误分类、重试标记和耗时信息。
+- **AgentTrace**：聊天接口和 Agent 服务会记录 planner、tool_call、observation、thought、final_answer 等步骤，便于前端展示和排查问题。
+- **Memory**：`MemoryManager` 提供 JSON 存储的短期会话上下文和长期用户记忆；可选开启本地向量相似度检索。
+- **MCP Tool Adapter**：`MCPTool`、`MCPManager`、`MCPRouter` 支持把外部 MCP Server 的工具包装成本地工具调用。
+- **Multi-Agent Router**：`ManagerAgent` 可以按任务路由到 `SearchAgent`、`SummaryAgent`、`CodeAgent`，再聚合子 Agent 结果。
+- **Streaming Chat**：`/chat/stream` 使用 Server-Sent Events 输出状态、元数据、文本 chunk、完成事件和错误事件。
+
+### 实验性能力
+
+- **Reflector**：`backend/app/agent/reflector.py` 中有轻量 trace 反思器，但当前没有接入 `/chat` 或 `/chat/stream` 主链路，因此属于实验性模块。
+- **Workflow**：`app.workflow` 提供 DAG 执行器，`SearchWorkflow` 会在搜索场景内部使用 `research_workflow`；但通用 Workflow 编排还没有作为公开 Agent 主链路或 API 暴露，暂按实验性能力处理。
+- **向量记忆**：`MEMORY_VECTOR_ENABLED=true` 后会为长期记忆生成 embedding 并在 JSON 记忆条目中保存向量，再用本地余弦相似度检索。它不是独立向量数据库，也没有向量库持久化服务。
+- **backend/app 同步状态**：`backend/app` 保留兼容入口，主要用于兼容 `main:app` 启动路径；新增 Agent 模式字段需要继续保持两套命名空间同步。
+
+### Roadmap
+
+- 将 Reflector 接入主链路，并在 API trace 中返回反思结果。
+- 明确 `app/` 与 `backend/app/` 的单一运行入口，消除兼容层滞后。
+- 将通用 Workflow 编排暴露为稳定 API 或 Agent 可调用能力。
+- 为 Agent Trace 增加持久化检索、前端时间线和失败重放。
+- 增加生产级部署文件、健康检查、观测指标和更细粒度的工具权限控制。
 
 ## 技术栈
 
 | 模块 | 技术 |
 | --- | --- |
 | Web Framework | FastAPI, Uvicorn |
-| LLM Provider | DashScope OpenAI-Compatible API |
+| LLM Provider | DashScope / OpenAI-Compatible API |
 | Schema & Config | Pydantic, Pydantic Settings |
-| Persistence | SQLite, SQLAlchemy, JSON |
-| Tooling | Custom ToolRegistry, MCP Adapter, Tavily Search |
+| Persistence | JSON, SQLite, SQLAlchemy |
+| Tooling | ToolRegistry, MCP Adapter, Tavily Search |
 | Frontend | Vanilla HTML, CSS, JavaScript |
 | Testing | Pytest |
 | Migration | Alembic |
 
-## 系统架构图
+## 架构概览
 
 ```mermaid
 flowchart TD
     User["User / Client"] --> API["FastAPI API Layer"]
     API --> Auth["Auth & User Context"]
     API --> Conversation["Conversation Store"]
+    API --> Memory["Memory Manager"]
     API --> AgentService["Agent Service"]
 
-    AgentService --> Planner["Planner<br/>intent and tool route"]
-    Planner --> Executor["Executor<br/>plan execution"]
-    Planner --> Reactor["ReAct Agent<br/>thought/action loop"]
-    Executor --> Registry["Tool Registry"]
-    Reactor --> Registry
+    AgentService --> Mode{"agent_mode"}
+    Mode --> PlanExecute["Plan-Execute"]
+    Mode --> ReAct["ReAct Loop"]
 
-    Registry --> LocalTools["Local Tools<br/>time / calculate / summarize"]
-    Registry --> WebTools["Web Tools<br/>web_search / read_webpage"]
+    PlanExecute --> LLMPlanner["LLM Planner"]
+    LLMPlanner --> RulePlanner["Rule Planner Fallback"]
+    RulePlanner --> Executor["AgentExecutor"]
+    Executor --> Registry["ToolRegistry"]
+    ReAct --> Registry
+
+    Registry --> LocalTools["Local Tools"]
+    Registry --> WebTools["Web Search / Reader"]
     Registry --> MCP["MCP Tool Adapter"]
 
-    WebTools --> Tavily["Tavily Search API"]
-    WebTools --> WebPage["Web Pages"]
-    MCP --> MCPServer["External MCP Servers"]
+    WebTools --> SearchWorkflow["SearchWorkflow"]
+    SearchWorkflow --> Workflow["research_workflow"]
+    MCP --> MCPServer["External MCP Server"]
 
-    AgentService --> Memory["Memory Manager<br/>short / long memory"]
-    AgentService --> LLM["DashScope LLM"]
+    AgentService --> Trace["AgentTrace"]
+    AgentService --> LLM["LLM Client"]
     LLM --> AgentService
-    AgentService --> Trace["Agent Trace"]
     AgentService --> API
 ```
 
 ## Agent 执行流程
 
-```mermaid
-sequenceDiagram
-    participant C as Client
-    participant A as FastAPI
-    participant M as Memory
-    participant P as Planner
-    participant E as Executor
-    participant T as ToolRegistry
-    participant L as LLM
+默认 `plan_execute` 流程：
 
-    C->>A: POST /chat
-    A->>M: Load recent and long-term context
-    A->>P: Plan task and route tool
-    P-->>A: AgentPlan + PlannedToolCall
-    A->>E: Execute plan
-    E->>T: Run selected tool
-    T-->>E: ToolResult
-    E-->>A: Observation trace
-    A->>L: Build model messages with tool result
-    L-->>A: Final answer
-    A->>M: Persist safe memory
-    A-->>C: Reply + tool metadata + trace
-```
+1. API 层接收请求，完成鉴权、会话读取和消息组装。
+2. Memory Manager 注入相关长期记忆和当前会话近期上下文。
+3. LLM Planner 尝试生成结构化 `AgentPlan`；计划无效时回退到规则路由。
+4. AgentExecutor 按计划调用工具，工具统一通过 ToolRegistry 执行。
+5. 搜索类任务会进入 SearchWorkflow，内部执行搜索、读取网页和整理上下文。
+6. LLM 基于用户输入、历史上下文和工具观察结果生成最终回答。
+7. API 返回回答、工具元数据和 AgentTrace；流式接口持续推送 SSE 事件。
 
-典型步骤：
+`react` 流程：
 
-1. API 层接收请求，完成鉴权、会话读取和上下文组装。
-2. Memory Manager 注入相关历史记忆和近期对话。
-3. Planner 基于用户意图生成结构化 `AgentPlan`，并判断是否需要工具。
-4. Executor 按计划调用工具，工具统一通过 `ToolRegistry` 执行。
-5. 搜索类任务会进入 Web Search -> Read Webpage -> Summarize 的研究工作流。
-6. LLM 接收用户输入、历史上下文和工具观察结果，生成最终回答。
-7. API 返回回答、工具元数据和 Agent Trace，流式接口则持续推送状态事件。
+1. ReActAgent 要求模型按 JSON 格式输出 thought、action、action_args 或 final_answer。
+2. 每次 action 只能调用已注册工具。
+3. 工具结果以 Observation 形式追加到 scratchpad。
+4. 达到 final_answer 或最大工具调用次数后结束。
 
 ## 目录结构
 
 ```text
 .
+├── app/                            # 当前主要实现：agent、api、services、tools、memory、mcp、workflow
 ├── backend/
-│   └── app/
-│       ├── main.py                 # FastAPI application factory and runtime entry
-│       ├── api/                    # HTTP routes: auth, chat, documents, mcp
-│       ├── core/                   # config, logging, exceptions, safe logging
-│       ├── agent/                  # planner, executor, reactor, reflector, state
-│       ├── tools/                  # tool base, registry, web search, webpage reader
-│       ├── memory/                 # short memory, long memory, memory manager
-│       ├── services/               # orchestration, LLM client, stores, workflows
-│       ├── schemas/                # request and response schemas
-│       ├── config/                 # settings exports
-│       ├── mcp/                    # MCP client, manager, router and server config
-│       └── workflow/               # reusable workflow graph and research workflow
-├── app/                            # backward-compatible import namespace
-├── frontend/                       # local web UI
-├── scripts/                        # MCP and search test utilities
-├── tests/                          # unit and API tests
-├── alembic/                        # database migrations
-├── main.py                         # compatibility entry for uvicorn main:app
+│   └── app/                        # 兼容入口和部分镜像模块
+├── frontend/                       # 本地 Web UI
+├── scripts/                        # MCP、搜索和连接测试脚本
+├── tests/                          # 单元测试和 API 测试
+├── alembic/                        # 数据库迁移
+├── main.py                         # 兼容启动入口
 ├── requirements.txt
 ├── pyproject.toml
 └── README.md
@@ -158,6 +152,8 @@ pip install pytest ruff mypy
 
 ### 3. 配置环境变量
 
+Windows:
+
 ```bash
 copy .env.example .env
 ```
@@ -186,13 +182,7 @@ WEB_SEARCH_PROVIDER=tavily
 
 ### 4. 启动服务
 
-推荐使用新的后端入口：
-
-```bash
-uvicorn backend.app.main:app --reload
-```
-
-兼容旧入口：
+兼容入口：
 
 ```bash
 uvicorn main:app --reload
@@ -229,16 +219,16 @@ pytest
 | `API_KEY` | - | 模型服务 API Key，兼容 `DASHSCOPE_API_KEY` |
 | `BASE_URL` | `https://dashscope.aliyuncs.com/compatible-mode/v1` | OpenAI-Compatible API 地址 |
 | `MODEL_NAME` | `qwen-plus` | 默认模型名称，兼容 `DASHSCOPE_MODEL` |
-| `MODEL_TIMEOUT_SECONDS` | `60` | 模型请求超时时间 |
-| `MAX_AGENT_STEPS` | `8` | 单次 Agent 计划最大步骤数 |
+| `MODEL_TIMEOUT_SECONDS` | `30` | 模型请求超时时间 |
+| `MAX_AGENT_STEPS` | `8` | 单次 Agent 计划或 ReAct 工具调用的最大步数 |
 | `CORS_ALLOW_ORIGINS` | `http://127.0.0.1:8000,http://localhost:8000` | 允许跨域来源 |
 | `CONVERSATION_STORE` | `memory` | 会话存储类型：`memory` 或 `sqlite` |
 | `CONVERSATION_DB_PATH` | `data/conversations.db` | SQLite 会话数据库路径 |
-| `CONVERSATION_DATABASE_URL` | - | SQLAlchemy 数据库 URL，可接 PostgreSQL/MySQL |
+| `CONVERSATION_DATABASE_URL` | - | SQLAlchemy 数据库 URL |
 | `CONVERSATION_MAX_ROUNDS` | `30` | 每个会话保留的最大轮数 |
 | `DOCUMENT_DB_PATH` | `data/documents.db` | 文档索引数据库路径 |
 | `DOCUMENT_UPLOAD_MAX_BYTES` | `5242880` | 文档上传大小限制 |
-| `AUTH_ENABLED` | `false` | 是否启用 JWT 鉴权 |
+| `AUTH_ENABLED` | `true` | 是否启用 JWT 鉴权 |
 | `AUTH_DB_PATH` | `data/auth.db` | 用户认证数据库路径 |
 | `AUTH_JWT_SECRET` | `change-this-local-development-secret` | JWT 签名密钥，生产环境必须替换 |
 | `AUTH_TOKEN_EXPIRE_MINUTES` | `1440` | JWT 有效期 |
@@ -249,72 +239,31 @@ pytest
 | `WEB_SEARCH_TIMEOUT_SECONDS` | `5` | 搜索工具超时时间 |
 | `WEB_READER_TIMEOUT_SECONDS` | `5` | 网页读取工具超时时间 |
 | `SEARCH_WORKFLOW_READ_TOP_K` | `2` | 搜索工作流最多读取的网页数量 |
-| `MEMORY_PATH` | `data/memories.json` | 记忆 JSON 存储路径 |
+| `MEMORY_PATH` | `data/memories.json` | 记忆 JSON 存储路径，兼容 `MEMORY_JSON_PATH` |
 | `MEMORY_SEARCH_LIMIT` | `5` | 长期记忆检索数量 |
 | `MEMORY_RECENT_CONTEXT_LIMIT` | `6` | 注入模型的近期上下文数量 |
+| `MEMORY_VECTOR_ENABLED` | `false` | 是否为长期记忆生成 embedding 并启用本地向量相似度检索 |
+| `MEMORY_VECTOR_TOP_K` | `5` | 向量记忆检索候选数量 |
+| `MEMORY_EMBEDDING_MODEL` | `text-embedding-v4` | 记忆 embedding 使用的模型名 |
 | `MCP_ENABLED` | `true` | 是否启用 MCP 工具适配 |
 | `MCP_DEFAULT_SERVER` | `modelscope` | 默认 MCP Server 名称 |
 | `MODELSCOPE_API_TOKEN` | - | ModelScope 相关服务 Token |
 | `MODELSCOPE_MCP_URL` | `http://127.0.0.1:8001/mcp` | ModelScope MCP Server 地址 |
-| `TOOL_TIMEOUT_SECONDS` | `60` | 工具/MCP 请求超时时间，兼容 `MCP_TIMEOUT_SECONDS` |
+| `TOOL_TIMEOUT_SECONDS` | `20` | 工具/MCP 请求超时时间，兼容 `MCP_TIMEOUT_SECONDS` |
 
-## Docker 部署
+### MEMORY_VECTOR_ENABLED
 
-如果项目中尚未提交 Dockerfile，可以使用下面的生产化基础模板。
+默认情况下，Memory 使用 JSON 文件保存短期上下文和长期问答，并用文本相关性检索历史记忆。
 
-### Dockerfile
+开启：
 
-```dockerfile
-FROM python:3.11-slim
-
-WORKDIR /app
-
-ENV PYTHONDONTWRITEBYTECODE=1
-ENV PYTHONUNBUFFERED=1
-
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-
-COPY . .
-
-EXPOSE 8000
-
-CMD ["uvicorn", "backend.app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+```env
+MEMORY_VECTOR_ENABLED=true
+MEMORY_VECTOR_TOP_K=5
+MEMORY_EMBEDDING_MODEL=text-embedding-v4
 ```
 
-### docker-compose.yml
-
-```yaml
-services:
-  agentos:
-    build: .
-    ports:
-      - "8000:8000"
-    env_file:
-      - .env
-    volumes:
-      - ./data:/app/data
-      - ./logs:/app/logs
-    restart: unless-stopped
-```
-
-### 构建与启动
-
-```bash
-docker compose up --build -d
-```
-
-查看日志：
-
-```bash
-docker compose logs -f agentos
-```
-
-停止服务：
-
-```bash
-docker compose down
-```
+开启后，系统会调用当前 OpenAI-Compatible embedding 接口为长期记忆生成向量，并把向量保存在 `MEMORY_PATH` 指向的 JSON 文件中。检索时会对查询生成 embedding，然后在本地用余弦相似度排序。这个实现适合本地调试和轻量数据量，不等同于 Milvus、pgvector、FAISS 等独立向量数据库。
 
 ## API 示例
 
@@ -333,22 +282,6 @@ curl http://127.0.0.1:8000/
 }
 ```
 
-### 用户注册与登录
-
-当 `AUTH_ENABLED=true` 时，需要先注册或登录并携带 Bearer Token。
-
-```bash
-curl -X POST http://127.0.0.1:8000/auth/register \
-  -H "Content-Type: application/json" \
-  -d "{\"username\":\"alice\",\"password\":\"password123\"}"
-```
-
-```bash
-curl -X POST http://127.0.0.1:8000/auth/login \
-  -H "Content-Type: application/json" \
-  -d "{\"username\":\"alice\",\"password\":\"password123\"}"
-```
-
 ### 普通聊天
 
 ```bash
@@ -357,26 +290,47 @@ curl -X POST http://127.0.0.1:8000/chat \
   -d "{\"message\":\"帮我计算 23 * 17 + 8 等于多少\",\"conversation_id\":\"demo\"}"
 ```
 
-响应示例：
+响应会包含 `reply`、`model`、`conversation_id`、工具元数据和 `trace`。
+
+### agent_mode 使用示例
+
+`agent_mode` 当前在 `ChatRequest` 中定义，可选值：
+
+- `plan_execute`：默认模式，使用 LLM Planner / 规则 fallback 生成计划，再由 Executor 执行。
+- `react`：使用 ReActAgent 循环，让模型按 Thought / Action / Observation / Final Answer 方式运行。
+- `multi_agent`：使用 ManagerAgent 路由到 SearchAgent、SummaryAgent 或 CodeAgent，再聚合结果。
+
+`multi_agent` bool 字段仍然保留给旧前端和旧客户端使用。新请求建议使用 `agent_mode="multi_agent"`；如果请求里传了 `multi_agent=true`，服务会按兼容规则等价处理为 `agent_mode="multi_agent"`。
+
+Plan-Execute 请求体示例：
 
 ```json
 {
-  "success": true,
-  "reply": "23 * 17 + 8 = 399。",
-  "model": "qwen-plus",
-  "conversation_id": "demo",
-  "used_tool": true,
-  "tool_name": "calculate",
-  "tool_status": "success",
-  "tool_result": {
-    "expression": "23 * 17 + 8",
-    "value": 399
-  },
-  "tool_error": null,
-  "tool_duration_ms": 1.24,
-  "trace": []
+  "message": "帮我计算 23 * 17 + 8 等于多少",
+  "conversation_id": "demo-plan",
+  "agent_mode": "plan_execute"
 }
 ```
+
+ReAct 请求体示例：
+
+```json
+{
+  "message": "先查当前时间，再用一句话告诉我",
+  "conversation_id": "demo-react",
+  "agent_mode": "react"
+}
+```
+
+### Multi-Agent Router
+
+```bash
+curl -X POST http://127.0.0.1:8000/chat \
+  -H "Content-Type: application/json" \
+  -d "{\"message\":\"搜索 FastAPI 最新资料并总结实现要点\",\"conversation_id\":\"multi-demo\",\"agent_mode\":\"multi_agent\"}"
+```
+
+`agent_mode="multi_agent"` 会走 `ManagerAgent`，由它选择 SearchAgent、SummaryAgent 或 CodeAgent，并在响应中返回 `multi_agent=true` 和 `agent_results`。响应中的 `multi_agent` 字段会继续保留，避免破坏现有前端。
 
 ### 流式聊天
 
@@ -408,28 +362,26 @@ curl http://127.0.0.1:8000/conversations/demo/messages
 curl -X DELETE http://127.0.0.1:8000/conversations/demo
 ```
 
-### 文档问答
-
-```bash
-curl -X POST http://127.0.0.1:8000/documents/upload \
-  -F "file=@notes.txt"
-```
-
-```bash
-curl -X POST http://127.0.0.1:8000/documents/{document_id}/ask \
-  -H "Content-Type: application/json" \
-  -d "{\"question\":\"总结这份文档的关键结论\"}"
-```
-
 ### MCP 健康检查
 
 ```bash
 curl http://127.0.0.1:8000/mcp/health
 ```
 
-## Agent Trace 示例
+## AgentTrace 示例
 
-AgentOS 会将关键执行阶段序列化为稳定的 trace，便于前端展示、日志分析和问题排查。
+AgentOS 会把关键执行阶段序列化为 trace。不同模式下字段会略有差异，但常见字段如下：
+
+| 字段 | 说明 |
+| --- | --- |
+| `step` | 执行阶段，例如 `planner`、`thought`、`tool_call`、`observation`、`final_answer` |
+| `status` | 阶段状态，例如 `running`、`success`、`failed`、`skipped` |
+| `tool_name` | 当前阶段关联的工具名称 |
+| `duration_ms` | 阶段耗时 |
+| `metadata` | 计划、路由原因、工具参数、ReAct 轮次等调试信息 |
+| `observation` | 工具执行结果或执行观察 |
+
+简化示例：
 
 ```json
 [
@@ -438,10 +390,7 @@ AgentOS 会将关键执行阶段序列化为稳定的 trace，便于前端展示
     "status": "success",
     "message": "Selected tool: web_search.",
     "tool_name": "web_search",
-    "duration_ms": 2.18,
     "metadata": {
-      "route_score": 90,
-      "route_reason": "检测到最新/搜索/官网/github等关键词",
       "plan": {
         "question": "搜索 qwen-plus 的最新资料并总结",
         "steps": [
@@ -455,13 +404,6 @@ AgentOS 会将关键执行阶段序列化为稳定的 trace，便于前端展示
               "search_depth": "basic"
             },
             "depends_on": []
-          },
-          {
-            "step_id": "final_answer",
-            "description": "Generate the final answer from the available context and tool result.",
-            "tool_name": null,
-            "tool_args": {},
-            "depends_on": ["tool_1"]
           }
         ]
       }
@@ -470,66 +412,16 @@ AgentOS 会将关键执行阶段序列化为稳定的 trace，便于前端展示
   {
     "step": "tool_call",
     "status": "success",
-    "message": "Tool call finished: web_search",
-    "tool_name": "web_search",
-    "duration_ms": 482.31,
-    "metadata": {
-      "tool_args": {
-        "query": "搜索 qwen-plus 的最新资料并总结",
-        "max_results": 3,
-        "search_depth": "basic"
-      }
-    }
+    "tool_name": "web_search"
   },
   {
     "step": "observation",
     "status": "success",
-    "message": "Observed tool result.",
-    "tool_name": "web_search",
-    "observation": {
-      "name": "web_search",
-      "success": true,
-      "result": {
-        "query": "搜索 qwen-plus 的最新资料并总结",
-        "results": [
-          {
-            "title": "Example Result",
-            "url": "https://example.com",
-            "content": "Search result snippet..."
-          }
-        ]
-      },
-      "duration_ms": 482.31
-    }
+    "tool_name": "web_search"
   },
   {
     "step": "final_answer",
-    "status": "success",
-    "duration_ms": 1320.52
+    "status": "success"
   }
 ]
 ```
-
-Trace 中常见字段：
-
-| 字段 | 说明 |
-| --- | --- |
-| `step` | 执行阶段，例如 `planner`、`tool_call`、`observation`、`final_answer` |
-| `status` | 阶段状态：`running`、`success`、`failed`、`skipped` |
-| `tool_name` | 当前阶段关联的工具名称 |
-| `duration_ms` | 阶段耗时 |
-| `metadata` | 计划、路由原因、工具参数等调试信息 |
-| `observation` | 工具执行结果或执行观察 |
-
-## 后续规划 Roadmap
-
-- [ ] 支持模型原生 Function Calling / Tool Calling，并保留当前规则路由作为 fallback。
-- [ ] 引入向量数据库，增强长期记忆和知识库检索能力。
-- [ ] 为 Agent Trace 增加持久化检索、前端时间线和失败重放能力。
-- [ ] 将 ToolRegistry 扩展为插件化工具市场，支持动态加载和权限控制。
-- [ ] 支持多 Agent 协作编排，包括 researcher、coder、reviewer 等专业角色。
-- [ ] 增加任务队列和后台执行模式，支持长任务、异步回调和定时任务。
-- [ ] 完善 Dockerfile、Compose、健康检查和生产部署配置。
-- [ ] 增加 OpenTelemetry 指标、结构化日志和链路追踪。
-- [ ] 扩展文档问答能力，支持 PDF、DOCX、Markdown 和多文件知识库。
-- [ ] 增强安全策略，包括工具沙箱、参数脱敏、速率限制和用户级权限。

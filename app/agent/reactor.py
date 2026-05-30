@@ -55,6 +55,9 @@ class ReActResult(BaseModel):
         return self.model_dump()
 
 
+ReActCallback = Callable[[ReActReasoningStep], None]
+
+
 class ParsedReActResponse(BaseModel):
     """Parsed model response for one ReAct turn."""
 
@@ -86,7 +89,12 @@ class ReActAgent:
         self.max_tool_calls = max(int(max_tool_calls), 1)
         self.system_prompt = system_prompt
 
-    def run(self, messages: str | Sequence[ChatMessage], model: str | None = None) -> ReActResult:
+    def run(
+        self,
+        messages: str | Sequence[ChatMessage],
+        model: str | None = None,
+        callback: ReActCallback | None = None,
+    ) -> ReActResult:
         """Execute the ReAct loop and return final_answer, reasoning_steps, and tool_calls."""
 
         base_messages = self._normalize_messages(messages)
@@ -104,7 +112,8 @@ class ReActAgent:
             turn_started_at = perf_counter()
             model_reply = self._complete(self._build_prompt_messages(base_messages, scratchpad), model=model)
             parsed = parse_react_response(model_reply)
-            self._append_thought(reasoning_steps, parsed.thought)
+            thought_step = self._append_thought(reasoning_steps, parsed.thought)
+            self._emit_callback(callback, thought_step)
             if parsed.thought is not None:
                 trace.add_step(
                     AgentStep(
@@ -118,7 +127,9 @@ class ReActAgent:
 
             if parsed.final_answer is not None:
                 final_answer = self._redact_text(parsed.final_answer)
-                reasoning_steps.append(ReActReasoningStep(type="final_answer", content=final_answer))
+                final_step = ReActReasoningStep(type="final_answer", content=final_answer)
+                reasoning_steps.append(final_step)
+                self._emit_callback(callback, final_step)
                 trace.add_final_answer(
                     status="success",
                     message=final_answer,
@@ -135,7 +146,9 @@ class ReActAgent:
 
             if not parsed.action_name:
                 final_answer = self._redact_text(model_reply)
-                reasoning_steps.append(ReActReasoningStep(type="final_answer", content=final_answer))
+                final_step = ReActReasoningStep(type="final_answer", content=final_answer)
+                reasoning_steps.append(final_step)
+                self._emit_callback(callback, final_step)
                 trace.add_final_answer(
                     status="success",
                     message=final_answer,
@@ -150,13 +163,13 @@ class ReActAgent:
                     trace=trace,
                 )
 
-            reasoning_steps.append(
-                ReActReasoningStep(
-                    type="action",
-                    tool_name=parsed.action_name,
-                    tool_args=self._redact_data(parsed.action_args),
-                )
+            action_step = ReActReasoningStep(
+                type="action",
+                tool_name=parsed.action_name,
+                tool_args=self._redact_data(parsed.action_args),
             )
+            reasoning_steps.append(action_step)
+            self._emit_callback(callback, action_step)
             tool_result = self._run_registry_tool(parsed.action_name, parsed.action_args)
             tool_call = self._tool_call_from_result(parsed.action_name, parsed.action_args, tool_result)
             observation = self._observation_from_result(tool_result)
@@ -183,15 +196,15 @@ class ReActAgent:
                     metadata={"turn": turn_index},
                 )
             )
-            reasoning_steps.append(
-                ReActReasoningStep(
-                    type="observation",
-                    tool_name=parsed.action_name,
-                    observation=observation,
-                    status=tool_call.status,
-                    error=tool_call.error,
-                )
+            observation_step = ReActReasoningStep(
+                type="observation",
+                tool_name=parsed.action_name,
+                observation=observation,
+                status=tool_call.status,
+                error=tool_call.error,
             )
+            reasoning_steps.append(observation_step)
+            self._emit_callback(callback, observation_step)
             trace.add_observation(
                 status=tool_call.status,
                 observation=observation,
@@ -204,13 +217,13 @@ class ReActAgent:
             scratchpad = self._append_observation_to_scratchpad(scratchpad, model_reply, observation)
 
         final_answer = self._final_answer_after_tool_limit(base_messages, scratchpad, model=model)
-        reasoning_steps.append(
-            ReActReasoningStep(
-                type="final_answer",
-                content=final_answer,
-                status="tool_limit_reached",
-            )
+        final_step = ReActReasoningStep(
+            type="final_answer",
+            content=final_answer,
+            status="tool_limit_reached",
         )
+        reasoning_steps.append(final_step)
+        self._emit_callback(callback, final_step)
         trace.add_final_answer(
             status="success",
             message=final_answer,
@@ -219,10 +232,15 @@ class ReActAgent:
         trace.finish(AgentState.SUCCESS)
         return ReActResult(final_answer=final_answer, reasoning_steps=reasoning_steps, tool_calls=tool_calls, trace=trace)
 
-    def chat(self, messages: str | Sequence[ChatMessage], model: str | None = None) -> ReActResult:
+    def chat(
+        self,
+        messages: str | Sequence[ChatMessage],
+        model: str | None = None,
+        callback: ReActCallback | None = None,
+    ) -> ReActResult:
         """Compatibility alias for callers that expect an agent-like chat method."""
 
-        return self.run(messages, model=model)
+        return self.run(messages, model=model, callback=callback)
 
     def _build_prompt_messages(self, messages: list[ChatMessage], scratchpad: str) -> list[ChatMessage]:
         prompt_messages: list[ChatMessage] = [
@@ -357,9 +375,21 @@ class ReActAgent:
             normalized.append({"role": role, "content": content})
         return normalized
 
-    def _append_thought(self, reasoning_steps: list[ReActReasoningStep], thought: str | None) -> None:
+    def _append_thought(
+        self,
+        reasoning_steps: list[ReActReasoningStep],
+        thought: str | None,
+    ) -> ReActReasoningStep | None:
         if thought is not None:
-            reasoning_steps.append(ReActReasoningStep(type="thought", content=self._redact_text(thought)))
+            step = ReActReasoningStep(type="thought", content=self._redact_text(thought))
+            reasoning_steps.append(step)
+            return step
+        return None
+
+    def _emit_callback(self, callback: ReActCallback | None, step: ReActReasoningStep | None) -> None:
+        if callback is None or step is None:
+            return
+        callback(step)
 
     def _redact_text(self, value: str) -> str:
         return mask_sensitive_text(str(value or ""))
@@ -505,6 +535,7 @@ __all__ = [
     "DEFAULT_MAX_TOOL_CALLS",
     "ParsedReActResponse",
     "ReActAgent",
+    "ReActCallback",
     "ReActReasoningStep",
     "ReActResult",
     "ReActToolCall",

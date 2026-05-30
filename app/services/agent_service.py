@@ -1,9 +1,11 @@
+from contextvars import ContextVar
+import re
 from time import perf_counter
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
 
 from app.agent.executor import AgentExecutor, AgentTrace, tool_result_to_observation
 from app.agent.planner import AgentPlan, LLMPlanGenerator, Planner
-from app.agent.reactor import ReActAgent, ReActResult
+from app.agent.reactor import ReActAgent, ReActReasoningStep, ReActResult
 from app.agent.state import AgentStep as ReActTraceStep
 from app.core.config import Settings
 from app.core.logger import get_logger
@@ -34,6 +36,7 @@ from app.tools.tool_manager import ToolManager
 
 
 logger = get_logger(__name__)
+_PLANNER_SOURCE: ContextVar[str | None] = ContextVar("planner_source", default=None)
 
 
 class AgentService:
@@ -148,11 +151,12 @@ class AgentService:
         model: str | None = None,
         status_callback: StatusCallback | None = None,
         agent_mode: str = "plan_execute",
+        trace_callback: Callable[[AgentTraceStep], None] | None = None,
     ) -> tuple[Iterator[str], ToolResult | None, list[AgentTraceStep]]:
         """Return a streaming iterator and the tool metadata used to build it."""
 
         if agent_mode == "react":
-            reply = self._chat_react(messages, model=model)
+            reply = self._chat_react(messages, model=model, trace_callback=trace_callback)
             return iter([reply.content]), reply.tool_result, reply.trace or []
 
         trace: list[AgentTraceStep] = []
@@ -224,12 +228,21 @@ class AgentService:
         tool_result = self.executor.last_tool_result(executor_trace)
         return self.message_builder.with_tool_result(messages, tool_result), tool_result
 
-    def _chat_react(self, messages: list[ChatMessage], model: str | None = None) -> AgentReply:
+    def _chat_react(
+        self,
+        messages: list[ChatMessage],
+        model: str | None = None,
+        trace_callback: Callable[[AgentTraceStep], None] | None = None,
+    ) -> AgentReply:
         """Run the Thought -> Action -> Observation -> Final Answer loop."""
 
         started_at = perf_counter()
         try:
-            result = self.react_agent.run(messages, model=model)
+            result = self.react_agent.run(
+                messages,
+                model=model,
+                callback=self._react_reasoning_callback(trace_callback),
+            )
         except Exception:
             logger.exception(
                 "ReAct execution failed: model=%s duration_ms=%.2f",
@@ -242,6 +255,53 @@ class AgentService:
             content=result.final_answer,
             tool_result=self._last_react_tool_result(result),
             trace=self._react_trace_steps(result),
+        )
+
+    def _react_reasoning_callback(
+        self,
+        trace_callback: Callable[[AgentTraceStep], None] | None,
+    ) -> Callable[[ReActReasoningStep], None] | None:
+        if trace_callback is None:
+            return None
+
+        def emit(reasoning_step: ReActReasoningStep) -> None:
+            trace_callback(self._react_reasoning_step_to_trace_step(reasoning_step))
+
+        return emit
+
+    def _react_reasoning_step_to_trace_step(self, step: ReActReasoningStep) -> AgentTraceStep:
+        if step.type == "thought":
+            return AgentTraceStep(
+                step="thought",
+                status="success",
+                message=str(step.content or ""),
+            )
+
+        if step.type == "action":
+            return AgentTraceStep(
+                step="action",
+                status="running",
+                message=f"Selected tool: {step.tool_name}.",
+                tool_name=step.tool_name,
+                metadata={"tool_args": step.tool_args or {}},
+            )
+
+        if step.type == "observation":
+            status = step.status or ("failed" if step.error else "success")
+            return AgentTraceStep(
+                step="observation",
+                status=status,
+                message=step.error or "Observed tool result.",
+                tool_name=step.tool_name,
+                observation=step.observation,
+            )
+
+        metadata = {"reason": step.status} if step.status else None
+        return AgentTraceStep(
+            step="final_answer",
+            status="success",
+            message=str(step.content or ""),
+            metadata=metadata,
         )
 
     def _handle_search_workflow(
@@ -536,8 +596,13 @@ class AgentService:
         tool, creates a bad dependency graph, or the planner call itself fails.
         """
 
+        if self._looks_like_simple_direct_chat(messages):
+            _PLANNER_SOURCE.set("simple_direct")
+            return None, self.rule_planner.direct_answer_plan(self._latest_user_message(messages).strip())
+
         try:
             agent_plan = self.llm_planner.generate(messages)
+            _PLANNER_SOURCE.set("llm_planner")
             return self._planned_call_from_agent_plan(agent_plan), agent_plan
         except Exception as exc:
             logger.warning(
@@ -547,7 +612,185 @@ class AgentService:
 
         planned_call = self._plan_tool_call(messages)
         agent_plan = self._plan_rule_agent_steps(messages, planned_call)
+        _PLANNER_SOURCE.set("rule_fallback")
         return planned_call, agent_plan
+
+    def _looks_like_simple_direct_chat(self, messages: list[ChatMessage]) -> bool:
+        """Conservatively detect chat that should skip the extra LLM planning call."""
+
+        user_message = self._latest_user_message(messages).strip()
+        if not user_message:
+            return False
+
+        normalized = " ".join(user_message.split())
+        lowered = normalized.lower()
+        compact = re.sub(r"[\s，。！？,.!?、~～]+", "", lowered)
+
+        if self._looks_like_planner_needed(lowered):
+            return False
+
+        greetings = {
+            "hi",
+            "hello",
+            "hey",
+            "你好",
+            "您好",
+            "早上好",
+            "上午好",
+            "中午好",
+            "下午好",
+            "晚上好",
+        }
+        thanks = {
+            "thanks",
+            "thankyou",
+            "thankyou!",
+            "thx",
+            "谢谢",
+            "多谢",
+            "感谢",
+            "辛苦了",
+        }
+        small_talk = {
+            "你是谁",
+            "你好吗",
+            "在吗",
+            "在不在",
+            "你能做什么",
+            "介绍一下你自己",
+            "讲个笑话",
+            "tellmeajoke",
+            "howareyou",
+            "whatareyou",
+            "whoareyou",
+        }
+        if (
+            compact in greetings
+            or compact in thanks
+            or compact in small_talk
+            or compact.startswith(("thankyou", "thanks", "谢谢", "感谢", "多谢"))
+        ):
+            return True
+
+        if len(normalized) > 180:
+            return False
+
+        simple_direct_patterns = (
+            r"^(what|who|why|how)\s+(is|are|do|does|can|should)\b",
+            r"^(explain|describe|define|translate|write|draft)\b",
+            r"^(什么是|什么叫|为什么|怎么理解|解释一下|介绍一下|定义一下|翻译|写一?个|帮我写|说说)\S+",
+        )
+        return any(re.search(pattern, lowered) for pattern in simple_direct_patterns)
+
+    def _looks_like_planner_needed(self, lowered_message: str) -> bool:
+        """Return True for requests that should still be planned by the LLM."""
+
+        english_phrases = (
+            "look up",
+            "step by step",
+            "after that",
+        )
+        english_words = (
+            "latest",
+            "recent",
+            "current",
+            "today",
+            "tomorrow",
+            "yesterday",
+            "now",
+            "search",
+            "lookup",
+            "google",
+            "browse",
+            "web",
+            "website",
+            "webpage",
+            "url",
+            "http://",
+            "https://",
+            "www.",
+            "calculate",
+            "calc",
+            "compute",
+            "time",
+            "date",
+            "calendar",
+            "file",
+            "document",
+            "pdf",
+            "docx",
+            "xlsx",
+            "tool",
+            "mcp",
+            "api",
+            "github",
+            "open",
+            "read",
+            "summarize",
+            "summary",
+            "first",
+            "then",
+            "also",
+        )
+        literal_markers = (
+            "http://",
+            "https://",
+            "www.",
+        )
+        chinese_keywords = (
+            "最新",
+            "最近",
+            "当前",
+            "现在",
+            "今天",
+            "明天",
+            "昨天",
+            "搜索",
+            "查找",
+            "查询",
+            "联网",
+            "网上",
+            "网页",
+            "网站",
+            "链接",
+            "浏览",
+            "计算",
+            "算一下",
+            "等于多少",
+            "时间",
+            "日期",
+            "几点",
+            "星期",
+            "文件",
+            "文档",
+            "页面",
+            "工具",
+            "调用",
+            "打开",
+            "读取",
+            "总结",
+            "摘要",
+            "然后",
+            "接着",
+            "并且",
+            "以及",
+            "同时",
+            "步骤",
+            "分步骤",
+        )
+        if any(marker in lowered_message for marker in literal_markers):
+            return True
+        if any(phrase in lowered_message for phrase in english_phrases):
+            return True
+        if any(keyword in lowered_message for keyword in chinese_keywords):
+            return True
+        if any(re.search(rf"\b{re.escape(keyword)}\b", lowered_message) for keyword in english_words):
+            return True
+        if re.search(r"\d+(?:\.\d+)?\s*(?:\*\*|[+\-*/%]|=|加|减|乘|除)\s*\d+(?:\.\d+)?", lowered_message):
+            return True
+        if len(re.findall(r"[;；\n]", lowered_message)) > 0:
+            return True
+        return False
 
     def _plan_rule_agent_steps(
         self,
@@ -586,7 +829,10 @@ class AgentService:
     ) -> dict[str, Any]:
         """Attach the structured plan without changing the legacy trace shape."""
 
-        metadata: dict[str, Any] = {"plan": agent_plan.model_dump()}
+        metadata: dict[str, Any] = {
+            "plan": agent_plan.model_dump(),
+            "planner_source": _PLANNER_SOURCE.get() or "unknown",
+        }
         if planned_call is None:
             return metadata
         if planned_call.route_score:

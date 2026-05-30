@@ -307,12 +307,14 @@ def chat(
         ),
     )
     requested_model = normalize_requested_model(request.model)
+    agent_mode = resolve_agent_mode(request)
+    is_multi_agent = agent_mode == "multi_agent"
 
     try:
         reply = (
             get_manager_agent(agent).chat(messages=model_messages, model=requested_model)
-            if request.multi_agent
-            else agent.chat(messages=model_messages, model=requested_model)
+            if is_multi_agent
+            else agent.chat(messages=model_messages, model=requested_model, agent_mode=agent_mode)
         )
         store.append_exchange(conversation_id, request.message, reply.content, user_id=current_user.user_id)
         memory.add_memory(
@@ -325,8 +327,8 @@ def chat(
             reply=reply.content,
             model=requested_model or agent.model,
             conversation_id=conversation_id,
-            multi_agent=request.multi_agent,
-            agent_results=multi_agent_results_payload(reply.trace) if request.multi_agent else [],
+            multi_agent=is_multi_agent,
+            agent_results=multi_agent_results_payload(reply.trace) if is_multi_agent else [],
             used_tool=reply.used_tool,
             tool_name=reply.tool_result.name if reply.tool_result else None,
             tool_status=get_tool_status(reply.tool_result),
@@ -370,18 +372,27 @@ def stream_chat(
         ),
     )
     requested_model = normalize_requested_model(request.model)
+    agent_mode = resolve_agent_mode(request)
+    is_multi_agent = agent_mode == "multi_agent"
     likely_web_search = _looks_like_search_request(request.message)
 
     def event_stream():
         assistant_chunks: list[str] = []
-        status_queue: Queue[str] = Queue()
+        event_queue: Queue[tuple[str, object]] = Queue()
         result_queue: Queue[tuple[str, object]] = Queue(maxsize=1)
         sent_statuses: set[str] = set()
 
         def queue_status(message: str) -> None:
             clean_message = str(message or "").strip()
             if clean_message:
-                status_queue.put(clean_message)
+                event_queue.put(("status", clean_message))
+
+        def queue_trace(step: AgentTraceStepData) -> None:
+            payload = trace_step_payload(step)
+            event_queue.put(("trace", payload))
+            status_message = react_status_message(payload)
+            if status_message:
+                event_queue.put(("status", status_message))
 
         def status_event(message: str) -> str | None:
             clean_message = str(message or "").strip()
@@ -396,19 +407,34 @@ def stream_chat(
                 },
             )
 
-        def drain_status_events():
+        def trace_event(step: dict) -> str:
+            return sse_event("trace", {"step": step, "trace": [step]})
+
+        def stream_event(event_type: str, payload: object) -> str | None:
+            if event_type == "status":
+                return status_event(str(payload or ""))
+            if event_type == "trace" and isinstance(payload, dict):
+                return trace_event(payload)
+            return None
+
+        def drain_stream_events(wait: bool = False):
+            first_read = True
             while True:
                 try:
-                    message = status_queue.get_nowait()
+                    if wait and first_read:
+                        event_type, payload = event_queue.get(timeout=0.1)
+                    else:
+                        event_type, payload = event_queue.get_nowait()
                 except Empty:
                     break
+                first_read = False
 
-                event = status_event(message)
+                event = stream_event(event_type, payload)
                 if event is not None:
                     yield event
 
         try:
-            if request.multi_agent:
+            if is_multi_agent:
                 prepared_agent = get_agent(settings)
                 reply = get_manager_agent(prepared_agent).chat(messages=model_messages, model=requested_model)
                 metadata = {
@@ -446,6 +472,8 @@ def stream_chat(
                         messages=model_messages,
                         model=requested_model,
                         status_callback=queue_status,
+                        agent_mode=agent_mode,
+                        trace_callback=queue_trace if agent_mode == "react" else None,
                     )
                     result_queue.put(("ok", (prepared_agent, stream, tool_result, trace)))
                 except Exception as exc:
@@ -454,16 +482,9 @@ def stream_chat(
             prepare_thread = Thread(target=prepare_stream, daemon=True)
             prepare_thread.start()
             while prepare_thread.is_alive():
-                try:
-                    message = status_queue.get(timeout=0.1)
-                except Empty:
-                    continue
+                yield from drain_stream_events(wait=True)
 
-                event = status_event(message)
-                if event is not None:
-                    yield event
-
-            yield from drain_status_events()
+            yield from drain_stream_events()
             result_status, result_payload = result_queue.get()
             if result_status == "error":
                 if isinstance(result_payload, Exception):
@@ -478,6 +499,8 @@ def stream_chat(
                     "success": True,
                     "conversation_id": conversation_id,
                     "model": requested_model or agent.model,
+                    "multi_agent": False,
+                    "agent_results": [],
                     **tool_response_metadata(tool_result),
                     "trace": trace_payload(trace),
                 },
@@ -498,13 +521,14 @@ def stream_chat(
                     )
                 )
                 raise
-            trace.append(
-                AgentTraceStepData(
-                    step="final_answer",
-                    status="success",
-                    duration_ms=elapsed_ms(model_started_at),
+            if agent_mode != "react":
+                trace.append(
+                    AgentTraceStepData(
+                        step="final_answer",
+                        status="success",
+                        duration_ms=elapsed_ms(model_started_at),
+                    )
                 )
-            )
 
             assistant_reply = "".join(assistant_chunks)
             store.append_exchange(conversation_id, request.message, assistant_reply, user_id=current_user.user_id)
@@ -520,6 +544,8 @@ def stream_chat(
                     "success": True,
                     "conversation_id": conversation_id,
                     "model": requested_model or agent.model,
+                    "multi_agent": False,
+                    "agent_results": [],
                     **tool_response_metadata(tool_result),
                     "trace": trace_payload(trace),
                 },
@@ -588,6 +614,16 @@ def normalize_requested_model(model: str | None) -> str | None:
     if clean_model not in ALLOWED_CHAT_MODELS:
         raise InvalidArgumentsError()
     return clean_model
+
+
+def resolve_agent_mode(request: ChatRequest) -> str:
+    """Resolve the canonical execution mode from new and legacy request fields."""
+
+    # Backward compatibility: old clients only know multi_agent=True, so it wins
+    # even when agent_mode is omitted or set to another value.
+    if request.multi_agent:
+        return "multi_agent"
+    return request.agent_mode
 
 
 def _looks_like_search_request(message: str) -> bool:
@@ -683,6 +719,32 @@ def status_trace_step(message: str) -> dict:
         "status": "running",
         "message": message,
     }
+
+
+def trace_step_payload(step) -> dict:
+    """Serialize one in-flight trace step for SSE."""
+
+    if hasattr(step, "to_dict"):
+        return step.to_dict()
+    if isinstance(step, dict):
+        return dict(step)
+    return {"step": "status", "status": "running", "message": str(step)}
+
+
+def react_status_message(step: dict) -> str | None:
+    """Return a compact status line for a ReAct trace step."""
+
+    step_name = str(step.get("step") or "")
+    if step_name in {"thought", "react_thought"}:
+        return "ReAct thinking..."
+    if step_name in {"action", "tool_call"}:
+        tool_name = step.get("tool_name") or step.get("toolName")
+        return f"ReAct calling tool: {tool_name}..." if tool_name else "ReAct calling tool..."
+    if step_name == "observation":
+        return "ReAct observed tool result."
+    if step_name == "final_answer":
+        return "ReAct final answer ready."
+    return None
 
 
 def elapsed_ms(started_at: float) -> float:
