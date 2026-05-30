@@ -59,6 +59,32 @@ def test_react_agent_runs_tool_and_appends_observation():
     assert result.tool_calls[0].status == "success"
 
 
+def test_react_agent_accepts_structured_json_turns_and_writes_trace():
+    registry = ToolRegistry()
+    registry.register(EchoTool())
+    llm = FakeLLM(
+        [
+            '{"thought":"Echo the text.","action":"echo","action_args":{"text":"hello"},"final_answer":null}',
+            '{"thought":"The observation is enough.","action":null,"action_args":{},"final_answer":"hello"}',
+        ]
+    )
+
+    result = ReActAgent(llm, registry, max_tool_calls=3).run("say hello")
+
+    assert result.final_answer == "hello"
+    assert result.trace is not None
+    assert [step.step for step in result.trace.steps] == [
+        "planner",
+        "thought",
+        "tool_call",
+        "observation",
+        "thought",
+        "final_answer",
+    ]
+    assert result.trace.steps[2].tool_name == "echo"
+    assert result.trace.steps[3].observation["result"] == {"text": "hello"}
+
+
 def test_react_agent_rejects_unregistered_tool_without_executing_registry():
     llm = FakeLLM(
         [

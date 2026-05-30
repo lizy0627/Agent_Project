@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import json
 import re
+from time import perf_counter
 from typing import Any, Callable, Mapping, Sequence
 
 from pydantic import BaseModel, Field
 
+from app.agent.state import AgentState, AgentStep, AgentTrace, ToolCallRecord
 from app.core.safe_logging import mask_sensitive_text, safe_log_data
 from app.services.agent_types import ChatMessage
 from app.tools.base import ToolResult
@@ -47,6 +49,7 @@ class ReActResult(BaseModel):
     final_answer: str
     reasoning_steps: list[ReActReasoningStep] = Field(default_factory=list)
     tool_calls: list[ReActToolCall] = Field(default_factory=list)
+    trace: AgentTrace | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return self.model_dump()
@@ -57,8 +60,14 @@ class ParsedReActResponse(BaseModel):
 
     thought: str | None = None
     final_answer: str | None = None
-    action_name: str | None = None
+    action: str | None = None
     action_args: dict[str, Any] = Field(default_factory=dict)
+
+    @property
+    def action_name(self) -> str | None:
+        """Compatibility alias for older callers and tests."""
+
+        return self.action
 
 
 class ReActAgent:
@@ -74,7 +83,7 @@ class ReActAgent:
     ) -> None:
         self.llm_client = llm_client
         self.tool_registry = tool_registry
-        self.max_tool_calls = min(max(int(max_tool_calls), 1), DEFAULT_MAX_TOOL_CALLS)
+        self.max_tool_calls = max(int(max_tool_calls), 1)
         self.system_prompt = system_prompt
 
     def run(self, messages: str | Sequence[ChatMessage], model: str | None = None) -> ReActResult:
@@ -83,29 +92,62 @@ class ReActAgent:
         base_messages = self._normalize_messages(messages)
         reasoning_steps: list[ReActReasoningStep] = []
         tool_calls: list[ReActToolCall] = []
+        trace = AgentTrace(question=self._latest_user_message(base_messages))
+        trace.add_planner(
+            status="success",
+            message="Started ReAct loop.",
+            metadata={"mode": "react", "max_steps": self.max_tool_calls},
+        )
         scratchpad = ""
 
-        for _ in range(self.max_tool_calls):
+        for turn_index in range(1, self.max_tool_calls + 1):
+            turn_started_at = perf_counter()
             model_reply = self._complete(self._build_prompt_messages(base_messages, scratchpad), model=model)
             parsed = parse_react_response(model_reply)
             self._append_thought(reasoning_steps, parsed.thought)
+            if parsed.thought is not None:
+                trace.add_step(
+                    AgentStep(
+                        step="thought",
+                        status="success",
+                        message=self._redact_text(parsed.thought),
+                        duration_ms=self._elapsed_ms(turn_started_at),
+                        metadata={"turn": turn_index},
+                    )
+                )
 
             if parsed.final_answer is not None:
                 final_answer = self._redact_text(parsed.final_answer)
                 reasoning_steps.append(ReActReasoningStep(type="final_answer", content=final_answer))
+                trace.add_final_answer(
+                    status="success",
+                    message=final_answer,
+                    duration_ms=self._elapsed_ms(turn_started_at),
+                    metadata={"turn": turn_index},
+                )
+                trace.finish(AgentState.SUCCESS)
                 return ReActResult(
                     final_answer=final_answer,
                     reasoning_steps=reasoning_steps,
                     tool_calls=tool_calls,
+                    trace=trace,
                 )
 
             if not parsed.action_name:
                 final_answer = self._redact_text(model_reply)
                 reasoning_steps.append(ReActReasoningStep(type="final_answer", content=final_answer))
+                trace.add_final_answer(
+                    status="success",
+                    message=final_answer,
+                    duration_ms=self._elapsed_ms(turn_started_at),
+                    metadata={"turn": turn_index, "reason": "missing_action"},
+                )
+                trace.finish(AgentState.SUCCESS)
                 return ReActResult(
                     final_answer=final_answer,
                     reasoning_steps=reasoning_steps,
                     tool_calls=tool_calls,
+                    trace=trace,
                 )
 
             reasoning_steps.append(
@@ -119,6 +161,28 @@ class ReActAgent:
             tool_call = self._tool_call_from_result(parsed.action_name, parsed.action_args, tool_result)
             observation = self._observation_from_result(tool_result)
             tool_calls.append(tool_call)
+            trace.add_step(
+                AgentStep(
+                    step="tool_call",
+                    status=tool_call.status,
+                    message=tool_call.error or f"Tool call finished: {parsed.action_name}",
+                    tool_name=parsed.action_name,
+                    tool_args=self._redact_data(parsed.action_args),
+                    tool_call=ToolCallRecord(
+                        tool_name=parsed.action_name,
+                        tool_args=self._redact_data(parsed.action_args),
+                        status=tool_call.status,
+                        result=tool_call.result,
+                        error=tool_call.error,
+                        duration_ms=tool_call.duration_ms,
+                        error_code=tool_call.error_code,
+                        retryable=tool_call.retryable,
+                    ),
+                    duration_ms=tool_call.duration_ms,
+                    error=tool_call.error,
+                    metadata={"turn": turn_index},
+                )
+            )
             reasoning_steps.append(
                 ReActReasoningStep(
                     type="observation",
@@ -127,6 +191,15 @@ class ReActAgent:
                     status=tool_call.status,
                     error=tool_call.error,
                 )
+            )
+            trace.add_observation(
+                status=tool_call.status,
+                observation=observation,
+                message=tool_call.error or "Observed tool result.",
+                tool_name=parsed.action_name,
+                duration_ms=tool_call.duration_ms,
+                error=tool_call.error,
+                metadata={"turn": turn_index},
             )
             scratchpad = self._append_observation_to_scratchpad(scratchpad, model_reply, observation)
 
@@ -138,7 +211,13 @@ class ReActAgent:
                 status="tool_limit_reached",
             )
         )
-        return ReActResult(final_answer=final_answer, reasoning_steps=reasoning_steps, tool_calls=tool_calls)
+        trace.add_final_answer(
+            status="success",
+            message=final_answer,
+            metadata={"reason": "max_steps_reached", "max_steps": self.max_tool_calls},
+        )
+        trace.finish(AgentState.SUCCESS)
+        return ReActResult(final_answer=final_answer, reasoning_steps=reasoning_steps, tool_calls=tool_calls, trace=trace)
 
     def chat(self, messages: str | Sequence[ChatMessage], model: str | None = None) -> ReActResult:
         """Compatibility alias for callers that expect an agent-like chat method."""
@@ -166,14 +245,20 @@ class ReActAgent:
         tools = self._available_tools()
         tool_names = ", ".join(tool["name"] for tool in tools) or "(no tools registered)"
         return (
-            "You are a ReAct agent. Use this exact format:\n"
-            "Thought: brief reasoning about the next step\n"
-            'Action: {"tool": "<tool name>", "args": {}}\n'
-            "Observation: the runtime will append the tool result\n"
-            "Final Answer: the final response to the user\n\n"
+            "You are a ReAct agent. Return only one valid JSON object each turn, with no markdown.\n"
+            "The JSON keys are:\n"
+            '- "thought": brief reasoning about the next step\n'
+            '- "action": a registered tool name, or null when final_answer is present\n'
+            '- "action_args": an object with tool arguments\n'
+            '- "final_answer": the final response, or null when action is present\n\n'
+            "Example tool turn: "
+            '{"thought":"I need current data.","action":"web_search","action_args":{"query":"..."},"final_answer":null}\n'
+            "Example final turn: "
+            '{"thought":"I can answer now.","action":null,"action_args":{},"final_answer":"..."}\n\n'
             "Rules:\n"
             f"- Action must choose one registered tool only: {tool_names}.\n"
             f"- You may call at most {self.max_tool_calls} tools, then you must provide Final Answer.\n"
+            "- The runtime will append Observation after every action, including tool failures.\n"
             "- Never reveal, repeat, or infer API keys, tokens, passwords, secrets, or Authorization headers.\n"
             "- Use Final Answer when no tool is needed.\n\n"
             f"Available tools:\n{json.dumps(tools, ensure_ascii=False)}"
@@ -282,11 +367,24 @@ class ReActAgent:
     def _redact_data(self, value: Any) -> Any:
         return safe_log_data(value, max_length=MAX_OBSERVATION_TEXT_LENGTH)
 
+    def _latest_user_message(self, messages: list[ChatMessage]) -> str:
+        for message in reversed(messages):
+            if message.get("role") == "user":
+                return str(message.get("content") or "")
+        return ""
+
+    def _elapsed_ms(self, started_at: float) -> float:
+        return round((perf_counter() - started_at) * 1000, 2)
+
 
 def parse_react_response(text: str) -> ParsedReActResponse:
     """Parse Thought / Action / Final Answer from one model response."""
 
     clean_text = str(text or "").strip()
+    structured = _parse_structured_react_response(clean_text)
+    if structured is not None:
+        return structured
+
     final_answer = _extract_section(clean_text, "Final Answer", consume_rest=True)
     thought = _extract_section(clean_text, "Thought")
     if final_answer is not None:
@@ -300,8 +398,25 @@ def parse_react_response(text: str) -> ParsedReActResponse:
     action_name, action_args = parse_action(action_block, action_input)
     return ParsedReActResponse(
         thought=mask_sensitive_text(thought.strip()) if thought else None,
-        action_name=action_name,
+        action=action_name,
         action_args=action_args,
+    )
+
+
+def _parse_structured_react_response(text: str) -> ParsedReActResponse | None:
+    payload = _loads_json_object(_strip_code_fence(text))
+    if payload is None:
+        return None
+
+    action = _string_value(payload, "action", "tool", "tool_name", "action_name")
+    final_answer = payload.get("final_answer")
+    thought = payload.get("thought")
+    action_args = _mapping_value(payload, "action_args", "args", "arguments", "tool_args")
+    return ParsedReActResponse(
+        thought=mask_sensitive_text(str(thought).strip()) if thought is not None else None,
+        action=action,
+        action_args=action_args,
+        final_answer=mask_sensitive_text(str(final_answer).strip()) if final_answer is not None else None,
     )
 
 

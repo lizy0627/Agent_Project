@@ -16,8 +16,8 @@ class SummaryAgent(BaseAgent):
 
     def run(self, question: str, messages: list[ChatMessage], model: str | None = None) -> AgentResult:
         started_at = perf_counter()
-        task = "Summarize the user's request and any provided context into key points."
-        source_text = self._source_text(question, messages)
+        task = question.strip() or "Summarize the user's request and any provided context into key points."
+        source_text = self._source_text(task, messages)
         try:
             content = self.llm_client.complete_chat(
                 [
@@ -53,10 +53,17 @@ class SummaryAgent(BaseAgent):
         )
 
     def _source_text(self, question: str, messages: list[ChatMessage]) -> str:
+        sections = []
+        if question:
+            sections.append(f"task: {question}")
+
         history = []
         for message in messages[-6:]:
             role = message.get("role", "")
             content = message.get("content", "")
             if role and content:
                 history.append(f"{role}: {content}")
-        return "\n".join(history) or question
+        if history:
+            sections.append("conversation:\n" + "\n".join(history))
+
+        return "\n\n".join(sections) or question

@@ -2,7 +2,9 @@ from time import perf_counter
 from typing import Any, Iterator
 
 from app.agent.executor import AgentExecutor, AgentTrace, tool_result_to_observation
-from app.agent.planner import AgentPlan, Planner
+from app.agent.planner import AgentPlan, LLMPlanGenerator, Planner
+from app.agent.reactor import ReActAgent, ReActResult
+from app.agent.state import AgentStep as ReActTraceStep
 from app.core.config import Settings
 from app.core.logger import get_logger
 from app.core.safe_logging import safe_log_data
@@ -56,8 +58,20 @@ class AgentService:
         self._inject_mcp_manager_into_tool()
         self.mcp_router = MCPRouter(self.mcp_manager)
         self.tool_route_planner = AgentPlanner(settings=self.settings, mcp_router=self.mcp_router)
-        self.planner = Planner(max_steps=settings.max_agent_steps)
+        self.rule_planner = Planner(max_steps=settings.max_agent_steps)
+        self.llm_planner = LLMPlanGenerator(
+            llm_client=self.llm_client,
+            tool_registry=self.tool_manager,
+            max_steps=settings.max_agent_steps,
+        )
+        # Keep the old attribute name for callers that still inspect AgentService.planner.
+        self.planner = self.rule_planner
         self.executor = AgentExecutor(self.tool_manager)
+        self.react_agent = ReActAgent(
+            llm_client=self.llm_client,
+            tool_registry=self.tool_manager,
+            max_tool_calls=settings.max_agent_steps,
+        )
         self.message_builder = MessageBuilder()
         self.search_workflow = SearchWorkflow(
             self.tool_manager,
@@ -70,8 +84,16 @@ class AgentService:
         if isinstance(mcp_tool, MCPTool) and mcp_tool.manager is None:
             mcp_tool.manager = self.mcp_manager
 
-    def chat(self, messages: list[ChatMessage], model: str | None = None) -> AgentReply:
+    def chat(
+        self,
+        messages: list[ChatMessage],
+        model: str | None = None,
+        agent_mode: str = "plan_execute",
+    ) -> AgentReply:
         """Send a chat request with complete context and return model text."""
+
+        if agent_mode == "react":
+            return self._chat_react(messages, model=model)
 
         started_at = perf_counter()
         status = "failed"
@@ -105,10 +127,19 @@ class AgentService:
                 self._elapsed_ms(started_at),
             )
 
-    def stream_chat(self, messages: list[ChatMessage], model: str | None = None) -> Iterator[str]:
+    def stream_chat(
+        self,
+        messages: list[ChatMessage],
+        model: str | None = None,
+        agent_mode: str = "plan_execute",
+    ) -> Iterator[str]:
         """Stream a chat request with complete context."""
 
-        stream, _tool_result, _trace = self.stream_chat_with_tool_result(messages, model=model)
+        stream, _tool_result, _trace = self.stream_chat_with_tool_result(
+            messages,
+            model=model,
+            agent_mode=agent_mode,
+        )
         yield from stream
 
     def stream_chat_with_tool_result(
@@ -116,8 +147,13 @@ class AgentService:
         messages: list[ChatMessage],
         model: str | None = None,
         status_callback: StatusCallback | None = None,
+        agent_mode: str = "plan_execute",
     ) -> tuple[Iterator[str], ToolResult | None, list[AgentTraceStep]]:
         """Return a streaming iterator and the tool metadata used to build it."""
+
+        if agent_mode == "react":
+            reply = self._chat_react(messages, model=model)
+            return iter([reply.content]), reply.tool_result, reply.trace or []
 
         trace: list[AgentTraceStep] = []
         emitted_statuses: set[str] = set()
@@ -183,11 +219,30 @@ class AgentService:
     ) -> tuple[list[ChatMessage], ToolResult | None]:
         """Apply optional local tool context before calling the model."""
 
-        planned_call = self._plan_tool_call(messages)
-        agent_plan = self._plan_agent_steps(messages, planned_call)
+        planned_call, agent_plan = self._plan_conversation(messages)
         executor_trace = self.executor.execute(agent_plan)
         tool_result = self.executor.last_tool_result(executor_trace)
         return self.message_builder.with_tool_result(messages, tool_result), tool_result
+
+    def _chat_react(self, messages: list[ChatMessage], model: str | None = None) -> AgentReply:
+        """Run the Thought -> Action -> Observation -> Final Answer loop."""
+
+        started_at = perf_counter()
+        try:
+            result = self.react_agent.run(messages, model=model)
+        except Exception:
+            logger.exception(
+                "ReAct execution failed: model=%s duration_ms=%.2f",
+                model or self.model,
+                self._elapsed_ms(started_at),
+            )
+            raise
+
+        return AgentReply(
+            content=result.final_answer,
+            tool_result=self._last_react_tool_result(result),
+            trace=self._react_trace_steps(result),
+        )
 
     def _handle_search_workflow(
         self,
@@ -247,8 +302,7 @@ class AgentService:
 
         started_at = perf_counter()
         try:
-            planned_call = self._plan_tool_call(messages)
-            agent_plan = self._plan_agent_steps(messages, planned_call)
+            planned_call, agent_plan = self._plan_conversation(messages)
         except Exception as exc:
             trace.append(
                 AgentTraceStep(
@@ -473,14 +527,54 @@ class AgentService:
     def _plan_tool_call(self, messages: list[ChatMessage]) -> PlannedToolCall | None:
         return self.tool_route_planner.plan(messages)
 
-    def _plan_agent_steps(
+    def _plan_conversation(self, messages: list[ChatMessage]) -> tuple[PlannedToolCall | None, AgentPlan]:
+        """Prefer the LLM planner, then fall back to the original rule planner.
+
+        This keeps /chat and /chat/stream stable: the executor still receives
+        the same AgentPlan/PlanStep models, and the old AgentPlanner route is
+        still used whenever the LLM returns invalid JSON, chooses an unknown
+        tool, creates a bad dependency graph, or the planner call itself fails.
+        """
+
+        try:
+            agent_plan = self.llm_planner.generate(messages)
+            return self._planned_call_from_agent_plan(agent_plan), agent_plan
+        except Exception as exc:
+            logger.warning(
+                "LLM planner failed; falling back to rule planner: error=%s",
+                exc,
+            )
+
+        planned_call = self._plan_tool_call(messages)
+        agent_plan = self._plan_rule_agent_steps(messages, planned_call)
+        return planned_call, agent_plan
+
+    def _plan_rule_agent_steps(
         self,
         messages: list[ChatMessage],
         planned_call: PlannedToolCall | None,
     ) -> AgentPlan:
-        """Build the structured Pydantic plan used by traces and debugging."""
+        """Build the original deterministic plan from the rule route result."""
 
-        return self.planner.plan(self._latest_user_message(messages), planned_call)
+        return self.rule_planner.plan(self._latest_user_message(messages), planned_call)
+
+    def _planned_call_from_agent_plan(self, agent_plan: AgentPlan) -> PlannedToolCall | None:
+        """Expose the first LLM-selected tool through the legacy trace shape.
+
+        AgentPlan remains the source of truth for execution. This adapter only
+        preserves existing status messages, search workflow hooks, and trace
+        metadata that were built around a single PlannedToolCall.
+        """
+
+        for step in agent_plan.steps:
+            if step.tool_name:
+                return PlannedToolCall(
+                    name=step.tool_name,
+                    arguments=step.tool_args,
+                    route_reason="LLM planner selected this tool from ToolRegistry.list_tools().",
+                    route_score=100,
+                )
+        return None
 
     def _latest_user_message(self, messages: list[ChatMessage]) -> str:
         return self.tool_route_planner.latest_user_message(messages)
@@ -505,6 +599,56 @@ class AgentService:
         if isinstance(observation, ToolResult):
             return tool_result_to_observation(observation)
         return observation
+
+    def _react_trace_steps(self, result: ReActResult) -> list[AgentTraceStep]:
+        """Convert AgentTrace steps into the legacy API trace dataclass."""
+
+        if result.trace is None:
+            return []
+
+        trace_steps: list[AgentTraceStep] = []
+        for step in result.trace.steps:
+            trace_steps.append(
+                AgentTraceStep(
+                    step=step.step,
+                    status=step.status,
+                    message=step.message or step.error,
+                    tool_name=step.tool_name,
+                    observation=self._serialize_react_observation(step),
+                    duration_ms=step.duration_ms,
+                    metadata=self._react_step_metadata(step),
+                )
+            )
+        return trace_steps
+
+    def _react_step_metadata(self, step: ReActTraceStep) -> dict[str, Any] | None:
+        metadata = dict(step.metadata or {})
+        if step.tool_args:
+            metadata["tool_args"] = step.tool_args
+        if step.tool_call is not None:
+            metadata["tool_call"] = step.tool_call.model_dump(exclude_none=True)
+        return metadata or None
+
+    def _serialize_react_observation(self, step: ReActTraceStep) -> Any:
+        if isinstance(step.observation, ToolResult):
+            return tool_result_to_observation(step.observation)
+        return step.observation
+
+    def _last_react_tool_result(self, result: ReActResult) -> ToolResult | None:
+        if not result.tool_calls:
+            return None
+
+        tool_call = result.tool_calls[-1]
+        return ToolResult(
+            name=tool_call.tool_name,
+            success=tool_call.status == "success",
+            result=tool_call.result,
+            error=tool_call.error,
+            duration_ms=tool_call.duration_ms,
+            error_code=tool_call.error_code,
+            error_message=tool_call.error,
+            retryable=bool(tool_call.retryable),
+        )
 
     def _elapsed_seconds(self, started_at: float) -> float:
         return round(perf_counter() - started_at, 2)

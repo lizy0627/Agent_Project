@@ -19,6 +19,7 @@ from app.core.exceptions import (
 )
 from app.core.logger import get_logger
 from app.memory import MemoryManager
+from app.memory.vector_store import MemoryEmbeddingProvider
 from app.schemas.chat import (
     ChatRequest,
     ChatResponse,
@@ -58,7 +59,7 @@ cached_manager_agent_source: DashScopeAgent | None = None
 cached_conversation_store: ConversationStoreProtocol | None = None
 cached_conversation_store_signature: tuple[str, str, str | None, int] | None = None
 cached_memory_manager: MemoryManager | None = None
-cached_memory_manager_signature: tuple[str, int, int] | None = None
+cached_memory_manager_signature: tuple[str, int, int, bool, int, str, str | None, str] | None = None
 DEFAULT_SYSTEM_PROMPT = "\u4f60\u662f\u4e00\u4e2a\u7b80\u6d01\u3001\u53ef\u9760\u7684\u4e2d\u6587 AI \u52a9\u624b\u3002"
 ALLOWED_CHAT_MODELS = {"qwen-plus", "qwen-turbo", "qwen-max"}
 WEB_SEARCH_STATUS_SEARCHING = "正在联网搜索..."
@@ -187,15 +188,31 @@ def get_memory_manager(settings: Settings = Depends(get_settings)) -> MemoryMana
         str(settings.memory_json_path),
         settings.memory_search_limit,
         settings.memory_recent_context_limit,
+        settings.memory_vector_enabled,
+        settings.memory_vector_top_k,
+        settings.memory_embedding_model,
+        settings.dashscope_api_key,
+        settings.dashscope_base_url,
     )
     with store_lock:
         if cached_memory_manager is None or cached_memory_manager_signature != signature:
+            embedding_provider = (
+                MemoryEmbeddingProvider.from_settings(settings) if settings.memory_vector_enabled else None
+            )
             cached_memory_manager = MemoryManager(
                 json_path=settings.memory_json_path,
                 short_limit=max(settings.memory_recent_context_limit * 2, 2),
+                vector_enabled=settings.memory_vector_enabled,
+                vector_top_k=settings.memory_vector_top_k,
+                embedding_provider=embedding_provider,
             )
             cached_memory_manager_signature = signature
-            logger.info("MemoryManager initialized: json_path=%s", settings.memory_json_path)
+            logger.info(
+                "MemoryManager initialized: json_path=%s vector_enabled=%s vector_top_k=%s",
+                settings.memory_json_path,
+                settings.memory_vector_enabled,
+                settings.memory_vector_top_k,
+            )
 
         return cached_memory_manager
 
@@ -312,7 +329,11 @@ def chat(
         reply = (
             get_manager_agent(agent).chat(messages=model_messages, model=requested_model)
             if request.multi_agent
-            else agent.chat(messages=model_messages, model=requested_model)
+            else agent.chat(
+                messages=model_messages,
+                model=requested_model,
+                agent_mode=request.agent_mode,
+            )
         )
         store.append_exchange(conversation_id, request.message, reply.content, user_id=current_user.user_id)
         memory.add_memory(
@@ -446,6 +467,7 @@ def stream_chat(
                         messages=model_messages,
                         model=requested_model,
                         status_callback=queue_status,
+                        agent_mode=request.agent_mode,
                     )
                     result_queue.put(("ok", (prepared_agent, stream, tool_result, trace)))
                 except Exception as exc:
@@ -498,13 +520,14 @@ def stream_chat(
                     )
                 )
                 raise
-            trace.append(
-                AgentTraceStepData(
-                    step="final_answer",
-                    status="success",
-                    duration_ms=elapsed_ms(model_started_at),
+            if request.agent_mode != "react":
+                trace.append(
+                    AgentTraceStepData(
+                        step="final_answer",
+                        status="success",
+                        duration_ms=elapsed_ms(model_started_at),
+                    )
                 )
-            )
 
             assistant_reply = "".join(assistant_chunks)
             store.append_exchange(conversation_id, request.message, assistant_reply, user_id=current_user.user_id)

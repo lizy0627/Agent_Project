@@ -16,7 +16,7 @@ class CodeAgent(BaseAgent):
 
     def run(self, question: str, messages: list[ChatMessage], model: str | None = None) -> AgentResult:
         started_at = perf_counter()
-        task = "Analyze code-related requirements, bugs, APIs, architecture, or implementation details."
+        task = question.strip() or "Analyze code-related requirements, bugs, APIs, architecture, or implementation details."
         try:
             content = self.llm_client.complete_chat(
                 [
@@ -28,7 +28,7 @@ class CodeAgent(BaseAgent):
                             "If repository context is missing, state what should be inspected."
                         ),
                     },
-                    {"role": "user", "content": question},
+                    {"role": "user", "content": task},
                 ],
                 model=model,
             )

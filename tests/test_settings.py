@@ -16,6 +16,9 @@ def test_settings_loads_canonical_env_names(monkeypatch, tmp_path):
     monkeypatch.setenv("BASE_URL", "https://example.test/v1")
     monkeypatch.setenv("SEARCH_API_KEY", "search-key")
     monkeypatch.setenv("MEMORY_PATH", str(memory_path))
+    monkeypatch.setenv("MEMORY_VECTOR_ENABLED", "true")
+    monkeypatch.setenv("MEMORY_VECTOR_TOP_K", "3")
+    monkeypatch.setenv("MEMORY_EMBEDDING_MODEL", "embedding-test")
     monkeypatch.setenv("MAX_AGENT_STEPS", "3")
 
     settings = Settings(_env_file=None)
@@ -25,6 +28,9 @@ def test_settings_loads_canonical_env_names(monkeypatch, tmp_path):
     assert settings.base_url == "https://example.test/v1"
     assert settings.search_api_key == "search-key"
     assert settings.memory_path == Path(memory_path)
+    assert settings.memory_vector_enabled is True
+    assert settings.memory_vector_top_k == 3
+    assert settings.memory_embedding_model == "embedding-test"
     assert settings.max_agent_steps == 3
 
 

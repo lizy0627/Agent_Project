@@ -1,4 +1,4 @@
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -10,6 +10,10 @@ class ChatRequest(BaseModel):
     multi_agent: bool = Field(
         default=False,
         description="Enable ManagerAgent orchestration with specialized sub agents.",
+    )
+    agent_mode: Literal["plan_execute", "react"] = Field(
+        default="plan_execute",
+        description="Agent execution mode. plan_execute preserves the existing planner/executor flow.",
     )
     system_prompt: str | None = Field(
         default=None,

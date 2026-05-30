@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 import json
 from time import perf_counter
 
@@ -69,6 +70,19 @@ CODE_KEYWORDS = (
 )
 
 
+SubAgent = SearchAgent | SummaryAgent | CodeAgent
+
+
+@dataclass(frozen=True)
+class AgentPlanItem:
+    """One ManagerAgent routing decision."""
+
+    agent: SubAgent
+    task: str
+    reason: str
+    source: str
+
+
 class ManagerAgent(BaseAgent):
     """Decompose a user request, dispatch sub agents, and aggregate the final answer."""
 
@@ -90,24 +104,33 @@ class ManagerAgent(BaseAgent):
     def chat(self, messages: list[ChatMessage], model: str | None = None) -> AgentReply:
         started_at = perf_counter()
         question = self._latest_user_message(messages)
-        selected_agents = self.select_agents(question)
-        tasks = [agent.name for agent in selected_agents]
+        plan = self.plan_agents(question, messages, model=model)
+        tasks = [item.agent.name for item in plan]
         trace: list[AgentTraceStep] = [
             AgentTraceStep(
                 step="multi_agent_manager",
                 status="success",
-                message=f"Selected agents: {', '.join(tasks)}",
+                message=f"Planned agents: {', '.join(tasks)}",
                 duration_ms=self._elapsed_ms(started_at),
                 metadata={
                     "manager": self.name,
-                    "tasks": [{"agent_name": agent.name, "task": self._task_for_agent(agent.name)} for agent in selected_agents],
+                    "router": plan[0].source if plan else "none",
+                    "tasks": [
+                        {
+                            "agent_name": item.agent.name,
+                            "task": item.task,
+                            "reason": item.reason,
+                            "source": item.source,
+                        }
+                        for item in plan
+                    ],
                 },
             )
         ]
 
         results: list[AgentResult] = []
-        for agent in selected_agents:
-            result = agent.run(question, messages, model=model)
+        for item in plan:
+            result = item.agent.run(item.task, messages, model=model)
             results.append(result)
             trace.append(
                 AgentTraceStep(
@@ -117,7 +140,11 @@ class ManagerAgent(BaseAgent):
                     tool_name=result.agent_name,
                     observation=result.to_dict(),
                     duration_ms=result.duration_ms,
-                    metadata={"agent_name": result.agent_name},
+                    metadata={
+                        "agent_name": result.agent_name,
+                        "task": item.task,
+                        "reason": item.reason,
+                    },
                 )
             )
 
@@ -128,6 +155,7 @@ class ManagerAgent(BaseAgent):
                 step="final_answer",
                 status="success",
                 message="ManagerAgent aggregated sub-agent results.",
+                observation={"content": content},
                 duration_ms=self._elapsed_ms(final_started_at),
                 metadata={
                     "manager": self.name,
@@ -137,9 +165,50 @@ class ManagerAgent(BaseAgent):
         )
         return AgentReply(content=content, trace=trace)
 
-    def select_agents(self, question: str) -> list[SearchAgent | SummaryAgent | CodeAgent]:
+    def plan_agents(
+        self,
+        question: str,
+        messages: list[ChatMessage] | None = None,
+        model: str | None = None,
+    ) -> list[AgentPlanItem]:
+        """Use an LLM router to plan sub-agent calls, with keyword selection as fallback."""
+
+        try:
+            raw_plan = self.llm_client.complete_chat(
+                [
+                    {
+                        "role": "system",
+                        "content": (
+                            "You are the ManagerAgent router. Choose which sub agents should handle "
+                            "the user request. Return only valid JSON matching this schema: "
+                            '{"agents":[{"name":"SearchAgent","task":"...","reason":"..."}]}. '
+                            "Allowed agent names are exactly SearchAgent, SummaryAgent, and CodeAgent. "
+                            "Use SearchAgent for external, current, source-backed, or web information. "
+                            "Use CodeAgent for software, code, debugging, APIs, architecture, or tests. "
+                            "Use SummaryAgent for summarization, extraction, long context, or general "
+                            "synthesis. Select at least one agent and give each a concrete task."
+                        ),
+                    },
+                    {
+                        "role": "user",
+                        "content": json.dumps(
+                            {
+                                "question": question,
+                                "recent_messages": self._recent_messages(messages or []),
+                            },
+                            ensure_ascii=False,
+                        ),
+                    },
+                ],
+                model=model,
+            )
+            return self._parse_agent_plan(raw_plan)
+        except Exception:
+            return self._fallback_agent_plan(question)
+
+    def select_agents(self, question: str) -> list[SubAgent]:
         lowered = question.lower()
-        selected: list[SearchAgent | SummaryAgent | CodeAgent] = []
+        selected: list[SubAgent] = []
         if any(keyword in lowered for keyword in SEARCH_KEYWORDS):
             selected.append(self.search_agent)
         if any(keyword in lowered for keyword in CODE_KEYWORDS):
@@ -149,6 +218,66 @@ class ManagerAgent(BaseAgent):
         if not selected:
             selected.append(self.summary_agent)
         return selected
+
+    def _parse_agent_plan(self, raw_plan: str) -> list[AgentPlanItem]:
+        payload = json.loads(raw_plan)
+        agents = payload.get("agents") if isinstance(payload, dict) else None
+        if not isinstance(agents, list) or not agents:
+            raise ValueError("Router response must include a non-empty agents list.")
+
+        plan: list[AgentPlanItem] = []
+        seen_names: set[str] = set()
+        for item in agents:
+            if not isinstance(item, dict):
+                raise ValueError("Router agent entries must be objects.")
+            name = item.get("name")
+            task = item.get("task")
+            reason = item.get("reason")
+            if not isinstance(name, str) or name not in self._agent_map():
+                raise ValueError("Router selected an unsupported agent.")
+            if name in seen_names:
+                raise ValueError("Router selected the same agent more than once.")
+            if not isinstance(task, str) or not task.strip():
+                raise ValueError("Router agent task must be a non-empty string.")
+            if not isinstance(reason, str) or not reason.strip():
+                raise ValueError("Router agent reason must be a non-empty string.")
+            seen_names.add(name)
+            plan.append(
+                AgentPlanItem(
+                    agent=self._agent_map()[name],
+                    task=task.strip(),
+                    reason=reason.strip(),
+                    source="llm_router",
+                )
+            )
+
+        return plan
+
+    def _fallback_agent_plan(self, question: str) -> list[AgentPlanItem]:
+        task = question.strip() or "Handle the user request."
+        return [
+            AgentPlanItem(
+                agent=agent,
+                task=task,
+                reason="LLM router returned an invalid plan; selected by keyword fallback.",
+                source="keyword_fallback",
+            )
+            for agent in self.select_agents(question)
+        ]
+
+    def _agent_map(self) -> dict[str, SubAgent]:
+        return {
+            "SearchAgent": self.search_agent,
+            "SummaryAgent": self.summary_agent,
+            "CodeAgent": self.code_agent,
+        }
+
+    def _recent_messages(self, messages: list[ChatMessage]) -> list[ChatMessage]:
+        return [
+            {"role": message.get("role", ""), "content": message.get("content", "")}
+            for message in messages[-6:]
+            if message.get("role") and message.get("content")
+        ]
 
     def _aggregate(
         self,

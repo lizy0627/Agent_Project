@@ -23,11 +23,11 @@ class SearchAgent(BaseAgent):
 
     def run(self, question: str, messages: list[ChatMessage], model: str | None = None) -> AgentResult:
         started_at = perf_counter()
-        task = "Search for external references relevant to the user question."
+        task = question.strip() or "Search for external references relevant to the user question."
         try:
             tool_result = self.tool_manager.call(
                 "web_search",
-                query=question,
+                query=task,
                 max_results=3,
                 search_depth="basic",
             )

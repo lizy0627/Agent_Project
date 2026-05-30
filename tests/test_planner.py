@@ -1,4 +1,31 @@
-from app.agent.planner import Planner
+import json
+
+import pytest
+
+from app.agent.planner import LLMPlanGenerationError, LLMPlanGenerator, Planner
+from app.tools.base import BaseTool
+from app.tools.registry import ToolRegistry
+
+
+class FakeLLMClient:
+    def __init__(self, reply: dict) -> None:
+        self.reply = reply
+
+    def complete_chat(self, messages, model=None):
+        return json.dumps(self.reply)
+
+
+class EchoTool(BaseTool):
+    name = "echo"
+    description = "Echo text."
+    args_schema = {
+        "type": "object",
+        "properties": {"text": {"type": "string"}},
+        "required": ["text"],
+    }
+
+    def run(self, text: str) -> dict[str, str]:
+        return {"text": text}
 
 
 def test_planner_creates_single_direct_answer_step():
@@ -20,3 +47,57 @@ def test_planner_creates_tool_step_and_final_answer_step():
     assert plan.steps[0].tool_args == {"expression": "1+1"}
     assert plan.steps[1].tool_name is None
     assert plan.steps[1].depends_on == ["tool_1"]
+
+
+def test_llm_plan_generator_accepts_valid_registered_tool_plan():
+    registry = ToolRegistry()
+    registry.register(EchoTool())
+    llm = FakeLLMClient(
+        {
+            "question": "echo hello",
+            "steps": [
+                {
+                    "step_id": "tool_1",
+                    "description": "Echo the requested text.",
+                    "tool_name": "echo",
+                    "tool_args": {"text": "hello"},
+                    "depends_on": [],
+                },
+                {
+                    "step_id": "final_answer",
+                    "description": "Answer from the echo result.",
+                    "tool_name": None,
+                    "tool_args": {},
+                    "depends_on": ["tool_1"],
+                },
+            ],
+        }
+    )
+
+    plan = LLMPlanGenerator(llm, registry).generate([{"role": "user", "content": "echo hello"}])
+
+    assert [step.step_id for step in plan.steps] == ["tool_1", "final_answer"]
+    assert plan.steps[0].tool_name == "echo"
+    assert plan.steps[0].tool_args == {"text": "hello"}
+
+
+def test_llm_plan_generator_rejects_unregistered_tool_name():
+    registry = ToolRegistry()
+    registry.register(EchoTool())
+    llm = FakeLLMClient(
+        {
+            "question": "do something",
+            "steps": [
+                {
+                    "step_id": "tool_1",
+                    "description": "Call a tool that does not exist.",
+                    "tool_name": "missing_tool",
+                    "tool_args": {},
+                    "depends_on": [],
+                }
+            ],
+        }
+    )
+
+    with pytest.raises(LLMPlanGenerationError):
+        LLMPlanGenerator(llm, registry).generate([{"role": "user", "content": "do something"}])

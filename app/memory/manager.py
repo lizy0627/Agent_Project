@@ -5,6 +5,7 @@ from typing import Any
 
 from app.memory.safety import contains_sensitive_content
 from app.memory.store import JsonMemoryStore, LongMemory, ShortMemory
+from app.memory.vector_store import EmbeddingProviderProtocol
 from app.services.agent_types import ChatMessage
 
 
@@ -16,10 +17,20 @@ class MemoryManager:
         json_path: Path,
         short_limit: int = 12,
         long_limit: int = 500,
+        *,
+        vector_enabled: bool = False,
+        vector_top_k: int = 5,
+        embedding_provider: EmbeddingProviderProtocol | None = None,
     ) -> None:
         store = JsonMemoryStore(json_path)
         self.short_memory = ShortMemory(store, max_messages=short_limit)
-        self.long_memory = LongMemory(store, max_entries_per_user=long_limit)
+        self.long_memory = LongMemory(
+            store,
+            max_entries_per_user=long_limit,
+            embedding_provider=embedding_provider,
+            vector_enabled=vector_enabled,
+            vector_top_k=vector_top_k,
+        )
 
     def add_memory(
         self,

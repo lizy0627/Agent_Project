@@ -10,6 +10,7 @@ from typing import Any
 from uuid import uuid4
 
 from app.memory.safety import contains_sensitive_content, normalize_memory_text
+from app.memory.vector_store import EmbeddingProviderProtocol, LocalVectorStore, memory_embedding_text
 
 
 DEFAULT_SHORT_LIMIT = 12
@@ -106,9 +107,22 @@ class ShortMemory:
 class LongMemory:
     """Save and retrieve useful historical user-assistant exchanges."""
 
-    def __init__(self, store: JsonMemoryStore, max_entries_per_user: int = DEFAULT_LONG_LIMIT) -> None:
+    def __init__(
+        self,
+        store: JsonMemoryStore,
+        max_entries_per_user: int = DEFAULT_LONG_LIMIT,
+        *,
+        embedding_provider: EmbeddingProviderProtocol | None = None,
+        vector_enabled: bool = False,
+        vector_top_k: int = 5,
+        vector_store: LocalVectorStore | None = None,
+    ) -> None:
         self.store = store
         self.max_entries_per_user = max_entries_per_user
+        self.embedding_provider = embedding_provider
+        self.vector_enabled = vector_enabled
+        self.vector_top_k = vector_top_k
+        self.vector_store = vector_store or LocalVectorStore()
 
     def add_exchange(
         self,
@@ -120,12 +134,15 @@ class LongMemory:
         if not self._should_store(question, answer):
             return None
 
+        clean_question = normalize_memory_text(question, 1000)
+        clean_answer = normalize_memory_text(answer, 1800)
         entry = {
             "id": str(uuid4()),
             "user_id": user_id,
             "conversation_id": conversation_id,
-            "question": normalize_memory_text(question, 1000),
-            "answer": normalize_memory_text(answer, 1800),
+            "question": clean_question,
+            "answer": clean_answer,
+            "embedding": self._embedding_for(clean_question, clean_answer),
             "keywords": sorted(tokenize(f"{question} {answer}"))[:40],
             "created_at": utc_now(),
         }
@@ -139,19 +156,22 @@ class LongMemory:
         return self.store.update(update)
 
     def search(self, user_id: str, query: str, limit: int = 5) -> list[dict[str, Any]]:
-        query_tokens = tokenize(query)
-        if not query_tokens:
-            return []
-
         data = self.store.read()
         entries = data.get("long", {}).get(user_id, [])
         if not isinstance(entries, list):
             return []
+        valid_entries = [entry for entry in entries if isinstance(entry, dict)]
+
+        vector_results = self._vector_search(valid_entries, query, limit)
+        if vector_results:
+            return vector_results
+
+        query_tokens = tokenize(query)
+        if not query_tokens:
+            return []
 
         scored: list[tuple[float, dict[str, Any]]] = []
-        for entry in entries:
-            if not isinstance(entry, dict):
-                continue
+        for entry in valid_entries:
             score = memory_score(query_tokens, entry)
             if score > 0:
                 scored.append((score, entry))
@@ -172,6 +192,32 @@ class LongMemory:
         if contains_sensitive_content(clean_question, clean_answer):
             return False
         return True
+
+    def _embedding_for(self, question: str, answer: str) -> list[float] | None:
+        if not self.vector_enabled or self.embedding_provider is None:
+            return None
+        return self.embedding_provider.embed(memory_embedding_text(question, answer))
+
+    def _vector_search(self, entries: list[dict[str, Any]], query: str, limit: int) -> list[dict[str, Any]]:
+        if not self.vector_enabled or self.embedding_provider is None:
+            return []
+
+        query_embedding = self.embedding_provider.embed(query)
+        if not query_embedding:
+            return []
+
+        vector_limit = max(1, min(limit, self.vector_top_k))
+        results = self.vector_store.search(entries, query_embedding, limit=vector_limit)
+        if not results:
+            return []
+
+        payload: list[dict[str, Any]] = []
+        for result in results:
+            item = dict(result.entry)
+            item["score"] = round(result.score, 4)
+            item["score_type"] = "vector"
+            payload.append(item)
+        return payload
 
 
 def utc_now() -> str:

@@ -80,6 +80,19 @@ class Settings(BaseSettings):
     conversation_max_rounds: int = Field(default=30, ge=1)
     memory_search_limit: int = 5
     memory_recent_context_limit: int = 6
+    memory_vector_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("MEMORY_VECTOR_ENABLED"),
+    )
+    memory_vector_top_k: int = Field(
+        default=5,
+        ge=1,
+        validation_alias=AliasChoices("MEMORY_VECTOR_TOP_K"),
+    )
+    memory_embedding_model: str = Field(
+        default="text-embedding-v4",
+        validation_alias=AliasChoices("MEMORY_EMBEDDING_MODEL"),
+    )
     document_db_path: Path = _default_data_path("documents.db")
     document_upload_max_bytes: int = 5 * 1024 * 1024
     auth_enabled: bool = True
@@ -127,7 +140,13 @@ class Settings(BaseSettings):
             return None
         return value
 
-    @field_validator("dashscope_model", "dashscope_base_url", "web_search_provider", mode="before")
+    @field_validator(
+        "dashscope_model",
+        "dashscope_base_url",
+        "web_search_provider",
+        "memory_embedding_model",
+        mode="before",
+    )
     @classmethod
     def non_empty_string(cls, value: Any, info):
         if isinstance(value, str) and not value.strip():
@@ -135,6 +154,7 @@ class Settings(BaseSettings):
                 "dashscope_model": "MODEL_NAME",
                 "dashscope_base_url": "BASE_URL",
                 "web_search_provider": "WEB_SEARCH_PROVIDER",
+                "memory_embedding_model": "MEMORY_EMBEDDING_MODEL",
             }.get(info.field_name, info.field_name)
             raise ValueError(f"{env_name} cannot be empty.")
         return value
