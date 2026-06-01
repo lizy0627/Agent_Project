@@ -19,6 +19,7 @@ class SearchAgent(BaseAgent):
     name = "SearchAgent"
     default_search_results = 3
     default_read_top_k = 3
+    max_read_top_k = 3
 
     def __init__(self, tool_manager: ToolManagerProtocol, read_top_k: int | None = None) -> None:
         self.tool_manager = tool_manager
@@ -92,6 +93,7 @@ class SearchAgent(BaseAgent):
             except Exception as exc:
                 read_pages.append(
                     {
+                        "requested_url": url,
                         "url": url,
                         "success": False,
                         "error": str(exc),
@@ -166,11 +168,15 @@ class SearchAgent(BaseAgent):
             title = str(item.get("title") or "Untitled").strip()
             url = str(item.get("url") or "").strip()
             snippet = str(item.get("snippet") or item.get("evidence") or "").strip()
-            parts = [f"{index}. {title}"]
+            evidence = str(item.get("evidence") or snippet).strip()
+            summary = evidence or snippet
+            parts = [f"{index}. 资料来源: {title}"]
             if url:
                 parts.append(f"URL: {url}")
-            if snippet:
-                parts.append(f"Summary: {snippet[:500]}")
+            if summary:
+                parts.append(f"摘要: {summary[:700]}")
+            if snippet and snippet != summary:
+                parts.append(f"搜索摘要: {snippet[:300]}")
             lines.append(" | ".join(parts))
 
         return "\n".join(lines) if lines else "Search completed, but results could not be formatted."
@@ -194,6 +200,6 @@ class SearchAgent(BaseAgent):
         if value is None:
             return self.default_read_top_k
         try:
-            return max(int(value), 0)
+            return min(max(int(value), 0), self.max_read_top_k)
         except (TypeError, ValueError):
             return self.default_read_top_k

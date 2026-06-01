@@ -275,15 +275,21 @@ class AgentService:
                 step="thought",
                 status="success",
                 message=str(step.content or ""),
+                metadata={"turn": step.turn} if step.turn is not None else None,
             )
 
         if step.type == "action":
             return AgentTraceStep(
                 step="action",
-                status="running",
+                status=step.status or "running",
                 message=f"Selected tool: {step.tool_name}.",
                 tool_name=step.tool_name,
-                metadata={"tool_args": step.tool_args or {}},
+                metadata={
+                    "turn": step.turn,
+                    "tool_args": step.tool_args or {},
+                }
+                if step.turn is not None
+                else {"tool_args": step.tool_args or {}},
             )
 
         if step.type == "observation":
@@ -294,14 +300,19 @@ class AgentService:
                 message=step.error or "Observed tool result.",
                 tool_name=step.tool_name,
                 observation=step.observation,
+                metadata={"turn": step.turn} if step.turn is not None else None,
             )
 
-        metadata = {"reason": step.status} if step.status else None
+        metadata = {}
+        if step.turn is not None:
+            metadata["turn"] = step.turn
+        if step.status:
+            metadata["reason"] = step.status
         return AgentTraceStep(
             step="final_answer",
             status="success",
             message=str(step.content or ""),
-            metadata=metadata,
+            metadata=metadata or None,
         )
 
     def _handle_search_workflow(
@@ -461,7 +472,11 @@ class AgentService:
                         step="tool_call",
                         status=step.status,
                         message=step.error or f"Tool call finished: {step.tool_name}",
+                        step_id=step.step_id,
+                        description=step.description,
                         tool_name=step.tool_name,
+                        tool_args=step.tool_args,
+                        depends_on=step.depends_on,
                         duration_ms=step.duration_ms,
                         metadata=metadata,
                     )
@@ -471,7 +486,11 @@ class AgentService:
                         step="observation",
                         status=step.status,
                         message=step.error or "Observed tool result.",
+                        step_id=step.step_id,
+                        description=step.description,
                         tool_name=step.tool_name,
+                        tool_args=step.tool_args,
+                        depends_on=step.depends_on,
                         observation=self._serialize_observation(step.observation),
                         duration_ms=step.duration_ms,
                         metadata=metadata,
@@ -484,6 +503,10 @@ class AgentService:
                     step="observation",
                     status=step.status,
                     message=step.error or step.description,
+                    step_id=step.step_id,
+                    description=step.description,
+                    tool_args=step.tool_args,
+                    depends_on=step.depends_on,
                     observation=self._serialize_observation(step.observation),
                     duration_ms=step.duration_ms,
                     metadata=metadata,
@@ -631,10 +654,16 @@ class AgentService:
 
         greetings = {
             "hi",
+            "hithere",
             "hello",
             "hey",
+            "goodmorning",
+            "goodafternoon",
+            "goodevening",
             "你好",
             "您好",
+            "哈喽",
+            "嗨",
             "早上好",
             "上午好",
             "中午好",
@@ -646,14 +675,17 @@ class AgentService:
             "thankyou",
             "thankyou!",
             "thx",
+            "ty",
             "谢谢",
             "多谢",
             "感谢",
             "辛苦了",
+            "谢啦",
         }
         small_talk = {
             "你是谁",
             "你好吗",
+            "最近怎么样",
             "在吗",
             "在不在",
             "你能做什么",
@@ -694,10 +726,12 @@ class AgentService:
             "latest",
             "recent",
             "current",
+            "news",
             "today",
             "tomorrow",
             "yesterday",
             "now",
+            "weather",
             "search",
             "lookup",
             "google",
@@ -715,6 +749,7 @@ class AgentService:
             "time",
             "date",
             "calendar",
+            "price",
             "file",
             "document",
             "pdf",
@@ -741,11 +776,15 @@ class AgentService:
             "最新",
             "最近",
             "当前",
+            "新闻",
+            "资讯",
             "现在",
             "今天",
             "明天",
             "昨天",
+            "天气",
             "搜索",
+            "查一下",
             "查找",
             "查询",
             "联网",
@@ -761,6 +800,9 @@ class AgentService:
             "日期",
             "几点",
             "星期",
+            "价格",
+            "股价",
+            "汇率",
             "文件",
             "文档",
             "页面",

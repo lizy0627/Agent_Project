@@ -7,6 +7,13 @@ from backend.app.memory.safety import contains_sensitive_content
 from backend.app.memory.store import JsonMemoryStore, LongMemory, ShortMemory
 from backend.app.services.agent_types import ChatMessage
 
+MAX_MEMORY_SEARCH_RESULTS = 3
+MAX_RECENT_CONTEXT_ITEMS = 4
+MAX_MEMORY_CONTEXT_CHARS = 4000
+MAX_MEMORY_QUESTION_CHARS = 400
+MAX_MEMORY_ANSWER_CHARS = 700
+MAX_RECENT_CONTEXT_CHARS = 500
+
 
 class MemoryManager:
     """Coordinate short-term session memory and long-term user memory."""
@@ -65,36 +72,122 @@ class MemoryManager:
     ) -> list[ChatMessage]:
         """Build model-ready memory context messages."""
 
-        memories = self.search_memory(user_id=user_id, query=query, limit=search_limit)
-        recent_context = self.get_recent_context(
+        messages, _ = self.build_memory_context(
             user_id=user_id,
             conversation_id=conversation_id,
-            limit=recent_limit,
+            query=query,
+            search_limit=search_limit,
+            recent_limit=recent_limit,
+        )
+        return messages
+
+    def build_memory_context(
+        self,
+        *,
+        user_id: str,
+        conversation_id: str,
+        query: str,
+        search_limit: int = 5,
+        recent_limit: int = 6,
+    ) -> tuple[list[ChatMessage], int]:
+        """Build model-ready memory context messages and return the injected item count."""
+
+        safe_search_limit = _safe_limit(search_limit, MAX_MEMORY_SEARCH_RESULTS)
+        safe_recent_limit = _safe_limit(recent_limit, MAX_RECENT_CONTEXT_ITEMS)
+        memories = self._safe_search_memory(user_id=user_id, query=query, limit=safe_search_limit)
+        recent_context = self._safe_recent_context(
+            user_id=user_id,
+            conversation_id=conversation_id,
+            limit=safe_recent_limit,
         )
         if not memories and not recent_context:
-            return []
+            return [], 0
 
+        memory_used = 0
         lines = [
-            "以下是系统自动检索到的用户记忆，仅用于补充上下文。",
-            "如果记忆与当前问题无关，请忽略；不要主动暴露记忆库内容。",
+            "Private model context. Use only when directly relevant.",
+            "Do not mention memory retrieval, quote this context, or reveal it to the user.",
         ]
         if memories:
-            lines.append("相关历史问答：")
+            _append_if_fits(lines, "Relevant saved exchanges:", MAX_MEMORY_CONTEXT_CHARS)
             for index, memory in enumerate(memories, start=1):
-                lines.append(
-                    f"{index}. 用户曾问：{memory.get('question', '')}\n"
-                    f"   当时回答：{memory.get('answer', '')}"
+                question = _truncate_text(memory.get("question", ""), MAX_MEMORY_QUESTION_CHARS)
+                answer = _truncate_text(memory.get("answer", ""), MAX_MEMORY_ANSWER_CHARS)
+                if not question and not answer:
+                    continue
+                block = (
+                    f"{index}. User asked: {question}\n"
+                    f"   Assistant answered: {answer}"
                 )
+                if not _append_if_fits(lines, block, MAX_MEMORY_CONTEXT_CHARS):
+                    break
+                memory_used += 1
 
         if recent_context:
-            lines.append("当前会话近期上下文：")
+            _append_if_fits(lines, "Recent conversation context:", MAX_MEMORY_CONTEXT_CHARS)
             for item in recent_context:
-                role = "用户" if item["role"] == "user" else "助手"
-                lines.append(f"- {role}: {item['content']}")
+                role = "User" if item["role"] == "user" else "Assistant"
+                content = _truncate_text(item["content"], MAX_RECENT_CONTEXT_CHARS)
+                if not content:
+                    continue
+                if not _append_if_fits(lines, f"- {role}: {content}", MAX_MEMORY_CONTEXT_CHARS):
+                    break
+                memory_used += 1
+
+        if memory_used == 0:
+            return [], 0
 
         return [
             {
                 "role": "system",
                 "content": "\n".join(lines),
             }
-        ]
+        ], memory_used
+
+    def _safe_search_memory(self, *, user_id: str, query: str, limit: int) -> list[dict[str, Any]]:
+        if limit <= 0:
+            return []
+        try:
+            return self.search_memory(user_id=user_id, query=query, limit=limit)
+        except Exception:
+            return []
+
+    def _safe_recent_context(
+        self,
+        *,
+        user_id: str,
+        conversation_id: str,
+        limit: int,
+    ) -> list[dict[str, str]]:
+        if limit <= 0:
+            return []
+        try:
+            return self.get_recent_context(
+                user_id=user_id,
+                conversation_id=conversation_id,
+                limit=limit,
+            )
+        except Exception:
+            return []
+
+
+def _safe_limit(value: int, maximum: int) -> int:
+    return max(0, min(int(value or 0), maximum))
+
+
+def _truncate_text(value: Any, max_chars: int) -> str:
+    text = " ".join(str(value or "").split())
+    if len(text) <= max_chars:
+        return text
+    return f"{text[: max(0, max_chars - 1)].rstrip()}..."
+
+
+def _append_if_fits(lines: list[str], text: str, max_chars: int) -> bool:
+    if _joined_length(lines) + len(text) + 1 > max_chars:
+        return False
+    lines.append(text)
+    return True
+
+
+def _joined_length(lines: list[str]) -> int:
+    return sum(len(line) + 1 for line in lines)

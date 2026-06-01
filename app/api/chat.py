@@ -313,16 +313,14 @@ def chat(
 
     conversation_id = request.conversation_id or str(uuid4())
     model_messages = build_model_messages(request, conversation_id, store, current_user.user_id)
-    model_messages = with_memory_context(
-        model_messages,
-        memory.build_memory_messages(
-            user_id=current_user.user_id,
-            conversation_id=conversation_id,
-            query=request.message,
-            search_limit=settings.memory_search_limit,
-            recent_limit=settings.memory_recent_context_limit,
-        ),
+    memory_messages, memory_used = memory.build_memory_context(
+        user_id=current_user.user_id,
+        conversation_id=conversation_id,
+        query=request.message,
+        search_limit=settings.memory_search_limit,
+        recent_limit=settings.memory_recent_context_limit,
     )
+    model_messages = with_memory_context(model_messages, memory_messages)
     requested_model = normalize_requested_model(request.model)
     agent_mode = resolve_agent_mode(request)
     is_multi_agent = agent_mode == "multi_agent"
@@ -360,7 +358,7 @@ def chat(
             tool_error_message=reply.tool_result.error_message if reply.tool_result else None,
             tool_retryable=reply.tool_result.retryable if reply.tool_result else None,
             tool_error_detail=tool_error_detail(reply.tool_result),
-            trace=trace_payload(reply.trace),
+            trace=trace_payload(reply.trace, memory_used=memory_used),
         )
     except AgentError as exc:
         logger.info("Chat request failed: code=%s status=%s", exc.code, exc.status_code)
@@ -382,16 +380,14 @@ def stream_chat(
 
     conversation_id = request.conversation_id or str(uuid4())
     model_messages = build_model_messages(request, conversation_id, store, current_user.user_id)
-    model_messages = with_memory_context(
-        model_messages,
-        memory.build_memory_messages(
-            user_id=current_user.user_id,
-            conversation_id=conversation_id,
-            query=request.message,
-            search_limit=settings.memory_search_limit,
-            recent_limit=settings.memory_recent_context_limit,
-        ),
+    memory_messages, memory_used = memory.build_memory_context(
+        user_id=current_user.user_id,
+        conversation_id=conversation_id,
+        query=request.message,
+        search_limit=settings.memory_search_limit,
+        recent_limit=settings.memory_recent_context_limit,
     )
+    model_messages = with_memory_context(model_messages, memory_messages)
     requested_model = normalize_requested_model(request.model)
     agent_mode = resolve_agent_mode(request)
     is_multi_agent = agent_mode == "multi_agent"
@@ -465,7 +461,8 @@ def stream_chat(
                     "multi_agent": True,
                     "agent_results": multi_agent_results_payload(reply.trace),
                     **tool_response_metadata(None),
-                    "trace": trace_payload(reply.trace),
+                    "memory_used": memory_used,
+                    "trace": trace_payload(reply.trace, memory_used=memory_used),
                 }
                 yield sse_event("metadata", metadata)
                 assistant_reply = reply.content
@@ -523,7 +520,8 @@ def stream_chat(
                     "multi_agent": False,
                     "agent_results": [],
                     **tool_response_metadata(tool_result),
-                    "trace": trace_payload(trace),
+                    "memory_used": memory_used,
+                    "trace": trace_payload(trace, memory_used=memory_used),
                 },
             )
 
@@ -568,7 +566,8 @@ def stream_chat(
                     "multi_agent": False,
                     "agent_results": [],
                     **tool_response_metadata(tool_result),
-                    "trace": trace_payload(trace),
+                    "memory_used": memory_used,
+                    "trace": trace_payload(trace, memory_used=memory_used),
                 },
             )
         except AgentError as exc:
@@ -709,12 +708,21 @@ def tool_response_metadata(tool_result) -> dict:
     }
 
 
-def trace_payload(trace: list[AgentTraceStepData] | None) -> list[dict]:
+def trace_payload(trace: list[AgentTraceStepData] | None, *, memory_used: int = 0) -> list[dict]:
     """Serialize agent trace steps while preserving the stable front-end shape."""
 
-    if not trace:
-        return []
-    return [step.to_dict() if hasattr(step, "to_dict") else dict(step) for step in trace]
+    payload = [memory_trace_step(memory_used)] if memory_used > 0 else []
+    if trace:
+        payload.extend(step.to_dict() if hasattr(step, "to_dict") else dict(step) for step in trace)
+    return payload
+
+
+def memory_trace_step(memory_used: int) -> dict:
+    return {
+        "step": "memory",
+        "status": "success",
+        "metadata": {"memory_used": memory_used},
+    }
 
 
 def multi_agent_results_payload(trace: list[AgentTraceStepData] | None) -> list[dict]:
@@ -727,7 +735,7 @@ def multi_agent_results_payload(trace: list[AgentTraceStepData] | None) -> list[
     for step in trace:
         step_name = getattr(step, "step", None)
         observation = getattr(step, "observation", None)
-        if step_name == "multi_agent_sub_agent" and isinstance(observation, dict):
+        if step_name in {"multi_agent_sub_agent", "sub_agent_result"} and isinstance(observation, dict):
             results.append(observation)
     return results
 

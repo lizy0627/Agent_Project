@@ -51,7 +51,11 @@ class AgentTraceStep:
     status: str
     message: str | None = None
     duration_ms: float | None = None
+    step_id: str | None = None
+    description: str | None = None
     tool_name: str | None = None
+    tool_args: dict[str, Any] | None = None
+    depends_on: list[str] | None = None
     observation: Any | None = None
     metadata: dict[str, Any] | None = None
 
@@ -64,8 +68,16 @@ class AgentTraceStep:
         }
         if self.message is not None:
             payload["message"] = self.message
+        if self.step_id is not None:
+            payload["step_id"] = self.step_id
+        if self.description is not None:
+            payload["description"] = self.description
         if self.tool_name is not None:
             payload["tool_name"] = self.tool_name
+        if self.tool_args is not None:
+            payload["tool_args"] = self.tool_args
+        if self.depends_on is not None:
+            payload["depends_on"] = self.depends_on
         if self.observation is not None:
             payload["observation"] = self.observation
         if self.duration_ms is not None:

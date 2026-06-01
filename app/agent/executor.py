@@ -49,7 +49,10 @@ class AgentExecutor:
             return self._trace_step(
                 step,
                 status="skipped",
-                observation={"message": "Skipped because a dependency failed.", "failed_dependencies": blocked_by},
+                observation={
+                    "message": "Skipped because a dependency failed or was skipped.",
+                    "failed_dependencies": blocked_by,
+                },
                 duration_ms=self._elapsed_ms(started_at),
             )
 
@@ -89,7 +92,7 @@ class AgentExecutor:
         failed_dependencies: list[str] = []
         for dependency in step.depends_on:
             dependency_trace = completed.get(dependency)
-            if dependency_trace is None or dependency_trace.status == "failed":
+            if dependency_trace is None or dependency_trace.status in {"failed", "skipped"}:
                 failed_dependencies.append(dependency)
         return failed_dependencies
 

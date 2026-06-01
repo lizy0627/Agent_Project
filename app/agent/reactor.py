@@ -16,6 +16,7 @@ from app.tools.registry import TOOL_NOT_FOUND, ToolRegistry
 
 DEFAULT_MAX_TOOL_CALLS = 5
 MAX_OBSERVATION_TEXT_LENGTH = 4000
+MAX_OBSERVATION_FIELD_SUMMARY_LENGTH = 2000
 
 
 class ReActToolCall(BaseModel):
@@ -35,6 +36,7 @@ class ReActReasoningStep(BaseModel):
     """A JSON-safe Thought, Action, Observation, or Final Answer step."""
 
     type: str
+    turn: int | None = None
     content: Any | None = None
     tool_name: str | None = None
     tool_args: dict[str, Any] | None = None
@@ -107,12 +109,13 @@ class ReActAgent:
             metadata={"mode": "react", "max_steps": self.max_tool_calls},
         )
         scratchpad = ""
+        last_failed_tool_name: str | None = None
 
         for turn_index in range(1, self.max_tool_calls + 1):
             turn_started_at = perf_counter()
             model_reply = self._complete(self._build_prompt_messages(base_messages, scratchpad), model=model)
             parsed = parse_react_response(model_reply)
-            thought_step = self._append_thought(reasoning_steps, parsed.thought)
+            thought_step = self._append_thought(reasoning_steps, parsed.thought, turn=turn_index)
             self._emit_callback(callback, thought_step)
             if parsed.thought is not None:
                 trace.add_step(
@@ -127,7 +130,7 @@ class ReActAgent:
 
             if parsed.final_answer is not None:
                 final_answer = self._redact_text(parsed.final_answer)
-                final_step = ReActReasoningStep(type="final_answer", content=final_answer)
+                final_step = ReActReasoningStep(type="final_answer", turn=turn_index, content=final_answer)
                 reasoning_steps.append(final_step)
                 self._emit_callback(callback, final_step)
                 trace.add_final_answer(
@@ -146,7 +149,7 @@ class ReActAgent:
 
             if not parsed.action_name:
                 final_answer = self._redact_text(model_reply)
-                final_step = ReActReasoningStep(type="final_answer", content=final_answer)
+                final_step = ReActReasoningStep(type="final_answer", turn=turn_index, content=final_answer)
                 reasoning_steps.append(final_step)
                 self._emit_callback(callback, final_step)
                 trace.add_final_answer(
@@ -163,13 +166,86 @@ class ReActAgent:
                     trace=trace,
                 )
 
+            repeated_failed_tool = parsed.action_name == last_failed_tool_name
+            action_status = "skipped" if repeated_failed_tool else "success"
+            action_message = (
+                f"Skipped repeated failed tool selection: {parsed.action_name}"
+                if repeated_failed_tool
+                else f"Selected tool: {parsed.action_name}"
+            )
             action_step = ReActReasoningStep(
                 type="action",
+                turn=turn_index,
                 tool_name=parsed.action_name,
                 tool_args=self._redact_data(parsed.action_args),
+                status=action_status,
             )
             reasoning_steps.append(action_step)
             self._emit_callback(callback, action_step)
+
+            trace.add_step(
+                AgentStep(
+                    step="action",
+                    status=action_status,
+                    message=action_message,
+                    tool_name=parsed.action_name,
+                    tool_args=self._redact_data(parsed.action_args),
+                    duration_ms=self._elapsed_ms(turn_started_at),
+                    metadata={"turn": turn_index},
+                )
+            )
+            if repeated_failed_tool:
+                observation = self._guardrail_observation(
+                    parsed.action_name,
+                    "The same tool failed on the previous turn and was selected again, so no tool call was made.",
+                    error_code="REPEATED_FAILED_TOOL",
+                )
+                observation_step = ReActReasoningStep(
+                    type="observation",
+                    turn=turn_index,
+                    tool_name=parsed.action_name,
+                    observation=observation,
+                    status="skipped",
+                    error=observation["error"],
+                )
+                reasoning_steps.append(observation_step)
+                self._emit_callback(callback, observation_step)
+                trace.add_observation(
+                    status="skipped",
+                    observation=observation,
+                    message=observation["error"],
+                    tool_name=parsed.action_name,
+                    metadata={"turn": turn_index, "reason": "repeated_failed_tool"},
+                )
+                scratchpad = self._append_observation_to_scratchpad(scratchpad, model_reply, observation)
+                final_answer = self._final_answer_after_guardrail(
+                    base_messages,
+                    scratchpad,
+                    reason=observation["error"],
+                    model=model,
+                )
+                final_step = ReActReasoningStep(
+                    type="final_answer",
+                    turn=turn_index,
+                    content=final_answer,
+                    status="repeated_failed_tool",
+                )
+                reasoning_steps.append(final_step)
+                self._emit_callback(callback, final_step)
+                trace.add_final_answer(
+                    status="success",
+                    message=final_answer,
+                    duration_ms=self._elapsed_ms(turn_started_at),
+                    metadata={"turn": turn_index, "reason": "repeated_failed_tool"},
+                )
+                trace.finish(AgentState.SUCCESS)
+                return ReActResult(
+                    final_answer=final_answer,
+                    reasoning_steps=reasoning_steps,
+                    tool_calls=tool_calls,
+                    trace=trace,
+                )
+
             tool_result = self._run_registry_tool(parsed.action_name, parsed.action_args)
             tool_call = self._tool_call_from_result(parsed.action_name, parsed.action_args, tool_result)
             observation = self._observation_from_result(tool_result)
@@ -198,6 +274,7 @@ class ReActAgent:
             )
             observation_step = ReActReasoningStep(
                 type="observation",
+                turn=turn_index,
                 tool_name=parsed.action_name,
                 observation=observation,
                 status=tool_call.status,
@@ -215,10 +292,41 @@ class ReActAgent:
                 metadata={"turn": turn_index},
             )
             scratchpad = self._append_observation_to_scratchpad(scratchpad, model_reply, observation)
+            if tool_result.error_code == TOOL_NOT_FOUND:
+                final_answer = self._final_answer_after_guardrail(
+                    base_messages,
+                    scratchpad,
+                    reason=f"Tool is not registered: {parsed.action_name}",
+                    model=model,
+                )
+                final_step = ReActReasoningStep(
+                    type="final_answer",
+                    turn=turn_index,
+                    content=final_answer,
+                    status="unknown_tool",
+                )
+                reasoning_steps.append(final_step)
+                self._emit_callback(callback, final_step)
+                trace.add_final_answer(
+                    status="success",
+                    message=final_answer,
+                    duration_ms=self._elapsed_ms(turn_started_at),
+                    metadata={"turn": turn_index, "reason": "unknown_tool"},
+                )
+                trace.finish(AgentState.SUCCESS)
+                return ReActResult(
+                    final_answer=final_answer,
+                    reasoning_steps=reasoning_steps,
+                    tool_calls=tool_calls,
+                    trace=trace,
+                )
+
+            last_failed_tool_name = parsed.action_name if tool_call.status == "failed" else None
 
         final_answer = self._final_answer_after_tool_limit(base_messages, scratchpad, model=model)
         final_step = ReActReasoningStep(
             type="final_answer",
+            turn=self.max_tool_calls + 1,
             content=final_answer,
             status="tool_limit_reached",
         )
@@ -227,7 +335,11 @@ class ReActAgent:
         trace.add_final_answer(
             status="success",
             message=final_answer,
-            metadata={"reason": "max_steps_reached", "max_steps": self.max_tool_calls},
+            metadata={
+                "turn": self.max_tool_calls + 1,
+                "reason": "max_steps_reached",
+                "max_steps": self.max_tool_calls,
+            },
         )
         trace.finish(AgentState.SUCCESS)
         return ReActResult(final_answer=final_answer, reasoning_steps=reasoning_steps, tool_calls=tool_calls, trace=trace)
@@ -307,7 +419,7 @@ class ReActAgent:
             tool_name=tool_name,
             tool_args=self._redact_data(tool_args),
             status="success" if result.success else "failed",
-            result=self._redact_data(result.result),
+            result=self._compact_payload(result.result),
             error=self._redact_text(result.error or result.error_message) if result.error or result.error_message else None,
             duration_ms=result.duration_ms,
             error_code=result.error_code,
@@ -315,14 +427,27 @@ class ReActAgent:
         )
 
     def _observation_from_result(self, result: ToolResult) -> dict[str, Any]:
-        return {
+        observation = {
             "tool_name": result.name,
             "success": result.success,
-            "result": self._redact_data(result.result),
+            "result": self._compact_payload(result.result),
             "error": self._redact_text(result.error or result.error_message) if result.error or result.error_message else None,
             "duration_ms": result.duration_ms,
             "error_code": result.error_code,
             "retryable": result.retryable,
+        }
+        return self._compact_observation(observation)
+
+    def _guardrail_observation(self, tool_name: str, error: str, *, error_code: str) -> dict[str, Any]:
+        return {
+            "tool_name": tool_name,
+            "success": False,
+            "result": None,
+            "error": self._redact_text(error),
+            "duration_ms": None,
+            "error_code": error_code,
+            "retryable": False,
+            "skipped": True,
         }
 
     def _append_observation_to_scratchpad(
@@ -335,10 +460,45 @@ class ReActAgent:
         return f"{scratchpad}{model_reply.strip()}\nObservation: {observation_text}\n"
 
     def _observation_text(self, observation: dict[str, Any]) -> str:
-        text = json.dumps(self._redact_data(observation), ensure_ascii=False)
+        text = json.dumps(self._compact_observation(observation), ensure_ascii=False)
         if len(text) > MAX_OBSERVATION_TEXT_LENGTH:
             return f"{text[:MAX_OBSERVATION_TEXT_LENGTH]}..."
         return text
+
+    def _compact_observation(self, observation: dict[str, Any]) -> dict[str, Any]:
+        redacted = self._redact_data(observation)
+        text = self._json_text(redacted)
+        if len(text) <= MAX_OBSERVATION_TEXT_LENGTH:
+            return redacted
+
+        return {
+            "tool_name": redacted.get("tool_name"),
+            "success": redacted.get("success"),
+            "error": redacted.get("error"),
+            "duration_ms": redacted.get("duration_ms"),
+            "error_code": redacted.get("error_code"),
+            "retryable": redacted.get("retryable"),
+            "truncated": True,
+            "original_length": len(text),
+            "summary": f"{text[:MAX_OBSERVATION_TEXT_LENGTH]}...",
+        }
+
+    def _compact_payload(self, value: Any) -> Any:
+        redacted = self._redact_data(value)
+        text = self._json_text(redacted)
+        if len(text) <= MAX_OBSERVATION_TEXT_LENGTH:
+            return redacted
+        return {
+            "truncated": True,
+            "original_length": len(text),
+            "summary": f"{text[:MAX_OBSERVATION_FIELD_SUMMARY_LENGTH]}...",
+        }
+
+    def _json_text(self, value: Any) -> str:
+        try:
+            return json.dumps(value, ensure_ascii=False, default=str)
+        except (TypeError, ValueError):
+            return self._redact_text(str(value))
 
     def _final_answer_after_tool_limit(
         self,
@@ -348,7 +508,8 @@ class ReActAgent:
     ) -> str:
         limit_message = (
             f"The ReAct tool-call limit of {self.max_tool_calls} has been reached. "
-            "Do not call another tool. Provide only `Final Answer: ...` using the observations above."
+            "Do not call another tool. Provide only `Final Answer: ...` using the observations above. "
+            "The answer must mention: 基于已有观察结果回答."
         )
         prompt_messages = [
             *self._build_prompt_messages(messages, scratchpad),
@@ -356,7 +517,42 @@ class ReActAgent:
         ]
         model_reply = self._complete(prompt_messages, model=model)
         parsed = parse_react_response(model_reply)
-        return self._redact_text(parsed.final_answer if parsed.final_answer is not None else model_reply)
+        answer = self._redact_text(parsed.final_answer if parsed.final_answer is not None else model_reply)
+        return self._ensure_based_on_observations_notice(answer)
+
+    def _final_answer_after_guardrail(
+        self,
+        messages: list[ChatMessage],
+        scratchpad: str,
+        *,
+        reason: str,
+        model: str | None = None,
+    ) -> str:
+        prompt_messages = [
+            *self._build_prompt_messages(messages, scratchpad),
+            {
+                "role": "user",
+                "content": (
+                    f"Stop calling tools because: {self._redact_text(reason)} "
+                    "Provide only `Final Answer: ...` based on the observations already available."
+                ),
+            },
+        ]
+        model_reply = self._complete(prompt_messages, model=model)
+        parsed = parse_react_response(model_reply)
+        if parsed.final_answer is not None:
+            return self._redact_text(parsed.final_answer)
+        return self._redact_text(
+            f"Unable to continue tool execution safely: {reason} Based on the available observations, "
+            "please revise the request or try again after the tool configuration is fixed."
+        )
+
+    def _ensure_based_on_observations_notice(self, answer: str) -> str:
+        notice = "基于已有观察结果回答"
+        clean_answer = self._redact_text(answer)
+        if notice in clean_answer:
+            return clean_answer
+        return f"{notice}: {clean_answer}"
 
     def _complete(self, messages: list[ChatMessage], model: str | None = None) -> str:
         if hasattr(self.llm_client, "complete_chat"):
@@ -379,9 +575,11 @@ class ReActAgent:
         self,
         reasoning_steps: list[ReActReasoningStep],
         thought: str | None,
+        *,
+        turn: int,
     ) -> ReActReasoningStep | None:
         if thought is not None:
-            step = ReActReasoningStep(type="thought", content=self._redact_text(thought))
+            step = ReActReasoningStep(type="thought", turn=turn, content=self._redact_text(thought))
             reasoning_steps.append(step)
             return step
         return None

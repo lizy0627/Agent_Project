@@ -54,6 +54,11 @@ def test_simple_direct_chat_skips_llm_planner(agent_service: AgentService):
     assert trace[0].metadata["planner_source"] == "simple_direct"
 
 
+@pytest.mark.parametrize("message", ["hi there", "good morning", "谢谢你", "讲个笑话"])
+def test_common_small_talk_uses_simple_direct(agent_service: AgentService, message: str):
+    assert agent_service._looks_like_simple_direct_chat([{"role": "user", "content": message}]) is True
+
+
 def test_non_simple_chat_uses_llm_planner(agent_service: AgentService):
     fake_llm = CountingLLMPlanner(plan=direct_plan("搜索 Python 最新版本"))
     agent_service.llm_planner = fake_llm
@@ -87,11 +92,53 @@ def test_llm_planner_failure_falls_back_to_rule_planner(agent_service: AgentServ
     assert trace[0].metadata["planner_source"] == "rule_fallback"
 
 
+def test_trace_exposes_planner_source_and_plan_step_fields(agent_service: AgentService):
+    fake_llm = CountingLLMPlanner(
+        plan=AgentPlan(
+            question="call missing tool",
+            steps=[
+                PlanStep(
+                    step_id="tool_1",
+                    description="Call a tool.",
+                    tool_name="missing_tool",
+                    tool_args={"value": "x"},
+                    depends_on=[],
+                ),
+                PlanStep(
+                    step_id="final_answer",
+                    description="Answer from tool output.",
+                    tool_name=None,
+                    tool_args={},
+                    depends_on=["tool_1"],
+                ),
+            ],
+        )
+    )
+    agent_service.llm_planner = fake_llm
+    trace = []
+
+    _planned_call, plan = agent_service._trace_plan_tool_call(
+        [{"role": "user", "content": "use a tool for this"}],
+        trace,
+    )
+    executor_trace = agent_service.executor.execute(plan)
+    agent_service._append_executor_trace(trace, executor_trace)
+
+    assert trace[0].metadata["planner_source"] == "llm_planner"
+    assert trace[1].to_dict()["step_id"] == "tool_1"
+    assert trace[1].to_dict()["depends_on"] == []
+    assert trace[3].to_dict()["step_id"] == "final_answer"
+    assert trace[3].to_dict()["depends_on"] == ["tool_1"]
+
+
 @pytest.mark.parametrize(
     "message",
     [
         "最新的 Python 版本是什么？",
+        "今天北京天气怎么样？",
+        "查一下美元人民币汇率",
         "帮我搜索一下 OpenAI 新闻",
+        "OpenAI news",
         "2 + 2 等于多少？",
         "现在几点？",
         "读取这个网页 https://example.com",

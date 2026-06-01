@@ -111,6 +111,11 @@
               <span>选择模型</span>
               <select id="modelSelect" aria-label="选择模型"></select>
             </label>
+            <label class="model-select-field agent-mode-field" for="agentModeSelect">
+              <span>Agent Mode</span>
+              <select id="agentModeSelect" aria-label="Agent Mode"></select>
+              <small id="agentModeDescriptionText" class="agent-mode-description"></small>
+            </label>
             <div class="status-item">
               <span>模式</span>
               <strong id="currentModeText">通用助手</strong>
@@ -284,6 +289,12 @@
           <label class="settings-field" for="settingsModelSelect">
             <span>模型选择</span>
             <select id="settingsModelSelect"></select>
+          </label>
+
+          <label class="settings-field" for="settingsAgentModeSelect">
+            <span>Agent Mode</span>
+            <select id="settingsAgentModeSelect"></select>
+            <small id="settingsAgentModeDescriptionText" class="settings-help-text"></small>
           </label>
 
           <label class="settings-field" for="settingsMaxContextInput">

@@ -1,6 +1,6 @@
 import json
 
-from app.api.chat import with_memory_context
+from app.api.chat import trace_payload, with_memory_context
 from app.memory import MemoryManager
 
 
@@ -13,6 +13,11 @@ class FakeEmbeddingProvider:
             if key in text:
                 return vector
         return None
+
+
+class RaisingEmbeddingProvider:
+    def embed(self, text: str):
+        raise RuntimeError("embedding service is down")
 
 
 def test_memory_manager_saves_and_searches_long_memory(tmp_path):
@@ -166,3 +171,66 @@ def test_memory_manager_reads_old_json_memory_without_embeddings(tmp_path):
 
     assert len(results) == 1
     assert results[0]["id"] == "old-1"
+
+
+def test_memory_context_is_bounded_and_does_not_expose_internal_chinese_header(tmp_path):
+    manager = MemoryManager(tmp_path / "memories.json", short_limit=20)
+    long_question = "Remember topic " + ("questionword " * 120)
+    long_answer = "Use topic details " + ("answerword " * 220)
+
+    for index in range(8):
+        manager.add_memory(
+            user_id="alice",
+            conversation_id="chat-1",
+            question=f"{long_question} {index}",
+            answer=f"{long_answer} {index}",
+        )
+
+    messages, memory_used = manager.build_memory_context(
+        user_id="alice",
+        conversation_id="chat-1",
+        query="topic",
+        search_limit=20,
+        recent_limit=20,
+    )
+
+    assert memory_used > 0
+    assert len(messages) == 1
+    content = messages[0]["content"]
+    assert len(content) <= 4000
+    assert "以下是系统自动检索到的用户记忆" not in content
+    assert content.count("answerword") < 220
+    assert "..." in content
+
+
+def test_memory_manager_quietly_falls_back_when_vector_provider_raises(tmp_path):
+    manager = MemoryManager(
+        tmp_path / "memories.json",
+        vector_enabled=True,
+        embedding_provider=RaisingEmbeddingProvider(),
+    )
+
+    manager.add_memory(
+        user_id="alice",
+        conversation_id="chat-1",
+        question="Remember FastAPI backend preference",
+        answer="FastAPI should be preferred for backend API work.",
+    )
+
+    results = manager.search_memory(user_id="alice", query="FastAPI backend")
+
+    assert len(results) == 1
+    assert results[0]["question"] == "Remember FastAPI backend preference"
+    assert "score_type" not in results[0]
+
+
+def test_trace_payload_can_include_memory_used_count():
+    trace = trace_payload([], memory_used=2)
+
+    assert trace == [
+        {
+            "step": "memory",
+            "status": "success",
+            "metadata": {"memory_used": 2},
+        }
+    ]

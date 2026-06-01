@@ -108,7 +108,7 @@ class ManagerAgent(BaseAgent):
         tasks = [item.agent.name for item in plan]
         trace: list[AgentTraceStep] = [
             AgentTraceStep(
-                step="multi_agent_manager",
+                step="manager_plan",
                 status="success",
                 message=f"Planned agents: {', '.join(tasks)}",
                 duration_ms=self._elapsed_ms(started_at),
@@ -130,11 +130,40 @@ class ManagerAgent(BaseAgent):
 
         results: list[AgentResult] = []
         for item in plan:
-            result = item.agent.run(item.task, messages, model=model)
+            sub_started_at = perf_counter()
+            trace.append(
+                AgentTraceStep(
+                    step="sub_agent_start",
+                    status="running",
+                    message=f"Starting {item.agent.name}.",
+                    tool_name=item.agent.name,
+                    metadata={
+                        "agent_name": item.agent.name,
+                        "task": item.task,
+                        "reason": item.reason,
+                        "source": item.source,
+                    },
+                )
+            )
+            try:
+                result = item.agent.run(item.task, messages, model=model)
+            except Exception as exc:
+                result = AgentResult(
+                    agent_name=item.agent.name,
+                    task=item.task,
+                    success=False,
+                    content="",
+                    error=str(exc),
+                    duration_ms=self._elapsed_ms(sub_started_at),
+                    metadata={
+                        "agent_name": item.agent.name,
+                        "exception_type": type(exc).__name__,
+                    },
+                )
             results.append(result)
             trace.append(
                 AgentTraceStep(
-                    step="multi_agent_sub_agent",
+                    step="sub_agent_result",
                     status="success" if result.success else "failed",
                     message=result.error or result.task,
                     tool_name=result.agent_name,
@@ -150,16 +179,20 @@ class ManagerAgent(BaseAgent):
 
         final_started_at = perf_counter()
         content = self._aggregate(question, messages, results, model=model)
+        successful_agents = [result.agent_name for result in results if result.success]
+        failed_agents = [result.agent_name for result in results if not result.success]
         trace.append(
             AgentTraceStep(
-                step="final_answer",
-                status="success",
+                step="aggregate_final",
+                status="success" if successful_agents else "failed",
                 message="ManagerAgent aggregated sub-agent results.",
                 observation={"content": content},
                 duration_ms=self._elapsed_ms(final_started_at),
                 metadata={
                     "manager": self.name,
                     "sub_agents": [result.agent_name for result in results],
+                    "successful_sub_agents": successful_agents,
+                    "failed_sub_agents": failed_agents,
                 },
             )
         )
@@ -286,10 +319,16 @@ class ManagerAgent(BaseAgent):
         results: list[AgentResult],
         model: str | None = None,
     ) -> str:
-        result_payload = [result.to_dict() for result in results]
+        successful_results = [result for result in results if result.success and result.content]
+        if not successful_results:
+            return self._all_failed_answer(results)
+
+        result_payload = [result.to_dict() for result in successful_results]
+        failed_payload = [result.to_dict() for result in results if not result.success]
         prompt = {
             "question": question,
-            "sub_agent_results": result_payload,
+            "successful_sub_agent_results": result_payload,
+            "failed_sub_agent_results": failed_payload,
         }
         try:
             return self.llm_client.complete_chat(
@@ -298,9 +337,11 @@ class ManagerAgent(BaseAgent):
                         "role": "system",
                         "content": (
                             "You are ManagerAgent. Produce the final answer by combining structured "
-                            "sub-agent results. Answer in the user's language. Be direct, cite search "
-                            "sources when SearchAgent returned URLs, and briefly mention failed agents "
-                            "only when the failure affects the answer."
+                            "successful sub-agent results. Ignore failed sub-agent results as evidence. "
+                            "Answer in the user's language. Be direct, cite search sources when "
+                            "SearchAgent returned URLs. When SearchAgent provides sources or read_pages, "
+                            "use that evidence before snippets. Briefly mention failed agents only when "
+                            "the failure affects the answer."
                         ),
                     },
                     {"role": "user", "content": json.dumps(prompt, ensure_ascii=False)},
@@ -317,8 +358,18 @@ class ManagerAgent(BaseAgent):
 
         errors = [result.error for result in results if result.error]
         if errors:
-            return "Multi-agent mode could not complete the request: " + "; ".join(errors)
+            return self._all_failed_answer(results)
         return "Multi-agent mode did not produce a usable result."
+
+    def _all_failed_answer(self, results: list[AgentResult]) -> str:
+        errors = [f"{result.agent_name}: {result.error}" for result in results if result.error]
+        if errors:
+            return (
+                "Sorry, I couldn't complete this multi-agent request because every selected "
+                "sub-agent failed. Details: "
+                + "; ".join(errors)
+            )
+        return "Sorry, I couldn't complete this multi-agent request because every selected sub-agent failed."
 
     def _task_for_agent(self, agent_name: str) -> str:
         return {

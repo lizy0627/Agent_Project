@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import json
 import re
 from typing import Any, Mapping
@@ -168,10 +169,13 @@ class LLMPlanGenerator:
         """Ask the LLM for JSON and return a fully validated AgentPlan."""
 
         question = self._latest_user_message(messages)
-        available_tools = self._available_tools()
         if not question:
             raise LLMPlanGenerationError("Cannot plan without a user message.")
+        if self._looks_like_direct_answer_question(question):
+            logger.info("LLM planner skipped for obvious direct-answer question.")
+            return Planner(max_steps=self.max_steps).direct_answer_plan(question)
 
+        available_tools = self._available_tools()
         raw_reply = self.llm_client.complete_chat(
             self._build_planner_messages(question, messages, available_tools),
             model=model,
@@ -227,6 +231,8 @@ class LLMPlanGenerator:
                     "with no markdown or commentary. The JSON must match this shape exactly: "
                     f"{json.dumps(schema_hint, ensure_ascii=False)}. "
                     "Use null for tool_name when no tool is needed. "
+                    "If the user question clearly needs no tool, create one direct_answer step with tool_name null. "
+                    "For requests that need more than one tool call, create multiple tool steps in execution order. "
                     "Every step must include step_id, description, tool_name, tool_args, and depends_on. "
                     "Only use tool_name values from the available tools list. "
                     "Keep dependencies ordered: a step can only depend on earlier step_id values. "
@@ -283,31 +289,123 @@ class LLMPlanGenerator:
                 raise LLMPlanGenerationError(f"LLM plan step {index} is missing fields: {', '.join(missing)}")
 
     def _parse_json_object(self, raw_reply: str) -> dict[str, Any]:
-        """Parse strict JSON, with a small code-fence cleanup for model drift."""
+        """Parse planner JSON, tolerating common model formatting drift."""
 
         text = str(raw_reply or "").strip()
         if not text:
             raise LLMPlanGenerationError("LLM planner returned an empty response.")
 
-        fenced = re.fullmatch(r"```(?:json)?\s*(?P<body>.*?)\s*```", text, flags=re.DOTALL | re.IGNORECASE)
-        if fenced:
-            text = fenced.group("body").strip()
-
-        try:
-            payload = json.loads(text)
-        except json.JSONDecodeError:
-            start = text.find("{")
-            end = text.rfind("}")
-            if start < 0 or end <= start:
-                raise LLMPlanGenerationError("LLM planner did not return a JSON object.")
+        errors: list[str] = []
+        first_object: dict[str, Any] | None = None
+        for candidate in self._json_object_candidates(text):
             try:
-                payload = json.loads(text[start : end + 1])
-            except json.JSONDecodeError as exc:
-                raise LLMPlanGenerationError(f"LLM planner returned invalid JSON: {exc}") from exc
+                payload = self._load_json_object_candidate(candidate)
+            except LLMPlanGenerationError as exc:
+                errors.append(str(exc))
+                continue
 
-        if not isinstance(payload, dict):
-            raise LLMPlanGenerationError("LLM planner JSON root must be an object.")
+            if isinstance(payload, dict):
+                unwrapped = self._unwrap_plan_payload(payload)
+                if self._looks_like_plan_payload(unwrapped):
+                    return unwrapped
+                if first_object is None:
+                    first_object = unwrapped
+                continue
+            errors.append("LLM planner JSON root must be an object.")
+
+        if first_object is not None:
+            return first_object
+        detail = errors[-1] if errors else "No JSON object candidate found."
+        raise LLMPlanGenerationError(f"LLM planner returned invalid JSON: {detail}")
+
+    def _json_object_candidates(self, text: str) -> list[str]:
+        """Return likely JSON object snippets, ordered from least to most repaired."""
+
+        candidates: list[str] = []
+        self._append_candidate(candidates, text)
+
+        for match in re.finditer(r"```(?:json)?\s*(?P<body>.*?)\s*```", text, flags=re.DOTALL | re.IGNORECASE):
+            self._append_candidate(candidates, match.group("body"))
+
+        for snippet in self._balanced_object_snippets(text):
+            self._append_candidate(candidates, snippet)
+
+        return candidates
+
+    def _append_candidate(self, candidates: list[str], candidate: str) -> None:
+        clean_candidate = str(candidate or "").strip()
+        if clean_candidate and clean_candidate not in candidates:
+            candidates.append(clean_candidate)
+
+    def _balanced_object_snippets(self, text: str) -> list[str]:
+        snippets: list[str] = []
+        for start, char in enumerate(text):
+            if char != "{":
+                continue
+            end = self._balanced_object_end(text, start)
+            if end is not None:
+                snippets.append(text[start : end + 1])
+        return snippets
+
+    def _balanced_object_end(self, text: str, start: int) -> int | None:
+        depth = 0
+        in_string = False
+        quote = ""
+        escaped = False
+        for index in range(start, len(text)):
+            char = text[index]
+            if in_string:
+                if escaped:
+                    escaped = False
+                elif char == "\\":
+                    escaped = True
+                elif char == quote:
+                    in_string = False
+                continue
+            if char in {'"', "'"}:
+                in_string = True
+                quote = char
+                continue
+            if char == "{":
+                depth += 1
+            elif char == "}":
+                depth -= 1
+                if depth == 0:
+                    return index
+        return None
+
+    def _load_json_object_candidate(self, candidate: str) -> Any:
+        parser_inputs = (candidate, self._repair_json_candidate(candidate))
+        for parser_input in parser_inputs:
+            try:
+                return json.loads(parser_input)
+            except json.JSONDecodeError:
+                continue
+
+        last_error: Exception | None = None
+        for parser_input in parser_inputs:
+            try:
+                return ast.literal_eval(parser_input)
+            except (SyntaxError, ValueError) as exc:
+                last_error = exc
+        raise LLMPlanGenerationError(f"Could not parse JSON object candidate: {last_error}")
+
+    def _repair_json_candidate(self, candidate: str) -> str:
+        repaired = str(candidate or "").strip()
+        repaired = re.sub(r"(?m)^\s*//.*$", "", repaired)
+        repaired = re.sub(r"(?m)^\s*#.*$", "", repaired)
+        repaired = re.sub(r"/\*.*?\*/", "", repaired, flags=re.DOTALL)
+        repaired = re.sub(r",\s*([}\]])", r"\1", repaired)
+        return repaired
+
+    def _unwrap_plan_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
+        plan = payload.get("plan")
+        if isinstance(plan, dict) and "steps" in plan:
+            return plan
         return payload
+
+    def _looks_like_plan_payload(self, payload: dict[str, Any]) -> bool:
+        return isinstance(payload.get("steps"), list)
 
     def _available_tools(self) -> list[dict[str, Any]]:
         tools = self.tool_registry.list_tools()
@@ -337,3 +435,133 @@ class LLMPlanGenerator:
             if message.get("role") == "user":
                 return str(message.get("content") or "").strip()
         return ""
+
+    def _looks_like_direct_answer_question(self, question: str) -> bool:
+        """Conservatively skip planner LLM calls for obvious no-tool chat."""
+
+        normalized = " ".join(str(question or "").split())
+        if not normalized:
+            return False
+        lowered = normalized.lower()
+        compact = re.sub(r"[\s，。！？,.!?、~～]+", "", lowered)
+
+        if self._looks_like_tool_needed(lowered):
+            return False
+
+        direct_phrases = {
+            "hi",
+            "hithere",
+            "hello",
+            "hey",
+            "goodmorning",
+            "goodafternoon",
+            "goodevening",
+            "thanks",
+            "thankyou",
+            "thx",
+            "ty",
+            "howareyou",
+            "whoareyou",
+            "whatareyou",
+            "tellmeajoke",
+            "你好",
+            "您好",
+            "哈喽",
+            "嗨",
+            "早上好",
+            "上午好",
+            "中午好",
+            "下午好",
+            "晚上好",
+            "谢谢",
+            "多谢",
+            "感谢",
+            "谢啦",
+            "辛苦了",
+            "你是谁",
+            "你好吗",
+            "在吗",
+            "在不在",
+            "讲个笑话",
+        }
+        return compact in direct_phrases or compact.startswith(("thankyou", "thanks", "谢谢", "感谢", "多谢"))
+
+    def _looks_like_tool_needed(self, lowered_question: str) -> bool:
+        tool_keywords = (
+            "latest",
+            "recent",
+            "current",
+            "today",
+            "tomorrow",
+            "yesterday",
+            "now",
+            "news",
+            "weather",
+            "search",
+            "lookup",
+            "look up",
+            "google",
+            "browse",
+            "web",
+            "website",
+            "webpage",
+            "url",
+            "http://",
+            "https://",
+            "www.",
+            "calculate",
+            "calc",
+            "compute",
+            "time",
+            "date",
+            "calendar",
+            "tool",
+            "mcp",
+            "api",
+            "file",
+            "document",
+            "pdf",
+            "docx",
+            "xlsx",
+            "summarize",
+            "summary",
+            "first",
+            "then",
+            "after that",
+            "最新",
+            "最近",
+            "当前",
+            "今天",
+            "明天",
+            "昨天",
+            "新闻",
+            "天气",
+            "搜索",
+            "查一下",
+            "查找",
+            "查询",
+            "联网",
+            "网页",
+            "网站",
+            "链接",
+            "浏览",
+            "计算",
+            "算一下",
+            "等于多少",
+            "时间",
+            "日期",
+            "几点",
+            "工具",
+            "调用",
+            "文件",
+            "文档",
+            "总结",
+            "摘要",
+            "然后",
+            "接着",
+            "步骤",
+            "分步骤",
+        )
+        if any(keyword in lowered_question for keyword in tool_keywords):
+            return True
+        return bool(re.search(r"\d+(?:\.\d+)?\s*(?:\*\*|[+\-*/%]|=|加|减|乘|除)\s*\d+(?:\.\d+)?", lowered_question))

@@ -2,6 +2,7 @@ from typing import Any
 
 from app.agents.search_agent import SearchAgent
 from app.tools.base import ToolResult
+from backend.app.agents.search_agent import SearchAgent as BackendSearchAgent
 
 
 class FakeSearchToolManager:
@@ -81,6 +82,8 @@ def test_search_agent_reads_top_k_pages_and_returns_evidence():
     assert result.data["read_pages"][0]["success"] is True
     assert result.data["sources"][0]["evidence"] == "Readable body for https://example.test/one"
     assert result.data["sources"][0]["read_success"] is True
+    assert "资料来源" in result.content
+    assert "摘要" in result.content
     assert "First result" in result.content
     assert "https://example.test/one" in result.content
     assert "First search snippet" in result.content
@@ -121,3 +124,15 @@ def test_search_agent_preserves_web_search_error_payload():
     assert result.data["search_results"] == []
     assert result.data["read_pages"] == []
     assert result.data["sources"] == []
+
+
+def test_backend_search_agent_reads_pages_with_same_result_shape():
+    tool_manager = FakeSearchToolManager()
+    agent = BackendSearchAgent(tool_manager, read_top_k=2)
+
+    result = agent.run("Find release notes", [])
+
+    assert result.success is True
+    assert [name for name, _kwargs in tool_manager.calls] == ["web_search", "read_webpage", "read_webpage"]
+    assert set(result.data) >= {"query", "search_results", "read_pages", "sources"}
+    assert result.data["sources"][0]["evidence"] == "Readable body for https://example.test/one"

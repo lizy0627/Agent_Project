@@ -20,6 +20,7 @@ const SELECTED_MODEL_KEY = "agent_project_selected_model";
 const THEME_KEY = "agent_project_theme";
 const MAX_CONTEXT_ROUNDS_KEY = "agent_project_max_context_rounds";
 const STREAMING_ENABLED_KEY = "agent_project_streaming_enabled";
+const AGENT_MODE_KEY = "agent_project_agent_mode";
 const MAX_MESSAGE_LENGTH = 4000;
 const DEFAULT_MAX_CONTEXT_ROUNDS = 10;
 const MIN_CONTEXT_ROUNDS = 0;
@@ -44,15 +45,16 @@ const STREAM_STATUS_MESSAGES = new Set([
 ]);
 const TRACE_STAGE_DEFINITIONS = [
   { key: "planner", label: "Planner" },
+  { key: "thought", label: "Thought" },
   { key: "tool_call", label: "Tool Call" },
   { key: "observation", label: "Observation" },
-  { key: "react_thought", label: "ReAct Thought" },
-  { key: "multi_agent_manager", label: "Multi-Agent Manager" },
-  { key: "multi_agent_sub_agent", label: "Sub Agent" },
+  { key: "multi_agent", label: "Multi-Agent" },
   { key: "final_answer", label: "Final Answer" },
 ];
 const TRACE_MAX_EVENTS = 24;
 const CHAT_FAILURE_MESSAGE = "请求失败，请检查后端服务或 API Key";
+const AGENT_FAILURE_MESSAGE = "Agent 暂时无法完成请求，请稍后重试。";
+const TOOL_FAILURE_MESSAGE = "工具调用失败，请查看错误原因后重试。";
 const DEFAULT_MODE = "通用助手";
 const DEFAULT_THEME = "light";
 
@@ -62,6 +64,25 @@ const AVAILABLE_MODELS = [
   { value: "qwen-max", label: "qwen-max" },
 ];
 const DEFAULT_MODEL = AVAILABLE_MODELS[0].value;
+
+const AGENT_MODE_OPTIONS = [
+  {
+    value: "plan_execute",
+    label: "Plan Execute",
+    description: "适合普通问答和工具调用",
+  },
+  {
+    value: "react",
+    label: "ReAct",
+    description: "适合需要多轮推理和工具观察",
+  },
+  {
+    value: "multi_agent",
+    label: "Multi-Agent",
+    description: "适合搜索、代码、总结等复合任务",
+  },
+];
+const DEFAULT_AGENT_MODE = AGENT_MODE_OPTIONS[0].value;
 
 const MODE_PROMPTS = {
   通用助手: "你是一个简洁、可靠的中文 AI 助手。回答要清晰、可执行，适合初学者理解。",
@@ -136,12 +157,16 @@ const scrollToBottomButton = getRequiredElement("#scrollToBottomButton");
 const newMessageNotice = getRequiredElement("#newMessageNotice");
 const currentModelText = getRequiredElement("#currentModelText");
 const modelSelect = getRequiredElement("#modelSelect");
+const agentModeSelect = getRequiredElement("#agentModeSelect");
+const agentModeDescriptionText = getRequiredElement("#agentModeDescriptionText");
 const currentModeText = getRequiredElement("#currentModeText");
 const themeToggleButton = getRequiredElement("#themeToggleButton");
 const settingsButton = getRequiredElement("#settingsButton");
 const settingsOverlay = getRequiredElement("#settingsOverlay");
 const settingsCloseButton = getRequiredElement("#settingsCloseButton");
 const settingsModelSelect = getRequiredElement("#settingsModelSelect");
+const settingsAgentModeSelect = getRequiredElement("#settingsAgentModeSelect");
+const settingsAgentModeDescriptionText = getRequiredElement("#settingsAgentModeDescriptionText");
 const settingsMaxContextInput = getRequiredElement("#settingsMaxContextInput");
 const settingsStreamingToggle = getRequiredElement("#settingsStreamingToggle");
 const settingsModeSelect = getRequiredElement("#settingsModeSelect");
@@ -171,6 +196,7 @@ const documentList = getRequiredElement("#documentList");
 const documentStatusText = getRequiredElement("#documentStatusText");
 ensureModeItems();
 ensureModelOptions();
+ensureAgentModeOptions();
 ensureSettingsModeOptions();
 const modeButtons = getRequiredElements(".mode-item");
 debugLog("modeButtons found", modeButtons.length);
@@ -183,6 +209,7 @@ let messages = loadMessages(conversationId);
 let conversationScrollPositions = loadConversationScrollPositions();
 let currentMode = normalizeMode(localStorage.getItem(MODE_KEY));
 let selectedModel = normalizeModel(localStorage.getItem(SELECTED_MODEL_KEY));
+let currentAgentMode = normalizeAgentMode(localStorage.getItem(AGENT_MODE_KEY));
 let currentTheme = normalizeTheme(localStorage.getItem(THEME_KEY));
 let maxContextRounds = normalizeMaxContextRounds(localStorage.getItem(MAX_CONTEXT_ROUNDS_KEY));
 let streamingEnabled = normalizeBooleanSetting(localStorage.getItem(STREAMING_ENABLED_KEY), false);
@@ -236,6 +263,11 @@ function normalizeModel(model) {
   return AVAILABLE_MODELS.some((item) => item.value === value) ? value : DEFAULT_MODEL;
 }
 
+function normalizeAgentMode(mode) {
+  const value = String(mode || "").trim();
+  return AGENT_MODE_OPTIONS.some((item) => item.value === value) ? value : DEFAULT_AGENT_MODE;
+}
+
 function normalizeTheme(theme) {
   return theme === "dark" || theme === "light" ? theme : DEFAULT_THEME;
 }
@@ -281,9 +313,20 @@ function ensureModelOptions() {
   fillModelSelect(settingsModelSelect);
 }
 
+function ensureAgentModeOptions() {
+  fillAgentModeSelect(agentModeSelect);
+  fillAgentModeSelect(settingsAgentModeSelect);
+}
+
 function fillModelSelect(select) {
   select.replaceChildren(
     ...AVAILABLE_MODELS.map((model) => createOption(model.value, model.label)),
+  );
+}
+
+function fillAgentModeSelect(select) {
+  select.replaceChildren(
+    ...AGENT_MODE_OPTIONS.map((mode) => createOption(mode.value, mode.label)),
   );
 }
 
@@ -323,6 +366,7 @@ function initPage() {
   ensureConversation(conversationId);
   conversationIdText.textContent = conversationId;
   setSelectedModel(selectedModel);
+  setAgentMode(currentAgentMode);
   setMode(currentMode);
   setMaxContextRounds(maxContextRounds);
   setStreamingEnabled(streamingEnabled);
@@ -1150,7 +1194,6 @@ function createToolPanel(message) {
   title.append(marker, name);
 
   const status = document.createElement("span");
-  const toolErrorDetail = getToolErrorDetail(message);
   const toolErrorMessage = isToolSuccessful(message) ? "" : getToolErrorMessage(message);
   const statusText = formatToolStatus(message.toolStatus, toolErrorMessage);
   status.className = `tool-status ${statusText === "失败" ? "failed" : "success"}`;
@@ -1164,6 +1207,11 @@ function createToolPanel(message) {
   details.appendChild(createToolDetail("工具名称", message.toolName || "未命名工具"));
   details.appendChild(createToolDetail("工具状态", statusText));
   details.appendChild(createToolDetail("耗时", formatToolDuration(message.toolDurationMs)));
+  if (shouldShowToolErrorDetail(message)) {
+    const detail = getToolErrorDetail(message);
+    details.appendChild(createToolDetail("错误原因", detail.message || TOOL_FAILURE_MESSAGE));
+    details.appendChild(createToolDetail("是否可重试", formatToolRetryable(detail.retryable)));
+  }
   const routeReason = getToolRouteReason(message);
   if (routeReason) {
     details.appendChild(createToolDetail("调用原因", routeReason));
@@ -1200,6 +1248,10 @@ function createToolPanel(message) {
 }
 
 function getToolPanelTitle(message) {
+  if (!isToolSuccessful(message) && isToolFailed(message)) {
+    return message.toolName || "工具调用";
+  }
+
   if (message.toolName === "web_search") {
     return WEB_SEARCH_STATUS_DONE;
   }
@@ -1312,8 +1364,13 @@ function appendMarkdownSourceCandidates(candidates, content) {
 }
 
 function getToolDisplayResult(message) {
-  if (message.toolError) {
-    return message.toolError;
+  if (isToolFailed(message)) {
+    const detail = getToolErrorDetail(message);
+    return {
+      error: detail.message || TOOL_FAILURE_MESSAGE,
+      code: detail.code || "TOOL_EXECUTION_ERROR",
+      retryable: formatToolRetryable(detail.retryable),
+    };
   }
 
   if (message.toolResult !== undefined && message.toolResult !== null && message.toolResult !== "") {
@@ -1349,9 +1406,15 @@ function isToolSuccessful(message) {
 
 function getToolErrorDetail(message) {
   const detail = normalizeToolErrorDetail(message.toolErrorDetail);
+  const code = detail.code || message.toolErrorCode || "";
+  const rawMessage = detail.message || message.toolErrorMessage || message.toolError || "";
   return {
-    code: detail.code || message.toolErrorCode || "",
-    message: detail.message || message.toolErrorMessage || "",
+    code,
+    message: normalizeToolErrorMessage({
+      toolName: message.toolName,
+      code,
+      message: rawMessage,
+    }),
     retryable: detail.retryable ?? message.toolRetryable,
   };
 }
@@ -1368,6 +1431,30 @@ function normalizeToolErrorDetail(detail) {
   };
 }
 
+function normalizeToolErrorMessage({ toolName = "", code = "", message = "" } = {}) {
+  const normalizedToolName = String(toolName || "").trim();
+  const normalizedCode = String(code || "").trim();
+  const rawText = String(message || "");
+  if (looksLikeBackendStack(rawText)) {
+    return TOOL_FAILURE_MESSAGE;
+  }
+  const text = sanitizeErrorText(rawText);
+
+  if (normalizedToolName === "web_search" && normalizedCode === "API_KEY_MISSING") {
+    return "web_search 缺少 API Key，请配置 SEARCH_API_KEY。";
+  }
+
+  if (normalizedToolName === "web_search" && /SEARCH_API_KEY|api key|api_key/i.test(text) && /not configured|missing|empty|required|未配置|缺少/i.test(text)) {
+    return "web_search 缺少 API Key，请配置 SEARCH_API_KEY。";
+  }
+
+  if (normalizedCode === "MCP_SERVER_UNAVAILABLE" || (normalizedToolName === "mcp_tool" && /mcp/i.test(text))) {
+    return "MCP Server 未启动，请先启动 MCP Server 后重试。";
+  }
+
+  return text || TOOL_FAILURE_MESSAGE;
+}
+
 function getToolErrorMessage(message) {
   return getToolErrorDetail(message).message || message.toolError || "";
 }
@@ -1378,7 +1465,7 @@ function getToolDisplayError(message) {
 
 function formatToolFailureMessage(message) {
   const detail = getToolErrorDetail(message);
-  const errorMessage = detail.message || getToolDisplayError(message) || "工具调用失败";
+  const errorMessage = detail.message || getToolDisplayError(message) || TOOL_FAILURE_MESSAGE;
   const retryMessage = detail.retryable === true ? " 可以稍后重试。" : "";
   return `${errorMessage}${retryMessage}`;
 }
@@ -1398,12 +1485,16 @@ function formatToolRetryable(value) {
 function createToolDetail(label, value) {
   const item = document.createElement("div");
   item.className = "tool-panel-detail";
+  if (label === "错误原因") {
+    item.classList.add("tool-panel-detail-wide");
+  }
 
   const labelElement = document.createElement("span");
   labelElement.textContent = label;
 
   const valueElement = document.createElement("strong");
   valueElement.textContent = value;
+  valueElement.title = String(value || "");
 
   item.append(labelElement, valueElement);
   return item;
@@ -2219,6 +2310,7 @@ function startAgentTrace(userText, { regenerate = false } = {}) {
     regenerate ? "重新生成请求" : "接收用户请求",
     activeTrace.intent,
     "running",
+    { key: "planner" },
   );
   renderAgentTrace();
 }
@@ -2266,7 +2358,12 @@ function updateAgentTraceFromStatus(statusMessage) {
     updateTraceStage("tool_call", "running", normalizedStatus, { toolName: inferToolNameFromStatus(normalizedStatus) });
   }
 
-  addTraceEvent(normalizedStatus, "Streaming status update.", "running");
+  addTraceEvent(
+    normalizedStatus,
+    "Streaming status update.",
+    "running",
+    { key: traceKeyFromStatusMessage(normalizedStatus) || "planner" },
+  );
   renderAgentTrace();
 }
 
@@ -2288,6 +2385,12 @@ function updateAgentTraceFromTool(metadata) {
     `Tool ${activeTrace.toolName}`,
     `${activeTrace.toolStatus}${activeTrace.toolDuration !== "--" ? ` · ${activeTrace.toolDuration}` : ""}`,
     activeTrace.error ? "failed" : normalizeTraceStatus(metadata.toolStatus, metadata),
+    {
+      key: "tool_call",
+      toolName: activeTrace.toolName,
+      durationMs: metadata.toolDurationMs ?? null,
+      toolArgs: extractToolArgs(metadata),
+    },
   );
   renderAgentTrace();
 }
@@ -2349,18 +2452,18 @@ function finalizeAgentTrace(result = {}, { error = "", aborted = false } = {}) {
     activeTrace.state = "failed";
     activeTrace.error = "已停止生成";
     markTraceStage(activeTrace, "final_answer", "failed", "Generation was stopped.");
-    addTraceEvent("Generation stopped", "Request was aborted.", "failed");
+    addTraceEvent("Generation stopped", "Request was aborted.", "failed", { key: "final_answer" });
   } else if (error) {
     activeTrace.state = "failed";
     activeTrace.error = error;
     markTraceStage(activeTrace, "final_answer", "failed", "Generation failed.");
-    addTraceEvent("Request failed", error, "failed");
+    addTraceEvent("Request failed", error, "failed", { key: "final_answer" });
   } else if (activeTrace.state !== "failed") {
     activeTrace.state = "success";
     markRunningTraceStages("success");
     markTraceStage(activeTrace, "final_answer", "success", "Final answer completed.");
     markSkippedTraceStages();
-    addTraceEvent("Request completed", "Agent returned the final answer.", "success");
+    addTraceEvent("Request completed", "Agent returned the final answer.", "success", { key: "final_answer" });
   }
 
   renderAgentTrace();
@@ -2404,13 +2507,19 @@ function markTraceStage(trace, key, status, message, details = {}) {
   });
 }
 
-function addTraceEvent(title, detail = "", status = "running") {
+function addTraceEvent(title, detail = "", status = "running", eventDetails = {}) {
   activeTrace.events = [
     {
       title,
       detail,
       status,
       time: getCurrentTime(),
+      key: eventDetails.key || "",
+      toolName: eventDetails.toolName || "",
+      agentName: eventDetails.agentName || "",
+      durationMs: eventDetails.durationMs ?? null,
+      toolArgs: eventDetails.toolArgs ?? null,
+      observation: eventDetails.observation ?? null,
     },
     ...activeTrace.events,
   ].slice(0, TRACE_MAX_EVENTS);
@@ -2470,7 +2579,7 @@ function applyApiTraceToTrace(trace, apiTrace) {
 
     if (normalizedStep.status === "failed") {
       hasFailed = true;
-      trace.error = normalizedStep.message || trace.error;
+      trace.error = sanitizeErrorText(normalizedStep.message || trace.error);
     } else if (normalizedStep.status === "running") {
       hasRunning = true;
     }
@@ -2561,7 +2670,7 @@ function normalizeApiTraceKey(stepKey, message = "") {
     return "planner";
   }
   if (key === "thought" || key === "react_thought" || key === "reasoning") {
-    return "react_thought";
+    return "thought";
   }
   if (key === "tool" || key === "tool_call" || key === "action") {
     return "tool_call";
@@ -2569,11 +2678,17 @@ function normalizeApiTraceKey(stepKey, message = "") {
   if (key === "execute" || key === "observation") {
     return "observation";
   }
-  if (key === "multi_agent_manager" || key === "manager") {
-    return "multi_agent_manager";
-  }
-  if (key === "multi_agent_sub_agent" || key === "sub_agent") {
-    return "multi_agent_sub_agent";
+  if (
+    key === "manager_plan" ||
+    key === "multi_agent_manager" ||
+    key === "manager" ||
+    key === "sub_agent_start" ||
+    key === "sub_agent_result" ||
+    key === "multi_agent_sub_agent" ||
+    key === "sub_agent" ||
+    key === "aggregate_final"
+  ) {
+    return "multi_agent";
   }
   if (key === "generate" || key === "model_generate" || key === "final_answer") {
     return "final_answer";
@@ -2602,16 +2717,19 @@ function traceDetailForApiStep(step, key, toolName, agentName, durationMs) {
   const message = step.message || step.description || "";
   const duration = durationMs == null ? "" : ` · ${formatToolDuration(durationMs)}`;
   if (message) {
-    return `${message}${duration}`;
+    return `${sanitizeErrorText(message)}${duration}`;
   }
   if (key === "tool_call" && toolName) {
     return `Tool ${toolName}${duration}`;
   }
-  if (key === "multi_agent_sub_agent" && agentName) {
+  if (key === "multi_agent" && agentName) {
     return `Sub agent ${agentName}${duration}`;
   }
   if (key === "observation") {
     return summarizeObservation(step.observation) || `Observation received${duration}`;
+  }
+  if (key === "multi_agent") {
+    return `Multi-agent orchestration${duration}`;
   }
   if (key === "final_answer") {
     return `Final answer generated${duration}`;
@@ -2624,11 +2742,11 @@ function summarizeObservation(observation) {
     return "";
   }
   if (typeof observation === "string") {
-    return observation.slice(0, 90);
+    return sanitizeErrorText(observation).slice(0, 90);
   }
   if (typeof observation === "object") {
     if (observation.error_message || observation.error) {
-      return String(observation.error_message || observation.error).slice(0, 90);
+      return sanitizeErrorText(observation.error_message || observation.error).slice(0, 90);
     }
     if (observation.name) {
       return `已获取 ${observation.name} 的结果`;
@@ -2704,7 +2822,14 @@ function renderAgentTrace() {
     traceErrorText.classList.add("is-hidden");
   }
 
-  traceStageList.replaceChildren(...activeTrace.stages.map(createTraceStageElement));
+  traceStageList.replaceChildren(
+    ...activeTrace.stages.map((stage) =>
+      createTraceStageElement(
+        stage,
+        activeTrace.events.filter((event) => event.key === stage.key),
+      ),
+    ),
+  );
   if (activeTrace.events.length === 0) {
     const empty = document.createElement("div");
     empty.className = "trace-empty";
@@ -2715,7 +2840,7 @@ function renderAgentTrace() {
   }
 }
 
-function createTraceStageElement(stage) {
+function createTraceStageElement(stage, stageEvents = []) {
   const item = document.createElement("div");
   item.className = `trace-stage-item ${stage.status}`;
 
@@ -2752,8 +2877,39 @@ function createTraceStageElement(stage) {
   if (details) {
     copy.appendChild(details);
   }
+  const eventList = createTraceStageEventList(stageEvents);
+  if (eventList) {
+    copy.appendChild(eventList);
+  }
   item.append(marker, copy);
   return item;
+}
+
+function createTraceStageEventList(events) {
+  if (!Array.isArray(events) || events.length === 0) {
+    return null;
+  }
+
+  const list = document.createElement("div");
+  list.className = "trace-stage-event-list";
+  events.slice(0, 4).forEach((event) => {
+    const row = document.createElement("div");
+    row.className = `trace-stage-event-row ${event.status}`;
+
+    const title = document.createElement("span");
+    title.className = "trace-stage-event-title";
+    title.textContent = event.title;
+
+    const meta = document.createElement("span");
+    meta.className = "trace-stage-event-meta";
+    meta.textContent = [event.time, formatTraceDuration(event.durationMs)]
+      .filter((value) => value && value !== "--")
+      .join(" · ");
+
+    row.append(title, meta);
+    list.appendChild(row);
+  });
+  return list;
 }
 
 function createTraceEventElement(event) {
@@ -2794,8 +2950,12 @@ function createTraceEventElement(event) {
 
 function createTraceMeta(item) {
   const parts = [];
-  parts.push(traceActorLabel(item));
-  parts.push(`duration_ms: ${item.durationMs != null ? formatRawDurationMs(item.durationMs) : "--"}`);
+  const actor = traceActorLabel(item);
+  const duration = formatTraceDuration(item.durationMs);
+  if (actor) {
+    parts.push(actor);
+  }
+  parts.push(`Duration ${duration}`);
 
   const meta = document.createElement("div");
   meta.className = "trace-stage-meta";
@@ -2805,21 +2965,18 @@ function createTraceMeta(item) {
 
 function traceActorLabel(item) {
   if (item.toolName) {
-    return `tool: ${item.toolName}`;
+    return `Tool ${item.toolName}`;
   }
   if (item.agentName) {
-    return `agent: ${item.agentName}`;
+    return `Agent ${item.agentName}`;
   }
   if (item.key === "tool_call" || item.key === "observation") {
-    return "tool: --";
+    return "Tool pending";
   }
-  if (item.key === "multi_agent_manager") {
-    return "agent: ManagerAgent";
+  if (item.key === "multi_agent") {
+    return "Agent ManagerAgent";
   }
-  if (item.key === "multi_agent_sub_agent") {
-    return "agent: --";
-  }
-  return "agent: Agent";
+  return "Agent";
 }
 
 function createTraceDetails(item) {
@@ -2845,7 +3002,7 @@ function createTraceDisclosure(label, value) {
   details.className = `trace-disclosure trace-disclosure-${label.replace(/_/g, "-")}`;
 
   const summary = document.createElement("summary");
-  summary.textContent = label;
+  summary.textContent = formatTraceDisclosureLabel(label);
 
   const body = document.createElement("pre");
   body.textContent = formatTraceValue(value);
@@ -2854,15 +3011,47 @@ function createTraceDisclosure(label, value) {
   return details;
 }
 
+function formatTraceDisclosureLabel(label) {
+  if (label === "tool_args") {
+    return "Arguments";
+  }
+  if (label === "observation") {
+    return "Observation";
+  }
+  return label.replace(/_/g, " ");
+}
+
 function formatTraceValue(value) {
-  if (typeof value === "string") {
-    return value;
+  const safeValue = sanitizeStructuredErrorValue(value);
+  if (typeof safeValue === "string") {
+    return safeValue;
   }
   try {
-    return JSON.stringify(value, null, 2);
+    return JSON.stringify(safeValue, null, 2);
   } catch {
-    return String(value);
+    return sanitizeErrorText(String(value));
   }
+}
+
+function sanitizeStructuredErrorValue(value, depth = 0) {
+  if (typeof value === "string") {
+    return sanitizeErrorText(value);
+  }
+  if (!value || typeof value !== "object" || depth > 4) {
+    return value;
+  }
+  if (Array.isArray(value)) {
+    return value.map((item) => sanitizeStructuredErrorValue(item, depth + 1));
+  }
+
+  return Object.fromEntries(
+    Object.entries(value).map(([key, item]) => [
+      key,
+      /error|message|trace|stack/i.test(key)
+        ? sanitizeErrorText(String(item || ""))
+        : sanitizeStructuredErrorValue(item, depth + 1),
+    ]),
+  );
 }
 
 function formatRawDurationMs(value) {
@@ -2871,6 +3060,13 @@ function formatRawDurationMs(value) {
     return String(value);
   }
   return `${Math.round(numeric)}ms`;
+}
+
+function formatTraceDuration(value) {
+  if (value === undefined || value === null || value === "") {
+    return "--";
+  }
+  return formatToolDuration(value);
 }
 
 function formatTraceState(state) {
@@ -2982,6 +3178,21 @@ function setSelectedModel(model) {
   settingsModelSelect.value = selectedModel;
   currentModelText.textContent = selectedModel;
   debugLog("model changed", selectedModel);
+}
+
+function setAgentMode(mode) {
+  currentAgentMode = normalizeAgentMode(mode);
+  const option = getAgentModeOption(currentAgentMode);
+  localStorage.setItem(AGENT_MODE_KEY, currentAgentMode);
+  agentModeSelect.value = currentAgentMode;
+  settingsAgentModeSelect.value = currentAgentMode;
+  agentModeDescriptionText.textContent = option.description;
+  settingsAgentModeDescriptionText.textContent = option.description;
+  debugLog("agent mode changed", currentAgentMode);
+}
+
+function getAgentModeOption(mode) {
+  return AGENT_MODE_OPTIONS.find((item) => item.value === mode) || AGENT_MODE_OPTIONS[0];
 }
 
 function setMaxContextRounds(value) {
@@ -3260,6 +3471,7 @@ async function requestAgentReply(
     targetConversationId = conversationId,
     targetMode = currentMode,
     targetModel = selectedModel,
+    targetAgentMode = currentAgentMode,
     targetMaxContextRounds = maxContextRounds,
     targetStreamingEnabled = streamingEnabled,
     onChunk = null,
@@ -3272,6 +3484,7 @@ async function requestAgentReply(
     messageLength: message.length,
     mode: targetMode,
     model: targetModel,
+    agentMode: targetAgentMode,
     maxContextRounds: targetMaxContextRounds,
     streamingEnabled: targetStreamingEnabled,
   });
@@ -3279,6 +3492,8 @@ async function requestAgentReply(
     message,
     system_prompt: MODE_PROMPTS[targetMode],
     model: targetModel,
+    agent_mode: targetAgentMode,
+    multi_agent: targetAgentMode === "multi_agent",
     conversation_id: targetConversationId,
     max_context_rounds: targetMaxContextRounds,
   };
@@ -3327,7 +3542,7 @@ async function requestAgentReply(
       return { aborted: true };
     }
     if (error instanceof Error && error.message && error.name !== "TypeError") {
-      throw error;
+      throw new Error(toFriendlyError(error.message));
     }
     throw new Error(CHAT_FAILURE_MESSAGE);
   }
@@ -3802,9 +4017,10 @@ async function regenerateAgentReply(messageId) {
     finalizeAgentTrace(result);
   } catch (error) {
     console.warn("regenerateAgentReply error", error);
-    finalizeAgentTrace({}, { error: error instanceof Error ? error.message : CHAT_FAILURE_MESSAGE });
+    const friendlyMessage = getAgentFailureMessage(error);
+    finalizeAgentTrace({}, { error: friendlyMessage });
     updateMessage(loadingMessage.id, originalMessage);
-    window.alert(error instanceof Error ? error.message : CHAT_FAILURE_MESSAGE);
+    window.alert(friendlyMessage);
   } finally {
     if (searchStatusTimer) {
       window.clearTimeout(searchStatusTimer);
@@ -3823,9 +4039,41 @@ async function parseJsonResponse(response) {
 }
 
 function toFriendlyError(errorText) {
-  const text = normalizeErrorText(errorText);
+  const code = normalizeErrorCode(errorText);
+  const rawText = normalizeErrorText(errorText);
+  if (
+    code === "API_KEY_MISSING" &&
+    (/SEARCH_API_KEY/i.test(rawText) || /web_search/i.test(rawText))
+  ) {
+    return "web_search 缺少 API Key，请配置 SEARCH_API_KEY。";
+  }
+  const codeMessage = friendlyErrorFromCode(code);
+  if (codeMessage) {
+    return codeMessage;
+  }
+
+  const text = sanitizeErrorText(rawText);
+  if (/SEARCH_API_KEY/i.test(text) && /not configured|missing|empty|required|未配置|缺少/i.test(text)) {
+    return "web_search 缺少 API Key，请配置 SEARCH_API_KEY。";
+  }
+  if (/mcp/i.test(text) && /unavailable|unreachable|not running|connection|connect|timed out|timeout|不可用|未启动/i.test(text)) {
+    return "MCP Server 未启动，请先启动 MCP Server 后重试。";
+  }
   const knownError = FRIENDLY_ERROR_MESSAGES.find((item) => text.includes(item.match));
-  return knownError ? knownError.message : text || "请求失败，请稍后重试。";
+  if (knownError) {
+    return knownError.message;
+  }
+  if (/^[45]\d{2}$/.test(text)) {
+    return AGENT_FAILURE_MESSAGE;
+  }
+  return text || AGENT_FAILURE_MESSAGE;
+}
+
+function getAgentFailureMessage(error) {
+  if (error instanceof Error) {
+    return toFriendlyError(error.message);
+  }
+  return toFriendlyError(error);
 }
 
 function normalizeErrorText(errorValue) {
@@ -3836,6 +4084,59 @@ function normalizeErrorText(errorValue) {
     return String(errorValue.message || errorValue.error_message || errorValue.code || "");
   }
   return String(errorValue);
+}
+
+function normalizeErrorCode(errorValue) {
+  if (!errorValue || typeof errorValue !== "object") {
+    return "";
+  }
+  return String(errorValue.code || errorValue.error_code || "");
+}
+
+function friendlyErrorFromCode(code) {
+  const normalizedCode = String(code || "").trim();
+  if (!normalizedCode) {
+    return "";
+  }
+
+  const messages = {
+    API_KEY_MISSING: "后端缺少 API Key，请检查 .env 配置。",
+    API_KEY_INVALID: "DashScope API Key 无效或没有权限，请检查配置。",
+    AUTH_ERROR: "认证失败，请重新登录。",
+    AUTH_REQUIRED: "请先登录后再发送消息。",
+    DOCUMENT_NOT_FOUND: "文档不存在或已被删除。",
+    INVALID_ARGUMENTS: "请求参数非法，请检查输入内容。",
+    MCP_SERVER_UNAVAILABLE: "MCP Server 未启动，请先启动 MCP Server 后重试。",
+    MEMORY_ERROR: "记忆服务暂时异常，请稍后重试。",
+    MODEL_PROVIDER_ERROR: "模型服务暂时异常，请稍后重试。",
+    MODEL_TIMEOUT: "模型请求超时，请稍后重试。",
+    NETWORK_ERROR: "网络连接失败，请检查网络或稍后重试。",
+    NOT_FOUND: "请求的资源不存在。",
+    TOOL_EXECUTION_ERROR: TOOL_FAILURE_MESSAGE,
+    UNKNOWN_ERROR: AGENT_FAILURE_MESSAGE,
+  };
+
+  return messages[normalizedCode] || "";
+}
+
+function sanitizeErrorText(errorText) {
+  const text = String(errorText || "").replace(/\s+/g, " ").trim();
+  return looksLikeBackendStack(text) ? AGENT_FAILURE_MESSAGE : text;
+}
+
+function looksLikeBackendStack(text) {
+  const value = String(text || "");
+  if (!value) {
+    return false;
+  }
+
+  return (
+    /traceback \(most recent call last\)/i.test(value) ||
+    /\bFile ".*", line \d+/i.test(value) ||
+    /\bat\s+[\w.<>]+\s*\(.+:\d+:\d+\)/.test(value) ||
+    /\b(?:RuntimeError|ValueError|KeyError|TypeError|AttributeError|ModuleNotFoundError|ImportError):/i.test(value) ||
+    /ExceptionGroup|During handling of the above exception|stack trace/i.test(value)
+  );
 }
 
 // Settings panel
@@ -3863,6 +4164,8 @@ function settingsPanelFocusTarget() {
 
 function syncSettingsControls() {
   settingsModelSelect.value = selectedModel;
+  settingsAgentModeSelect.value = currentAgentMode;
+  settingsAgentModeDescriptionText.textContent = getAgentModeOption(currentAgentMode).description;
   settingsModeSelect.value = currentMode;
   settingsMaxContextInput.value = String(maxContextRounds);
   settingsStreamingToggle.checked = streamingEnabled;
@@ -4109,11 +4412,12 @@ async function sendCurrentMessage() {
     debugLog("sendCurrentMessage agent reply rendered", loadingMessage.id);
   } catch (error) {
     console.warn("sendCurrentMessage error", error);
-    finalizeAgentTrace({}, { error: error instanceof Error ? error.message : CHAT_FAILURE_MESSAGE });
+    const friendlyMessage = getAgentFailureMessage(error);
+    finalizeAgentTrace({}, { error: friendlyMessage });
     updateMessage(loadingMessage.id, {
       type: "text",
       role: "error",
-      content: error instanceof Error ? error.message : CHAT_FAILURE_MESSAGE,
+      content: friendlyMessage,
       createdAt: getCurrentTime(),
     });
   } finally {
@@ -4391,6 +4695,11 @@ modelSelect.addEventListener("change", () => {
   messageInput.focus();
 });
 
+agentModeSelect.addEventListener("change", () => {
+  setAgentMode(agentModeSelect.value);
+  messageInput.focus();
+});
+
 themeToggleButton.addEventListener("click", () => {
   toggleTheme();
   messageInput.focus();
@@ -4437,6 +4746,10 @@ settingsOverlay.addEventListener("click", (event) => {
 
 settingsModelSelect.addEventListener("change", () => {
   setSelectedModel(settingsModelSelect.value);
+});
+
+settingsAgentModeSelect.addEventListener("change", () => {
+  setAgentMode(settingsAgentModeSelect.value);
 });
 
 settingsMaxContextInput.addEventListener("change", () => {

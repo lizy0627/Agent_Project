@@ -266,15 +266,21 @@ class AgentService:
                 step="thought",
                 status="success",
                 message=str(step.content or ""),
+                metadata={"turn": step.turn} if step.turn is not None else None,
             )
 
         if step.type == "action":
             return AgentTraceStep(
                 step="action",
-                status="running",
+                status=step.status or "running",
                 message=f"Selected tool: {step.tool_name}.",
                 tool_name=step.tool_name,
-                metadata={"tool_args": step.tool_args or {}},
+                metadata={
+                    "turn": step.turn,
+                    "tool_args": step.tool_args or {},
+                }
+                if step.turn is not None
+                else {"tool_args": step.tool_args or {}},
             )
 
         if step.type == "observation":
@@ -285,14 +291,19 @@ class AgentService:
                 message=step.error or "Observed tool result.",
                 tool_name=step.tool_name,
                 observation=step.observation,
+                metadata={"turn": step.turn} if step.turn is not None else None,
             )
 
-        metadata = {"reason": step.status} if step.status else None
+        metadata = {}
+        if step.turn is not None:
+            metadata["turn"] = step.turn
+        if step.status:
+            metadata["reason"] = step.status
         return AgentTraceStep(
             step="final_answer",
             status="success",
             message=str(step.content or ""),
-            metadata=metadata,
+            metadata=metadata or None,
         )
 
     def _handle_search_workflow(

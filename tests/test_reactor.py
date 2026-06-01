@@ -17,6 +17,28 @@ class EchoTool(BaseTool):
         return {"text": text}
 
 
+class FailingTool(BaseTool):
+    name = "fail"
+    description = "Always fail."
+    args_schema = {"type": "object", "properties": {}}
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def run(self) -> dict[str, object]:
+        self.calls += 1
+        return {"success": False, "error": "boom"}
+
+
+class LargeTool(BaseTool):
+    name = "large"
+    description = "Return a large payload."
+    args_schema = {"type": "object", "properties": {}}
+
+    def run(self) -> dict[str, str]:
+        return {"text": "x" * 10000}
+
+
 class FakeLLM:
     def __init__(self, replies: list[str]) -> None:
         self.replies = replies
@@ -101,13 +123,15 @@ def test_react_agent_accepts_structured_json_turns_and_writes_trace():
     assert [step.step for step in result.trace.steps] == [
         "planner",
         "thought",
+        "action",
         "tool_call",
         "observation",
         "thought",
         "final_answer",
     ]
     assert result.trace.steps[2].tool_name == "echo"
-    assert result.trace.steps[3].observation["result"] == {"text": "hello"}
+    assert result.trace.steps[2].metadata["turn"] == 1
+    assert result.trace.steps[4].observation["result"] == {"text": "hello"}
 
 
 def test_react_agent_rejects_unregistered_tool_without_executing_registry():
@@ -120,10 +144,12 @@ def test_react_agent_rejects_unregistered_tool_without_executing_registry():
 
     result = ReActAgent(llm, ToolRegistry()).run("test")
 
+    assert len(llm.calls) == 2
     assert result.tool_calls[0].tool_name == "missing"
     assert result.tool_calls[0].status == "failed"
     assert result.tool_calls[0].error_code == TOOL_NOT_FOUND
     assert result.reasoning_steps[1].tool_args == {"api_key": "***"}
+    assert result.reasoning_steps[-1].status == "unknown_tool"
 
 
 def test_react_agent_caps_tool_calls_at_five_before_finalizing():
@@ -139,8 +165,48 @@ def test_react_agent_caps_tool_calls_at_five_before_finalizing():
     result = ReActAgent(llm, registry).run("loop")
 
     assert len(result.tool_calls) == 5
-    assert result.final_answer == "stopped"
+    assert result.final_answer == "基于已有观察结果回答: stopped"
     assert result.reasoning_steps[-1].status == "tool_limit_reached"
+
+
+def test_react_agent_stops_before_repeating_same_failed_tool():
+    registry = ToolRegistry()
+    failing_tool = FailingTool()
+    registry.register(failing_tool)
+    llm = FakeLLM(
+        [
+            'Thought: try it.\nAction: {"tool": "fail", "args": {}}',
+            'Thought: try it again.\nAction: {"tool": "fail", "args": {}}',
+            "Final Answer: the tool failed, so I stopped",
+        ]
+    )
+
+    result = ReActAgent(llm, registry, max_tool_calls=5).run("fail twice")
+
+    assert failing_tool.calls == 1
+    assert len(result.tool_calls) == 1
+    assert result.reasoning_steps[-1].status == "repeated_failed_tool"
+    assert [step.step for step in result.trace.steps].count("tool_call") == 1
+    assert result.trace.steps[-2].step == "observation"
+    assert result.trace.steps[-2].status == "skipped"
+
+
+def test_react_agent_compacts_long_observation_payloads():
+    registry = ToolRegistry()
+    registry.register(LargeTool())
+    llm = FakeLLM(
+        [
+            'Thought: get data.\nAction: {"tool": "large", "args": {}}',
+            "Final Answer: compacted",
+        ]
+    )
+
+    result = ReActAgent(llm, registry).run("large")
+
+    observation = result.reasoning_steps[2].observation
+    assert observation["result"]["truncated"] is True
+    assert observation["result"]["original_length"] > 4000
+    assert len(observation["result"]["summary"]) <= 2003
 
 
 def test_backend_compatibility_import_exports_react_agent():

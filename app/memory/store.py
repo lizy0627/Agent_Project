@@ -196,19 +196,25 @@ class LongMemory:
     def _embedding_for(self, question: str, answer: str) -> list[float] | None:
         if not self.vector_enabled or self.embedding_provider is None:
             return None
-        return self.embedding_provider.embed(memory_embedding_text(question, answer))
+        try:
+            return self.embedding_provider.embed(memory_embedding_text(question, answer))
+        except Exception:
+            return None
 
     def _vector_search(self, entries: list[dict[str, Any]], query: str, limit: int) -> list[dict[str, Any]]:
         if not self.vector_enabled or self.embedding_provider is None:
             return []
 
-        query_embedding = self.embedding_provider.embed(query)
-        if not query_embedding:
-            return []
+        try:
+            query_embedding = self.embedding_provider.embed(query)
+            if not query_embedding:
+                return []
 
-        vector_limit = max(1, min(limit, self.vector_top_k))
-        results = self.vector_store.search(entries, query_embedding, limit=vector_limit)
-        if not results:
+            vector_limit = max(1, min(limit, self.vector_top_k))
+            results = self.vector_store.search(entries, query_embedding, limit=vector_limit)
+            if not results:
+                return []
+        except Exception:
             return []
 
         payload: list[dict[str, Any]] = []

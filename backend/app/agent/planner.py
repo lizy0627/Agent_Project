@@ -1,8 +1,16 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+import re
 from typing import Any, Mapping
 
 from pydantic import BaseModel, Field, model_validator
+
+from backend.app.core.config import Settings
+from backend.app.core.logger import get_logger
+from backend.app.core.safe_logging import safe_log_data, safe_log_field
+from backend.app.mcp.manager import MCPManager
+from backend.app.mcp.router import MCPRouter
 
 
 class PlanStep(BaseModel):
@@ -130,18 +138,8 @@ class Planner:
             return dict(arguments)
         return {}
 
+
 # Tool-routing planner migrated from services.agent_planner.
-from dataclasses import dataclass
-import re
-from typing import Any
-
-from backend.app.core.config import Settings
-from backend.app.core.logger import get_logger
-from backend.app.core.safe_logging import safe_log_data, safe_log_field
-from backend.app.mcp.manager import MCPManager
-from backend.app.mcp.router import MCPRouter
-
-
 logger = get_logger(__name__)
 ChatMessage = dict[str, str]
 DEFAULT_WEB_SEARCH_MAX_RESULTS = 3
