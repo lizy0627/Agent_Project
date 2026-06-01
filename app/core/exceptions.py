@@ -17,6 +17,7 @@ class ErrorCode(StrEnum):
     MODEL_TIMEOUT = "MODEL_TIMEOUT"
     NETWORK_ERROR = "NETWORK_ERROR"
     NOT_FOUND = "NOT_FOUND"
+    RATE_LIMIT = "RATE_LIMIT"
     TOOL_EXECUTION_ERROR = "TOOL_EXECUTION_ERROR"
     UNKNOWN_ERROR = "UNKNOWN_ERROR"
 
@@ -160,15 +161,29 @@ class NotFoundError(AgentError):
         )
 
 
-def error_payload(error: AgentError, *, message: str | None = None, code: str | None = None) -> dict:
+def error_payload(
+    error: AgentError,
+    *,
+    message: str | None = None,
+    code: str | ErrorCode | None = None,
+    request_id: str | None = None,
+    detail: dict | None = None,
+) -> dict:
     """Return the public API error payload without traceback or internal details."""
+
+    error_body = {
+        "code": str(code or error.code),
+        "message": message or public_error_message(error),
+        "retryable": error.retryable,
+    }
+    if request_id is not None:
+        error_body["request_id"] = request_id
+    if detail is not None:
+        error_body["detail"] = detail
 
     return {
         "success": False,
-        "error": {
-            "code": code or str(error.code),
-            "message": message or public_error_message(error),
-        },
+        "error": error_body,
     }
 
 
@@ -177,12 +192,14 @@ def error_response(
     *,
     headers: dict[str, str] | None = None,
     message: str | None = None,
-    code: str | None = None,
+    code: str | ErrorCode | None = None,
+    request_id: str | None = None,
+    detail: dict | None = None,
     status_code: int | None = None,
 ) -> JSONResponse:
     return JSONResponse(
         status_code=status_code or error.status_code,
-        content=error_payload(error, message=message, code=code),
+        content=error_payload(error, message=message, code=code, request_id=request_id, detail=detail),
         headers=headers,
     )
 
@@ -203,6 +220,7 @@ def public_error_message(error: AgentError) -> str:
         ErrorCode.NOT_FOUND: "请求的资源不存在。",
         ErrorCode.TOOL_EXECUTION_ERROR: "工具调用失败，请调整问题后重试。",
         ErrorCode.UNKNOWN_ERROR: "服务暂时异常，请稍后重试。",
+        ErrorCode.RATE_LIMIT: "请求过于频繁，请稍后重试。",
     }
     try:
         code = ErrorCode(str(error.code))

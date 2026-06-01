@@ -1,4 +1,4 @@
-from typing import Iterator
+from typing import Any, Iterator
 
 from openai import (
     APIConnectionError,
@@ -11,9 +11,13 @@ from openai import (
 
 from backend.app.core.config import Settings
 from backend.app.core.exceptions import (
+    AgentError,
     ApiKeyInvalidError,
     ApiKeyMissingError,
+    ErrorCode,
+    InvalidArgumentsError,
     ModelNetworkError,
+    ModelProviderError,
     ModelTimeoutError,
     UnknownAgentError,
 )
@@ -22,6 +26,7 @@ from backend.app.services.agent_types import ChatMessage
 
 
 logger = get_logger(__name__)
+RATE_LIMIT_MESSAGE = "Model provider rate limit exceeded. Please try again later."
 
 
 class LLMClient:
@@ -39,89 +44,123 @@ class LLMClient:
         )
 
     def complete_chat(self, messages: list[ChatMessage], model: str | None = None) -> str:
-            """Call the chat completion API and return model text."""
+        """Call the chat completion API and return model text."""
 
-            target_model = model or self.model
+        target_model = model or self.model
 
-            try:
-                completion = self.client.chat.completions.create(
-                    model=target_model,
-                    messages=messages,
-                )
-            except AuthenticationError as exc:
-                logger.warning("DashScope authentication failed: %s", exc.__class__.__name__)
-                raise ApiKeyInvalidError() from exc
-            except APITimeoutError as exc:
-                logger.warning("DashScope request timed out: %s", exc.__class__.__name__)
-                raise ModelTimeoutError() from exc
-            except APIConnectionError as exc:
-                logger.warning("DashScope network error: %s", exc.__class__.__name__)
-                raise ModelNetworkError() from exc
-            except APIStatusError as exc:
-                logger.warning(
-                    "DashScope API status error: class=%s status=%s",
-                    exc.__class__.__name__,
-                    exc.status_code,
-                )
-                if exc.status_code in {401, 403}:
-                    raise ApiKeyInvalidError() from exc
-                if exc.status_code in {408, 504}:
-                    raise ModelTimeoutError() from exc
-                raise UnknownAgentError() from exc
-            except OpenAIError as exc:
-                logger.warning("DashScope SDK error: %s", exc.__class__.__name__)
-                raise UnknownAgentError() from exc
-            except Exception as exc:
-                logger.exception("Unexpected error while calling DashScope")
-                raise UnknownAgentError() from exc
+        try:
+            completion = self.client.chat.completions.create(
+                model=target_model,
+                messages=messages,
+            )
+        except AuthenticationError as exc:
+            log_openai_error("chat", exc)
+            raise ApiKeyInvalidError() from exc
+        except APITimeoutError as exc:
+            log_openai_error("chat", exc)
+            raise ModelTimeoutError() from exc
+        except APIConnectionError as exc:
+            log_openai_error("chat", exc)
+            raise ModelNetworkError() from exc
+        except APIStatusError as exc:
+            log_openai_error("chat", exc)
+            raise map_api_status_error(exc) from exc
+        except OpenAIError as exc:
+            log_openai_error("chat", exc)
+            raise ModelProviderError() from exc
+        except Exception as exc:
+            logger.warning("Unexpected error while calling DashScope: class=%s", exc.__class__.__name__)
+            raise UnknownAgentError() from exc
 
-            reply = completion.choices[0].message.content
-            return reply or ""
+        reply = completion.choices[0].message.content
+        return reply or ""
+
     def stream_complete_chat(
-            self,
-            messages: list[ChatMessage],
-            model: str | None = None,
-        ) -> Iterator[str]:
-            """Call the streaming chat completion API and yield model text chunks."""
+        self,
+        messages: list[ChatMessage],
+        model: str | None = None,
+    ) -> Iterator[str]:
+        """Call the streaming chat completion API and yield model text chunks."""
 
-            target_model = model or self.model
+        target_model = model or self.model
 
-            try:
-                stream = self.client.chat.completions.create(
-                    model=target_model,
-                    messages=messages,
-                    stream=True,
-                )
-                for chunk in stream:
-                    if not chunk.choices:
-                        continue
-                    delta = chunk.choices[0].delta
-                    content = delta.content if delta else None
-                    if content:
-                        yield content
-            except AuthenticationError as exc:
-                logger.warning("DashScope authentication failed: %s", exc.__class__.__name__)
-                raise ApiKeyInvalidError() from exc
-            except APITimeoutError as exc:
-                logger.warning("DashScope streaming request timed out: %s", exc.__class__.__name__)
-                raise ModelTimeoutError() from exc
-            except APIConnectionError as exc:
-                logger.warning("DashScope streaming network error: %s", exc.__class__.__name__)
-                raise ModelNetworkError() from exc
-            except APIStatusError as exc:
-                logger.warning(
-                    "DashScope streaming API status error: class=%s status=%s",
-                    exc.__class__.__name__,
-                    exc.status_code,
-                )
-                if exc.status_code in {401, 403}:
-                    raise ApiKeyInvalidError() from exc
-                if exc.status_code in {408, 504}:
-                    raise ModelTimeoutError() from exc
-                raise UnknownAgentError() from exc
-            except OpenAIError as exc:
-                logger.warning("DashScope streaming SDK error: %s", exc.__class__.__name__)
-                raise UnknownAgentError() from exc
-            except Exception as exc:
-                logger.exception("Unexpected error while streaming from DashScope")
-                raise UnknownAgentError() from exc
+        try:
+            stream = self.client.chat.completions.create(
+                model=target_model,
+                messages=messages,
+                stream=True,
+            )
+            for chunk in stream:
+                if not chunk.choices:
+                    continue
+                delta = chunk.choices[0].delta
+                content = delta.content if delta else None
+                if content:
+                    yield content
+        except AuthenticationError as exc:
+            log_openai_error("streaming chat", exc)
+            raise ApiKeyInvalidError() from exc
+        except APITimeoutError as exc:
+            log_openai_error("streaming chat", exc)
+            raise ModelTimeoutError() from exc
+        except APIConnectionError as exc:
+            log_openai_error("streaming chat", exc)
+            raise ModelNetworkError() from exc
+        except APIStatusError as exc:
+            log_openai_error("streaming chat", exc)
+            raise map_api_status_error(exc) from exc
+        except OpenAIError as exc:
+            log_openai_error("streaming chat", exc)
+            raise ModelProviderError() from exc
+        except Exception as exc:
+            logger.warning("Unexpected error while streaming from DashScope: class=%s", exc.__class__.__name__)
+            raise UnknownAgentError() from exc
+
+
+def map_api_status_error(exc: APIStatusError) -> AgentError:
+    status_code = exc.status_code
+
+    if status_code in {401, 403}:
+        return ApiKeyInvalidError()
+    if status_code in {408, 504}:
+        return ModelTimeoutError()
+    if status_code == 429:
+        return ModelProviderError(
+            message=RATE_LIMIT_MESSAGE,
+            code=ErrorCode.RATE_LIMIT,
+            status_code=429,
+            retryable=True,
+        )
+    if status_code in {400, 422}:
+        return InvalidArgumentsError()
+    if 500 <= status_code <= 599:
+        return ModelProviderError(status_code=status_code, retryable=True)
+
+    return ModelProviderError(status_code=status_code, retryable=False)
+
+
+def log_openai_error(operation: str, exc: OpenAIError) -> None:
+    logger.warning(
+        "DashScope %s error: class=%s status=%s error_type=%s",
+        operation,
+        exc.__class__.__name__,
+        getattr(exc, "status_code", None),
+        openai_error_type(exc),
+    )
+
+
+def openai_error_type(exc: OpenAIError) -> str | None:
+    body = getattr(exc, "body", None)
+    if isinstance(body, dict):
+        return error_type_from_body(body)
+    return None
+
+
+def error_type_from_body(body: dict[str, Any]) -> str | None:
+    error = body.get("error")
+    if isinstance(error, dict):
+        value = error.get("type") or error.get("code")
+        return str(value) if value else None
+
+    value = body.get("type") or body.get("code")
+    return str(value) if value else None

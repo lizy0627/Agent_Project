@@ -61,6 +61,7 @@ def test_chat_requires_auth_when_enabled(monkeypatch, tmp_path):
         "error": {
             "code": "AUTH_REQUIRED",
             "message": "Authentication required.",
+            "retryable": False,
         },
     }
 
@@ -102,6 +103,7 @@ def test_documents_require_auth(monkeypatch, tmp_path):
         "error": {
             "code": "AUTH_REQUIRED",
             "message": "Authentication required.",
+            "retryable": False,
         },
     }
 

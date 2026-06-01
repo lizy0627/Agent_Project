@@ -1070,7 +1070,7 @@ function createMessageElement(message) {
   if (message.type === "loading") {
     bubble.appendChild(createTypingIndicator(message.content || "Agent 正在思考"));
   } else if (message.role === "agent") {
-    bubble.appendChild(renderMarkdown(message.content || ""));
+    bubble.appendChild(renderMarkdown(getMessageDisplayContent(message)));
   } else {
     bubble.textContent = message.content || "";
   }
@@ -1081,6 +1081,11 @@ function createMessageElement(message) {
   }
 
   content.appendChild(bubble);
+
+  const errorDetails = createMessageErrorDetails(message);
+  if (errorDetails) {
+    content.appendChild(errorDetails);
+  }
 
   const meta = createMessageMeta(message);
   if (meta) {
@@ -1105,6 +1110,21 @@ function replaceMessageElement(message, currentMessageId = message.id) {
   }
   messageElementMap.set(message.id, nextElement);
   return true;
+}
+
+function getMessageDisplayContent(message) {
+  if (!message || message.role !== "agent" || !isToolFailed(message)) {
+    return message?.content || "";
+  }
+
+  const content = String(message.content || "").trim();
+  const detail = getToolErrorDetail(message);
+  const rawMessage = sanitizeErrorText(detail.rawMessage || message.toolErrorMessage || message.toolError || "").trim();
+  if (!content || looksLikeBackendStack(content) || content === rawMessage || content === detail.message) {
+    return formatToolFailureMessage(message);
+  }
+
+  return content;
 }
 
 function createMessageToolbar(message) {
@@ -1209,7 +1229,6 @@ function createToolPanel(message) {
   details.appendChild(createToolDetail("耗时", formatToolDuration(message.toolDurationMs)));
   if (shouldShowToolErrorDetail(message)) {
     const detail = getToolErrorDetail(message);
-    details.appendChild(createToolDetail("错误原因", detail.message || TOOL_FAILURE_MESSAGE));
     details.appendChild(createToolDetail("是否可重试", formatToolRetryable(detail.retryable)));
   }
   const routeReason = getToolRouteReason(message);
@@ -1245,6 +1264,123 @@ function createToolPanel(message) {
   panel.appendChild(resultDetails);
 
   return panel;
+}
+
+function createMessageErrorDetails(message) {
+  const details = buildMessageErrorDetails(message);
+  if (!details) {
+    return null;
+  }
+
+  const wrapper = document.createElement("details");
+  wrapper.className = "message-error-details";
+
+  const summary = document.createElement("summary");
+  summary.textContent = "查看详细错误";
+
+  const body = document.createElement("pre");
+  body.textContent = JSON.stringify(details, null, 2);
+
+  wrapper.append(summary, body);
+  return wrapper;
+}
+
+function buildMessageErrorDetails(message) {
+  if (!message || (!message.errorDetail && !isToolFailed(message))) {
+    return null;
+  }
+
+  const detail = sanitizeErrorDetailValue(message.errorDetail) || {};
+  const normalizedToolDetail = normalizeToolErrorDetail(message.toolErrorDetail);
+  const toolDetail = sanitizeErrorDetailValue(normalizedToolDetail);
+  const rawMessage = sanitizeErrorDetailValue(
+    detail.rawMessage ||
+      message.rawMessage ||
+      normalizedToolDetail.message ||
+      message.toolErrorMessage ||
+      message.toolError ||
+      "",
+  );
+  const friendlyMessage = sanitizeErrorDetailValue(
+    detail.message || (isToolFailed(message) ? getToolErrorMessage(message) : message.content) || getToolErrorMessage(message),
+  );
+  const result = compactObject({
+    requestId: detail.requestId ?? message.requestId,
+    code:
+      detail.code ||
+      message.errorCode ||
+      normalizedToolDetail.code ||
+      message.toolErrorCode ||
+      inferErrorCode(rawMessage || friendlyMessage),
+    message: friendlyMessage,
+    retryable: detail.retryable ?? message.retryable ?? normalizedToolDetail.retryable ?? message.toolRetryable,
+    rawMessage,
+    toolName: detail.toolName ?? normalizedToolDetail.toolName ?? message.toolName,
+    toolStatus: message.toolStatus,
+    toolErrorCode: message.toolErrorCode,
+    toolErrorMessage: sanitizeErrorDetailValue(message.toolErrorMessage),
+    toolErrorDetail: toolDetail,
+    trace: sanitizeErrorDetailValue(message.trace),
+    durationMs: detail.durationMs ?? normalizedToolDetail.durationMs ?? message.durationMs ?? message.toolDurationMs,
+  });
+
+  return Object.keys(result).length > 0 ? result : null;
+}
+
+function compactObject(value) {
+  return Object.fromEntries(
+    Object.entries(value).filter(([, item]) => {
+      if (item === undefined || item === null || item === "") {
+        return false;
+      }
+      if (Array.isArray(item) && item.length === 0) {
+        return false;
+      }
+      if (typeof item === "object" && !Array.isArray(item) && Object.keys(item).length === 0) {
+        return false;
+      }
+      return true;
+    }),
+  );
+}
+
+function sanitizeErrorDetailValue(value) {
+  if (value === undefined || value === null || value === "") {
+    return value;
+  }
+
+  if (typeof value === "string") {
+    return looksLikeBackendStack(value) ? AGENT_FAILURE_MESSAGE : sanitizeErrorText(value);
+  }
+
+  if (Array.isArray(value)) {
+    return value
+      .map((item) => sanitizeErrorDetailValue(item))
+      .filter((item) => item !== undefined && item !== null && item !== "");
+  }
+
+  if (typeof value !== "object") {
+    return value;
+  }
+
+  return compactObject(
+    Object.fromEntries(
+      Object.entries(value)
+        .filter(([key]) => !/(stack|traceback|exception)/i.test(key))
+        .map(([key, item]) => [key, sanitizeErrorDetailValue(item)]),
+    ),
+  );
+}
+
+function inferErrorCode(message) {
+  const text = String(message || "");
+  if (/timed out|timeout|超时/i.test(text)) {
+    return "MODEL_TIMEOUT";
+  }
+  if (/network|fetch|connection|connect/i.test(text)) {
+    return "NETWORK_ERROR";
+  }
+  return "";
 }
 
 function getToolPanelTitle(message) {
@@ -1366,11 +1502,13 @@ function appendMarkdownSourceCandidates(candidates, content) {
 function getToolDisplayResult(message) {
   if (isToolFailed(message)) {
     const detail = getToolErrorDetail(message);
-    return {
+    return compactObject({
       error: detail.message || TOOL_FAILURE_MESSAGE,
       code: detail.code || "TOOL_EXECUTION_ERROR",
       retryable: formatToolRetryable(detail.retryable),
-    };
+      tool_name: detail.toolName,
+      duration_ms: detail.durationMs,
+    });
   }
 
   if (message.toolResult !== undefined && message.toolResult !== null && message.toolResult !== "") {
@@ -1408,14 +1546,18 @@ function getToolErrorDetail(message) {
   const detail = normalizeToolErrorDetail(message.toolErrorDetail);
   const code = detail.code || message.toolErrorCode || "";
   const rawMessage = detail.message || message.toolErrorMessage || message.toolError || "";
+  const toolName = detail.toolName || message.toolName || "";
   return {
     code,
     message: normalizeToolErrorMessage({
-      toolName: message.toolName,
+      toolName,
       code,
       message: rawMessage,
     }),
     retryable: detail.retryable ?? message.toolRetryable,
+    toolName,
+    durationMs: detail.durationMs ?? message.toolDurationMs,
+    rawMessage,
   };
 }
 
@@ -1425,9 +1567,11 @@ function normalizeToolErrorDetail(detail) {
   }
 
   return {
-    code: detail.code,
-    message: detail.message,
+    code: detail.code ?? detail.errorCode ?? detail.error_code,
+    message: detail.message ?? detail.errorMessage ?? detail.error_message,
     retryable: detail.retryable,
+    toolName: detail.toolName ?? detail.tool_name,
+    durationMs: detail.durationMs ?? detail.duration_ms,
   };
 }
 
@@ -1879,6 +2023,7 @@ function updateMessageElementOnly(messageId, updates) {
   updateMessageToolbarElement(content, updatedMessage);
   updateToolPanelElement(content, updatedMessage);
   updateMessageBubbleElement(bubble, updatedMessage);
+  updateMessageErrorDetailsElement(content, updatedMessage);
   updateMessageMetaElement(content, updatedMessage);
 
   if (messageId !== updatedMessage.id) {
@@ -1937,10 +2082,27 @@ function updateMessageBubbleElement(bubble, message) {
   if (message.type === "loading") {
     bubble.appendChild(createTypingIndicator(message.content || "Agent is thinking..."));
   } else if (message.role === "agent") {
-    bubble.appendChild(renderMarkdown(message.content || ""));
+    bubble.appendChild(renderMarkdown(getMessageDisplayContent(message)));
   } else {
     bubble.textContent = message.content || "";
   }
+}
+
+function updateMessageErrorDetailsElement(content, message) {
+  const currentDetails = content.querySelector(".message-error-details");
+  const nextDetails = createMessageErrorDetails(message);
+  if (!nextDetails) {
+    currentDetails?.remove();
+    return;
+  }
+
+  if (currentDetails) {
+    currentDetails.replaceWith(nextDetails);
+    return;
+  }
+
+  const meta = content.querySelector(".message-meta");
+  content.insertBefore(nextDetails, meta || null);
 }
 
 function updateMessageMetaElement(content, message) {
@@ -3497,13 +3659,24 @@ async function requestAgentReply(
     conversation_id: targetConversationId,
     max_context_rounds: targetMaxContextRounds,
   };
+  const shouldUseStreaming = targetMode !== "文档问答" && targetStreamingEnabled;
 
   activeAbortController = new AbortController();
   let didTimeout = false;
-  const timeoutTimer = window.setTimeout(() => {
+  const timeoutTimer = shouldUseStreaming
+    ? null
+    : window.setTimeout(() => {
+        didTimeout = true;
+        if (activeAbortController) {
+          activeAbortController.abort();
+        }
+      }, REQUEST_TIMEOUT_MS);
+  const handleStreamIdleTimeout = () => {
     didTimeout = true;
-    activeAbortController.abort();
-  }, REQUEST_TIMEOUT_MS);
+    if (activeAbortController) {
+      activeAbortController.abort();
+    }
+  };
 
   try {
     const result = targetMode === "文档问答"
@@ -3514,7 +3687,7 @@ async function requestAgentReply(
             signal: activeAbortController.signal,
           },
         )
-      : targetStreamingEnabled
+      : shouldUseStreaming
       ? await requestStreamingAgentReply(
           requestBody,
           activeAbortController.signal,
@@ -3522,29 +3695,43 @@ async function requestAgentReply(
           onChunk,
           onToolMetadata,
           onStatus,
+          handleStreamIdleTimeout,
         )
       : await requestJsonAgentReply(
           requestBody,
           activeAbortController.signal,
           targetConversationId,
         );
-    window.clearTimeout(timeoutTimer);
+    if (timeoutTimer) {
+      window.clearTimeout(timeoutTimer);
+    }
     activeAbortController = null;
     return result;
   } catch (error) {
     console.warn("POST /chat request error", error);
-    window.clearTimeout(timeoutTimer);
+    if (timeoutTimer) {
+      window.clearTimeout(timeoutTimer);
+    }
     activeAbortController = null;
     if (error.name === "AbortError") {
       if (didTimeout) {
-        throw new Error(toFriendlyError("Request timed out"));
+        throw createAgentError("Request timed out", {
+          code: "MODEL_TIMEOUT",
+          retryable: true,
+          durationMs: REQUEST_TIMEOUT_MS,
+        });
       }
       return { aborted: true };
     }
-    if (error instanceof Error && error.message && error.name !== "TypeError") {
-      throw new Error(toFriendlyError(error.message));
+    if (error instanceof Error && error.agentErrorDetail) {
+      throw error;
     }
-    throw new Error(CHAT_FAILURE_MESSAGE);
+    if (error instanceof Error && error.message && error.name !== "TypeError") {
+      throw createAgentError(error.message);
+    }
+    throw createAgentError(error instanceof Error ? error.message : CHAT_FAILURE_MESSAGE, {
+      message: CHAT_FAILURE_MESSAGE,
+    });
   }
 }
 
@@ -3573,7 +3760,10 @@ async function requestDocumentAnswer(message, { model, signal }) {
   const data = await parseJsonResponse(response);
   if (!response.ok || !data.success) {
     const message = toFriendlyError(data.error || response.status);
-    throw new Error(message || "文档问答请求失败，请稍后重试。");
+    throw createAgentError(
+      { ...data, message: data.error || response.status },
+      { message: message || "文档问答请求失败，请稍后重试。" },
+    );
   }
 
   return {
@@ -3614,7 +3804,10 @@ async function requestJsonAgentReply(requestBody, signal, fallbackConversationId
     const data = await parseJsonResponse(response);
     const message = toFriendlyError(data.error || response.status);
     console.warn("Chat request failed:", message);
-    throw new Error(message || CHAT_FAILURE_MESSAGE);
+    throw createAgentError(
+      { ...data, message: data.error || response.status },
+      { message: message || CHAT_FAILURE_MESSAGE },
+    );
   }
 
   const data = await parseJsonResponse(response);
@@ -3622,11 +3815,15 @@ async function requestJsonAgentReply(requestBody, signal, fallbackConversationId
   if (!data.success) {
     const message = toFriendlyError(data.error);
     console.warn("Chat API returned an error:", message);
-    throw new Error(message || CHAT_FAILURE_MESSAGE);
+    throw createAgentError(
+      { ...data, message: data.error },
+      { message: message || CHAT_FAILURE_MESSAGE },
+    );
   }
 
   return {
     aborted: false,
+    requestId: data.request_id,
     reply: data.reply || "",
     model: data.model || "",
     conversationId: data.conversation_id || fallbackConversationId,
@@ -3651,26 +3848,65 @@ async function requestStreamingAgentReply(
   onChunk,
   onToolMetadata,
   onStatus,
+  onIdleTimeout,
 ) {
   debugLog("POST /chat/stream request start", requestBody);
-  const response = await fetchWithAuth(CHAT_STREAM_API_URL, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Accept: "text/event-stream",
-    },
-    body: JSON.stringify(requestBody),
-    signal,
-  });
+  let idleTimer = null;
+  const clearIdleTimer = () => {
+    if (idleTimer) {
+      window.clearTimeout(idleTimer);
+      idleTimer = null;
+    }
+  };
+  const resetIdleTimer = () => {
+    clearIdleTimer();
+    idleTimer = window.setTimeout(() => {
+      if (!signal.aborted && typeof onIdleTimeout === "function") {
+        onIdleTimeout();
+      }
+    }, REQUEST_TIMEOUT_MS);
+  };
+  const disposeIdleTimer = () => {
+    clearIdleTimer();
+    signal.removeEventListener("abort", clearIdleTimer);
+  };
+  signal.addEventListener("abort", clearIdleTimer, { once: true });
+  resetIdleTimer();
+  let response;
+  try {
+    response = await fetchWithAuth(CHAT_STREAM_API_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "text/event-stream",
+      },
+      body: JSON.stringify(requestBody),
+      signal,
+    });
+  } catch (error) {
+    disposeIdleTimer();
+    throw error;
+  }
 
   if (!response.ok) {
-    const data = await parseJsonResponse(response);
+    let data;
+    try {
+      data = await parseJsonResponse(response);
+    } catch (error) {
+      disposeIdleTimer();
+      throw error;
+    }
     const message = toFriendlyError(data.error || response.status);
     console.warn("Streaming chat request failed:", message);
-    throw new Error(message || CHAT_FAILURE_MESSAGE);
+    disposeIdleTimer();
+    throw createAgentError(
+      { ...data, message: data.error || response.status },
+      { message: message || CHAT_FAILURE_MESSAGE },
+    );
   }
 
   if (!response.body) {
+    disposeIdleTimer();
     throw new Error("浏览器不支持读取流式响应。");
   }
 
@@ -3685,6 +3921,7 @@ async function requestStreamingAgentReply(
     if (!event) {
       return;
     }
+    resetIdleTimer();
 
     if (event.event === "metadata") {
       metadata = event.data || {};
@@ -3735,31 +3972,38 @@ async function requestStreamingAgentReply(
     }
 
     if (event.event === "error") {
-      throw new Error(toFriendlyError(event.data?.error));
+      throw createAgentError(event.data?.error || event.data);
     }
   };
 
-  while (true) {
-    const { value, done: readerDone } = await reader.read();
-    if (readerDone) {
-      break;
+  try {
+    while (true) {
+      const { value, done: readerDone } = await reader.read();
+      if (readerDone) {
+        break;
+      }
+
+      buffer += decoder.decode(value, { stream: true });
+      const parts = buffer.split(/\n\n/);
+      buffer = parts.pop() || "";
+
+      parts.forEach((part) => {
+        handleStreamEvent(parseSseEvent(part));
+      });
     }
 
-    buffer += decoder.decode(value, { stream: true });
-    const parts = buffer.split(/\n\n/);
-    buffer = parts.pop() || "";
-
-    parts.forEach((part) => {
-      handleStreamEvent(parseSseEvent(part));
-    });
+    if (buffer.trim()) {
+      handleStreamEvent(parseSseEvent(buffer));
+    }
+  } catch (error) {
+    disposeIdleTimer();
+    throw error;
   }
 
-  if (buffer.trim()) {
-    handleStreamEvent(parseSseEvent(buffer));
-  }
-
+  disposeIdleTimer();
   return {
     aborted: false,
+    requestId: done.request_id || metadata.request_id,
     reply,
     model: done.model || metadata.model || "",
     conversationId: done.conversation_id || metadata.conversation_id || fallbackConversationId,
@@ -3779,6 +4023,7 @@ async function requestStreamingAgentReply(
 
 function normalizeToolMetadata(data = {}) {
   return {
+    requestId: data.request_id,
     usedTool: data.used_tool,
     toolName: data.tool_name,
     toolStatus: data.tool_status,
@@ -3999,6 +4244,7 @@ async function regenerateAgentReply(messageId) {
     updateMessage(loadingMessage.id, {
       type: "text",
       role: "agent",
+      requestId: result.requestId,
       content: result.reply || "Agent 没有返回文本内容。",
       model: result.model,
       usedTool: result.usedTool,
@@ -4076,12 +4322,48 @@ function getAgentFailureMessage(error) {
   return toFriendlyError(error);
 }
 
+function createAgentError(rawError, overrides = {}) {
+  const rawMessage = normalizeErrorText(rawError) || String(rawError || "");
+  const friendlyMessage = overrides.message || toFriendlyError(rawError);
+  const error = new Error(friendlyMessage);
+  error.agentErrorDetail = compactObject({
+    requestId: overrides.requestId || normalizeRequestId(rawError),
+    code: overrides.code || normalizeErrorCode(rawError) || inferErrorCode(rawMessage || friendlyMessage),
+    message: friendlyMessage,
+    retryable: overrides.retryable,
+    rawMessage: sanitizeErrorDetailValue(rawMessage),
+    durationMs: overrides.durationMs,
+  });
+  return error;
+}
+
+function getAgentErrorDetail(error, friendlyMessage) {
+  if (error instanceof Error && error.agentErrorDetail) {
+    return error.agentErrorDetail;
+  }
+
+  const rawMessage = error instanceof Error ? error.message : normalizeErrorText(error);
+  return compactObject({
+    requestId: normalizeRequestId(error),
+    code: normalizeErrorCode(error) || inferErrorCode(rawMessage || friendlyMessage),
+    message: friendlyMessage,
+    rawMessage: sanitizeErrorDetailValue(rawMessage),
+  });
+}
+
 function normalizeErrorText(errorValue) {
   if (!errorValue) {
     return "";
   }
   if (typeof errorValue === "object") {
-    return String(errorValue.message || errorValue.error_message || errorValue.code || "");
+    const nestedError = errorValue.error && typeof errorValue.error === "object" ? errorValue.error : null;
+    const messageValue = errorValue.message;
+    const normalizedMessage =
+      messageValue && typeof messageValue === "object"
+        ? messageValue.message || messageValue.error_message || messageValue.code
+        : messageValue;
+    const message = normalizedMessage || errorValue.error_message || nestedError?.message || errorValue.error || errorValue.code;
+    return String(message || "");
   }
   return String(errorValue);
 }
@@ -4090,7 +4372,21 @@ function normalizeErrorCode(errorValue) {
   if (!errorValue || typeof errorValue !== "object") {
     return "";
   }
-  return String(errorValue.code || errorValue.error_code || "");
+  return String(errorValue.code || errorValue.errorCode || errorValue.error_code || errorValue.error?.code || "");
+}
+
+function normalizeRequestId(errorValue) {
+  if (!errorValue || typeof errorValue !== "object") {
+    return "";
+  }
+
+  return String(
+    errorValue.requestId ||
+      errorValue.request_id ||
+      errorValue.error?.requestId ||
+      errorValue.error?.request_id ||
+      "",
+  );
 }
 
 function friendlyErrorFromCode(code) {
@@ -4112,6 +4408,7 @@ function friendlyErrorFromCode(code) {
     MODEL_TIMEOUT: "模型请求超时，请稍后重试。",
     NETWORK_ERROR: "网络连接失败，请检查网络或稍后重试。",
     NOT_FOUND: "请求的资源不存在。",
+    RATE_LIMIT: "请求过于频繁，请稍后重试。",
     TOOL_EXECUTION_ERROR: TOOL_FAILURE_MESSAGE,
     UNKNOWN_ERROR: AGENT_FAILURE_MESSAGE,
   };
@@ -4393,6 +4690,7 @@ async function sendCurrentMessage() {
     updateMessage(loadingMessage.id, {
       type: "text",
       role: "agent",
+      requestId: result.requestId,
       content: result.reply || "Agent 没有返回文本内容。",
       model: result.model,
       usedTool: result.usedTool,
@@ -4413,11 +4711,13 @@ async function sendCurrentMessage() {
   } catch (error) {
     console.warn("sendCurrentMessage error", error);
     const friendlyMessage = getAgentFailureMessage(error);
+    const errorDetail = getAgentErrorDetail(error, friendlyMessage);
     finalizeAgentTrace({}, { error: friendlyMessage });
     updateMessage(loadingMessage.id, {
       type: "text",
       role: "error",
       content: friendlyMessage,
+      errorDetail,
       createdAt: getCurrentTime(),
     });
   } finally {

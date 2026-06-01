@@ -1096,6 +1096,39 @@ button {
   white-space: pre-wrap;
 }
 
+.message-error-details {
+  margin-top: 8px;
+}
+
+.message-error-details summary {
+  display: inline-flex;
+  align-items: center;
+  min-height: 26px;
+  padding: 0 8px;
+  border: 1px solid var(--bubble-error-border);
+  border-radius: 7px;
+  color: var(--red);
+  background: var(--bubble-error-bg);
+  font-size: 12px;
+  font-weight: 900;
+  cursor: pointer;
+}
+
+.message-error-details pre {
+  overflow-x: auto;
+  max-height: 240px;
+  margin: 7px 0 0;
+  padding: 10px;
+  border: 1px solid var(--bubble-error-border);
+  border-radius: 7px;
+  color: var(--ink);
+  background: var(--bubble-agent-bg);
+  font-family: Consolas, "Courier New", monospace;
+  font-size: 12px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+}
+
 /* Markdown content */
 
 .markdown-body > :first-child {

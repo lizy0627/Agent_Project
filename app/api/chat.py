@@ -311,21 +311,34 @@ def chat(
 ) -> ChatResponse | JSONResponse:
     """Send a user message to the agent and return its reply."""
 
+    request_id = str(uuid4())
+    request_started_at = perf_counter()
     conversation_id = request.conversation_id or str(uuid4())
-    model_messages = build_model_messages(request, conversation_id, store, current_user.user_id)
-    memory_messages, memory_used = memory.build_memory_context(
-        user_id=current_user.user_id,
-        conversation_id=conversation_id,
-        query=request.message,
-        search_limit=settings.memory_search_limit,
-        recent_limit=settings.memory_recent_context_limit,
-    )
-    model_messages = with_memory_context(model_messages, memory_messages)
-    requested_model = normalize_requested_model(request.model)
-    agent_mode = resolve_agent_mode(request)
-    is_multi_agent = agent_mode == "multi_agent"
+    requested_model: str | None = None
+    agent_mode = request.agent_mode
 
     try:
+        model_messages = build_model_messages(request, conversation_id, store, current_user.user_id)
+        memory_messages, memory_used = memory.build_memory_context(
+            user_id=current_user.user_id,
+            conversation_id=conversation_id,
+            query=request.message,
+            search_limit=settings.memory_search_limit,
+            recent_limit=settings.memory_recent_context_limit,
+        )
+        model_messages = with_memory_context(model_messages, memory_messages)
+        requested_model = normalize_requested_model(request.model)
+        agent_mode = resolve_agent_mode(request)
+        is_multi_agent = agent_mode == "multi_agent"
+        response_model = requested_model or agent.model
+        log_chat_request_event(
+            "Chat request started",
+            request_id=request_id,
+            conversation_id=conversation_id,
+            model=response_model,
+            agent_mode=agent_mode,
+            duration_ms=0.0,
+        )
         reply = (
             get_manager_agent(agent).chat(messages=model_messages, model=requested_model)
             if is_multi_agent
@@ -342,30 +355,49 @@ def chat(
             question=request.message,
             answer=reply.content,
         )
+        tool_metadata = tool_response_metadata(reply.tool_result)
+        tool_metadata["used_tool"] = bool(reply.used_tool or tool_metadata["used_tool"])
+        log_chat_request_event(
+            "Chat request finished",
+            request_id=request_id,
+            conversation_id=conversation_id,
+            model=response_model,
+            agent_mode=agent_mode,
+            tool_metadata=tool_metadata,
+            duration_ms=elapsed_ms(request_started_at),
+        )
         return ChatResponse(
+            request_id=request_id,
             reply=reply.content,
-            model=requested_model or agent.model,
+            model=response_model,
             conversation_id=conversation_id,
             multi_agent=is_multi_agent,
             agent_results=multi_agent_results_payload(reply.trace) if is_multi_agent else [],
-            used_tool=reply.used_tool,
-            tool_name=reply.tool_result.name if reply.tool_result else None,
-            tool_status=get_tool_status(reply.tool_result),
-            tool_result=reply.tool_result.result if reply.tool_result else None,
-            tool_error=reply.tool_result.error if reply.tool_result else None,
-            tool_duration_ms=reply.tool_result.duration_ms if reply.tool_result else None,
-            tool_error_code=reply.tool_result.error_code if reply.tool_result else None,
-            tool_error_message=reply.tool_result.error_message if reply.tool_result else None,
-            tool_retryable=reply.tool_result.retryable if reply.tool_result else None,
-            tool_error_detail=tool_error_detail(reply.tool_result),
+            **tool_metadata,
             trace=trace_payload(reply.trace, memory_used=memory_used),
         )
     except AgentError as exc:
-        logger.info("Chat request failed: code=%s status=%s", exc.code, exc.status_code)
-        return error_response(exc)
+        log_chat_request_event(
+            "Chat request failed",
+            request_id=request_id,
+            conversation_id=conversation_id,
+            model=requested_model or agent.model,
+            agent_mode=agent_mode,
+            duration_ms=elapsed_ms(request_started_at),
+        )
+        logger.info("Chat request failed: request_id=%s code=%s status=%s", request_id, exc.code, exc.status_code)
+        return error_response(exc, request_id=request_id)
     except Exception:
-        logger.exception("Unhandled chat request error")
-        return error_response(UnknownAgentError())
+        log_chat_request_event(
+            "Unhandled chat request error",
+            request_id=request_id,
+            conversation_id=conversation_id,
+            model=requested_model or agent.model,
+            agent_mode=agent_mode,
+            duration_ms=elapsed_ms(request_started_at),
+        )
+        logger.exception("Unhandled chat request error: request_id=%s", request_id)
+        return error_response(UnknownAgentError(), request_id=request_id)
 
 
 @router.post("/chat/stream")
@@ -378,20 +410,60 @@ def stream_chat(
 ) -> StreamingResponse:
     """Stream a chat response using server-sent events."""
 
+    request_id = str(uuid4())
+    request_started_at = perf_counter()
     conversation_id = request.conversation_id or str(uuid4())
-    model_messages = build_model_messages(request, conversation_id, store, current_user.user_id)
-    memory_messages, memory_used = memory.build_memory_context(
-        user_id=current_user.user_id,
-        conversation_id=conversation_id,
-        query=request.message,
-        search_limit=settings.memory_search_limit,
-        recent_limit=settings.memory_recent_context_limit,
-    )
-    model_messages = with_memory_context(model_messages, memory_messages)
-    requested_model = normalize_requested_model(request.model)
-    agent_mode = resolve_agent_mode(request)
-    is_multi_agent = agent_mode == "multi_agent"
-    likely_web_search = _looks_like_search_request(request.message)
+    requested_model: str | None = None
+    agent_mode = request.agent_mode
+    try:
+        model_messages = build_model_messages(request, conversation_id, store, current_user.user_id)
+        memory_messages, memory_used = memory.build_memory_context(
+            user_id=current_user.user_id,
+            conversation_id=conversation_id,
+            query=request.message,
+            search_limit=settings.memory_search_limit,
+            recent_limit=settings.memory_recent_context_limit,
+        )
+        model_messages = with_memory_context(model_messages, memory_messages)
+        requested_model = normalize_requested_model(request.model)
+        agent_mode = resolve_agent_mode(request)
+        is_multi_agent = agent_mode == "multi_agent"
+        likely_web_search = _looks_like_search_request(request.message)
+        log_chat_request_event(
+            "Streaming chat request started",
+            request_id=request_id,
+            conversation_id=conversation_id,
+            model=requested_model or settings.dashscope_model,
+            agent_mode=agent_mode,
+            duration_ms=0.0,
+        )
+    except AgentError as exc:
+        log_chat_request_event(
+            "Streaming chat request failed",
+            request_id=request_id,
+            conversation_id=conversation_id,
+            model=requested_model or settings.dashscope_model,
+            agent_mode=agent_mode,
+            duration_ms=elapsed_ms(request_started_at),
+        )
+        logger.info(
+            "Streaming chat failed before response: request_id=%s code=%s status=%s",
+            request_id,
+            exc.code,
+            exc.status_code,
+        )
+        return streaming_error_response(exc, request_id=request_id)
+    except Exception:
+        log_chat_request_event(
+            "Unhandled streaming chat request error",
+            request_id=request_id,
+            conversation_id=conversation_id,
+            model=requested_model or settings.dashscope_model,
+            agent_mode=agent_mode,
+            duration_ms=elapsed_ms(request_started_at),
+        )
+        logger.exception("Unhandled streaming chat error before response: request_id=%s", request_id)
+        return streaming_error_response(UnknownAgentError(), request_id=request_id)
 
     def event_stream():
         assistant_chunks: list[str] = []
@@ -454,13 +526,15 @@ def stream_chat(
             if is_multi_agent:
                 prepared_agent = get_agent(settings)
                 reply = get_manager_agent(prepared_agent).chat(messages=model_messages, model=requested_model)
+                tool_metadata = tool_response_metadata(None)
                 metadata = {
                     "success": True,
+                    "request_id": request_id,
                     "conversation_id": conversation_id,
                     "model": requested_model or prepared_agent.model,
                     "multi_agent": True,
                     "agent_results": multi_agent_results_payload(reply.trace),
-                    **tool_response_metadata(None),
+                    **tool_metadata,
                     "memory_used": memory_used,
                     "trace": trace_payload(reply.trace, memory_used=memory_used),
                 }
@@ -474,6 +548,15 @@ def stream_chat(
                     conversation_id=conversation_id,
                     question=request.message,
                     answer=assistant_reply,
+                )
+                log_chat_request_event(
+                    "Streaming chat request finished",
+                    request_id=request_id,
+                    conversation_id=conversation_id,
+                    model=metadata["model"],
+                    agent_mode=agent_mode,
+                    tool_metadata=tool_metadata,
+                    duration_ms=elapsed_ms(request_started_at),
                 )
                 yield sse_event("done", metadata)
                 return
@@ -510,16 +593,18 @@ def stream_chat(
                 raise UnknownAgentError()
 
             agent, stream, tool_result, trace = result_payload
+            tool_metadata = tool_response_metadata(tool_result)
 
             yield sse_event(
                 "metadata",
                 {
                     "success": True,
+                    "request_id": request_id,
                     "conversation_id": conversation_id,
                     "model": requested_model or agent.model,
                     "multi_agent": False,
                     "agent_results": [],
-                    **tool_response_metadata(tool_result),
+                    **tool_metadata,
                     "memory_used": memory_used,
                     "trace": trace_payload(trace, memory_used=memory_used),
                 },
@@ -557,29 +642,65 @@ def stream_chat(
                 question=request.message,
                 answer=assistant_reply,
             )
-            yield sse_event(
-                "done",
-                {
-                    "success": True,
-                    "conversation_id": conversation_id,
-                    "model": requested_model or agent.model,
-                    "multi_agent": False,
-                    "agent_results": [],
-                    **tool_response_metadata(tool_result),
-                    "memory_used": memory_used,
-                    "trace": trace_payload(trace, memory_used=memory_used),
-                },
+            done_metadata = {
+                "success": True,
+                "request_id": request_id,
+                "conversation_id": conversation_id,
+                "model": requested_model or agent.model,
+                "multi_agent": False,
+                "agent_results": [],
+                **tool_metadata,
+                "memory_used": memory_used,
+                "trace": trace_payload(trace, memory_used=memory_used),
+            }
+            log_chat_request_event(
+                "Streaming chat request finished",
+                request_id=request_id,
+                conversation_id=conversation_id,
+                model=done_metadata["model"],
+                agent_mode=agent_mode,
+                tool_metadata=tool_metadata,
+                duration_ms=elapsed_ms(request_started_at),
             )
+            yield sse_event("done", done_metadata)
         except AgentError as exc:
-            logger.info("Streaming chat failed: code=%s status=%s", exc.code, exc.status_code)
-            yield sse_event("error", error_payload(exc))
+            log_chat_request_event(
+                "Streaming chat request failed",
+                request_id=request_id,
+                conversation_id=conversation_id,
+                model=requested_model or settings.dashscope_model,
+                agent_mode=agent_mode,
+                duration_ms=elapsed_ms(request_started_at),
+            )
+            logger.info(
+                "Streaming chat failed: request_id=%s code=%s status=%s",
+                request_id,
+                exc.code,
+                exc.status_code,
+            )
+            yield sse_event("error", stream_error_payload(exc, request_id=request_id))
         except GeneratorExit:
-            logger.info("Streaming chat client disconnected: conversation_id=%s", conversation_id)
+            log_chat_request_event(
+                "Streaming chat client disconnected",
+                request_id=request_id,
+                conversation_id=conversation_id,
+                model=requested_model or settings.dashscope_model,
+                agent_mode=agent_mode,
+                duration_ms=elapsed_ms(request_started_at),
+            )
             raise
         except Exception:
-            logger.exception("Unhandled streaming chat error")
+            log_chat_request_event(
+                "Unhandled streaming chat request error",
+                request_id=request_id,
+                conversation_id=conversation_id,
+                model=requested_model or settings.dashscope_model,
+                agent_mode=agent_mode,
+                duration_ms=elapsed_ms(request_started_at),
+            )
+            logger.exception("Unhandled streaming chat error: request_id=%s", request_id)
             error = UnknownAgentError()
-            yield sse_event("error", error_payload(error))
+            yield sse_event("error", stream_error_payload(error, request_id=request_id))
 
     return StreamingResponse(
         event_stream(),
@@ -776,6 +897,51 @@ def react_status_message(step: dict) -> str | None:
     return None
 
 
+def stream_error_payload(error: AgentError, *, request_id: str) -> dict:
+    payload = error_payload(error, request_id=request_id)
+    payload["request_id"] = request_id
+    return payload
+
+
+def streaming_error_response(error: AgentError, *, request_id: str) -> StreamingResponse:
+    return StreamingResponse(
+        iter([sse_event("error", stream_error_payload(error, request_id=request_id))]),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+def log_chat_request_event(
+    event: str,
+    *,
+    request_id: str,
+    conversation_id: str,
+    model: str | None,
+    agent_mode: str | None,
+    tool_metadata: dict | None = None,
+    duration_ms: float | None = None,
+) -> None:
+    metadata = tool_metadata or {}
+    logger.info(
+        "%s: request_id=%s conversation_id=%s model=%s agent_mode=%s used_tool=%s "
+        "tool_name=%s tool_status=%s tool_error_code=%s duration_ms=%s",
+        event,
+        request_id,
+        conversation_id,
+        model,
+        agent_mode,
+        metadata.get("used_tool", False),
+        metadata.get("tool_name"),
+        metadata.get("tool_status"),
+        metadata.get("tool_error_code"),
+        duration_ms,
+    )
+
+
 def elapsed_ms(started_at: float) -> float:
     return round((perf_counter() - started_at) * 1000, 2)
 
@@ -786,7 +952,13 @@ def tool_error_detail(tool_result) -> dict | None:
 
     code = tool_result.error_code or "TOOL_EXECUTION_ERROR"
     message = tool_result.error_message or tool_result.error or "工具调用失败，请调整问题后重试。"
-    return ErrorDetail(code=code, message=message).model_dump()
+    return ErrorDetail(
+        code=code,
+        message=message,
+        retryable=bool(tool_result.retryable),
+        tool_name=tool_result.name or None,
+        duration_ms=tool_result.duration_ms,
+    ).model_dump(exclude_none=True)
 
 
 def sse_event(event: str, data: dict) -> str:

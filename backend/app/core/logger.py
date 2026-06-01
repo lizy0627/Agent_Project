@@ -37,6 +37,7 @@ def setup_logging() -> None:
 
     root_logger = logging.getLogger()
     if getattr(root_logger, "_agent_logging_configured", False):
+        ensure_file_handler(root_logger, LOG_FILE, SensitiveDataFilter())
         return
 
     LOG_DIR.mkdir(parents=True, exist_ok=True)
@@ -65,6 +66,29 @@ def setup_logging() -> None:
 
     logging.getLogger("uvicorn.access").addFilter(sensitive_filter)
     logging.getLogger("uvicorn.error").addFilter(sensitive_filter)
+
+
+def ensure_file_handler(
+    root_logger: logging.Logger,
+    log_file: Path,
+    sensitive_filter: SensitiveDataFilter,
+) -> None:
+    if any(
+        Path(getattr(handler, "baseFilename", "")).resolve() == log_file.resolve()
+        for handler in root_logger.handlers
+    ):
+        return
+
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    file_handler = RotatingFileHandler(
+        log_file,
+        maxBytes=MAX_LOG_BYTES,
+        backupCount=BACKUP_COUNT,
+        encoding="utf-8",
+    )
+    file_handler.setFormatter(logging.Formatter(LOG_FORMAT, datefmt=LOG_DATE_FORMAT))
+    file_handler.addFilter(sensitive_filter)
+    root_logger.addHandler(file_handler)
 
 
 def get_logger(name: str) -> logging.Logger:

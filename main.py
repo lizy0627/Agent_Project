@@ -1,7 +1,9 @@
 """Compatibility entry point for the backend.app FastAPI application."""
 
 from backend.app.core.config import HOST, PORT, get_settings
-from backend.app.main import app, open_browser
+from backend.app.main import app, create_app, open_browser
+
+__all__ = ["app", "create_app", "open_browser"]
 
 
 if __name__ == "__main__":

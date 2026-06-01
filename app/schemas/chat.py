@@ -53,6 +53,9 @@ class ErrorDetail(BaseModel):
 
     code: str
     message: str
+    retryable: bool | None = None
+    tool_name: str | None = None
+    duration_ms: float | None = None
 
 
 class AgentTraceStep(BaseModel):
@@ -76,6 +79,7 @@ class ChatResponse(BaseModel):
     """Response body returned by the chat endpoint."""
 
     success: bool = True
+    request_id: str
     reply: str
     model: str
     conversation_id: str
