@@ -374,7 +374,7 @@ def chat(
             multi_agent=is_multi_agent,
             agent_results=multi_agent_results_payload(reply.trace) if is_multi_agent else [],
             **tool_metadata,
-            trace=trace_payload(reply.trace, memory_used=memory_used),
+            trace=trace_payload(reply.trace, memory_used=memory_used, request_id=request_id),
         )
     except AgentError as exc:
         log_chat_request_event(
@@ -470,6 +470,7 @@ def stream_chat(
         event_queue: Queue[tuple[str, object]] = Queue()
         result_queue: Queue[tuple[str, object]] = Queue(maxsize=1)
         sent_statuses: set[str] = set()
+        active_trace: list[AgentTraceStepData] = []
 
         def queue_status(message: str) -> None:
             clean_message = str(message or "").strip()
@@ -477,7 +478,7 @@ def stream_chat(
                 event_queue.put(("status", clean_message))
 
         def queue_trace(step: AgentTraceStepData) -> None:
-            payload = trace_step_payload(step)
+            payload = trace_step_payload(step, request_id=request_id)
             event_queue.put(("trace", payload))
             status_message = react_status_message(payload)
             if status_message:
@@ -492,7 +493,7 @@ def stream_chat(
                 "status",
                 {
                     "message": clean_message,
-                    "trace": [status_trace_step(clean_message)],
+                    "trace": [status_trace_step(clean_message, request_id=request_id)],
                 },
             )
 
@@ -536,7 +537,7 @@ def stream_chat(
                     "agent_results": multi_agent_results_payload(reply.trace),
                     **tool_metadata,
                     "memory_used": memory_used,
-                    "trace": trace_payload(reply.trace, memory_used=memory_used),
+                    "trace": trace_payload(reply.trace, memory_used=memory_used, request_id=request_id),
                 }
                 yield sse_event("metadata", metadata)
                 assistant_reply = reply.content
@@ -593,6 +594,7 @@ def stream_chat(
                 raise UnknownAgentError()
 
             agent, stream, tool_result, trace = result_payload
+            active_trace = trace
             tool_metadata = tool_response_metadata(tool_result)
 
             yield sse_event(
@@ -606,7 +608,7 @@ def stream_chat(
                     "agent_results": [],
                     **tool_metadata,
                     "memory_used": memory_used,
-                    "trace": trace_payload(trace, memory_used=memory_used),
+                    "trace": trace_payload(trace, memory_used=memory_used, request_id=request_id),
                 },
             )
 
@@ -622,8 +624,11 @@ def stream_chat(
                         status="failed",
                         message=str(exc),
                         duration_ms=elapsed_ms(model_started_at),
+                        error_code=getattr(exc, "code", "UNKNOWN_ERROR"),
+                        retryable=bool(getattr(exc, "retryable", False)),
                     )
                 )
+                yield trace_event(trace_step_payload(trace[-1], request_id=request_id))
                 raise
             if agent_mode != "react":
                 trace.append(
@@ -633,6 +638,7 @@ def stream_chat(
                         duration_ms=elapsed_ms(model_started_at),
                     )
                 )
+                yield trace_event(trace_step_payload(trace[-1], request_id=request_id))
 
             assistant_reply = "".join(assistant_chunks)
             store.append_exchange(conversation_id, request.message, assistant_reply, user_id=current_user.user_id)
@@ -651,7 +657,7 @@ def stream_chat(
                 "agent_results": [],
                 **tool_metadata,
                 "memory_used": memory_used,
-                "trace": trace_payload(trace, memory_used=memory_used),
+                "trace": trace_payload(trace, memory_used=memory_used, request_id=request_id),
             }
             log_chat_request_event(
                 "Streaming chat request finished",
@@ -678,7 +684,14 @@ def stream_chat(
                 exc.code,
                 exc.status_code,
             )
-            yield sse_event("error", stream_error_payload(exc, request_id=request_id))
+            yield sse_event(
+                "error",
+                stream_error_payload(
+                    exc,
+                    request_id=request_id,
+                    trace=trace_payload(active_trace, memory_used=memory_used, request_id=request_id),
+                ),
+            )
         except GeneratorExit:
             log_chat_request_event(
                 "Streaming chat client disconnected",
@@ -700,7 +713,14 @@ def stream_chat(
             )
             logger.exception("Unhandled streaming chat error: request_id=%s", request_id)
             error = UnknownAgentError()
-            yield sse_event("error", stream_error_payload(error, request_id=request_id))
+            yield sse_event(
+                "error",
+                stream_error_payload(
+                    error,
+                    request_id=request_id,
+                    trace=trace_payload(active_trace, memory_used=memory_used, request_id=request_id),
+                ),
+            )
 
     return StreamingResponse(
         event_stream(),
@@ -829,21 +849,40 @@ def tool_response_metadata(tool_result) -> dict:
     }
 
 
-def trace_payload(trace: list[AgentTraceStepData] | None, *, memory_used: int = 0) -> list[dict]:
+def trace_payload(
+    trace: list[AgentTraceStepData] | None,
+    *,
+    memory_used: int = 0,
+    request_id: str | None = None,
+) -> list[dict]:
     """Serialize agent trace steps while preserving the stable front-end shape."""
 
-    payload = [memory_trace_step(memory_used)] if memory_used > 0 else []
+    payload = [memory_trace_step(memory_used, request_id=request_id)] if memory_used > 0 else []
     if trace:
-        payload.extend(step.to_dict() if hasattr(step, "to_dict") else dict(step) for step in trace)
+        payload.extend(
+            attach_request_id(step.to_dict() if hasattr(step, "to_dict") else dict(step), request_id)
+            for step in trace
+        )
     return payload
 
 
-def memory_trace_step(memory_used: int) -> dict:
-    return {
-        "step": "memory",
-        "status": "success",
-        "metadata": {"memory_used": memory_used},
-    }
+def attach_request_id(step: dict, request_id: str | None) -> dict:
+    if request_id is None:
+        return step
+    payload = dict(step)
+    payload.setdefault("request_id", request_id)
+    return payload
+
+
+def memory_trace_step(memory_used: int, *, request_id: str | None = None) -> dict:
+    return attach_request_id(
+        {
+            "step": "memory",
+            "status": "success",
+            "metadata": {"memory_used": memory_used},
+        },
+        request_id,
+    )
 
 
 def multi_agent_results_payload(trace: list[AgentTraceStepData] | None) -> list[dict]:
@@ -861,24 +900,27 @@ def multi_agent_results_payload(trace: list[AgentTraceStepData] | None) -> list[
     return results
 
 
-def status_trace_step(message: str) -> dict:
+def status_trace_step(message: str, *, request_id: str | None = None) -> dict:
     """Represent an in-flight SSE status as a trace-compatible running step."""
 
-    return {
-        "step": "status",
-        "status": "running",
-        "message": message,
-    }
+    return attach_request_id(
+        {
+            "step": "status",
+            "status": "running",
+            "message": message,
+        },
+        request_id,
+    )
 
 
-def trace_step_payload(step) -> dict:
+def trace_step_payload(step, *, request_id: str | None = None) -> dict:
     """Serialize one in-flight trace step for SSE."""
 
     if hasattr(step, "to_dict"):
-        return step.to_dict()
+        return attach_request_id(step.to_dict(), request_id)
     if isinstance(step, dict):
-        return dict(step)
-    return {"step": "status", "status": "running", "message": str(step)}
+        return attach_request_id(dict(step), request_id)
+    return status_trace_step(str(step), request_id=request_id)
 
 
 def react_status_message(step: dict) -> str | None:
@@ -897,9 +939,11 @@ def react_status_message(step: dict) -> str | None:
     return None
 
 
-def stream_error_payload(error: AgentError, *, request_id: str) -> dict:
+def stream_error_payload(error: AgentError, *, request_id: str, trace: list[dict] | None = None) -> dict:
     payload = error_payload(error, request_id=request_id)
     payload["request_id"] = request_id
+    if trace:
+        payload["trace"] = trace
     return payload
 
 

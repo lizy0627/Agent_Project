@@ -5,6 +5,7 @@ from typing import Any
 
 from app.agent.state import AgentStep, AgentTrace
 from app.agent.planner import AgentPlan, PlanStep
+from app.core.safe_logging import safe_log_data
 from app.tools.base import ToolResult
 from app.tools.registry import TOOL_EXECUTION_ERROR, ToolRegistry
 
@@ -122,17 +123,49 @@ class AgentExecutor:
 
 
 def tool_result_to_observation(result: ToolResult | None) -> dict[str, Any] | None:
-    """Serialize ToolResult for API traces without exposing Python objects."""
+    """Serialize ToolResult for API traces without exposing full raw tool output."""
 
     if result is None:
         return None
+    result_summary = _summarize_tool_result(result.result)
     return {
         "name": result.name,
         "success": result.success,
-        "result": result.result,
         "error": result.error,
         "duration_ms": result.duration_ms,
         "error_code": result.error_code or (None if result.success else TOOL_EXECUTION_ERROR),
         "error_message": result.error_message,
         "retryable": result.retryable,
+        "result_summary": result_summary,
     }
+
+
+def _summarize_tool_result(value: Any) -> dict[str, Any] | None:
+    if value is None:
+        return None
+
+    if isinstance(value, dict):
+        summary: dict[str, Any] = {
+            "type": "object",
+            "keys": list(value.keys())[:12],
+            "size": len(value),
+        }
+        for count_key in ("search_results", "read_pages", "workflow_nodes", "sources"):
+            nested = value.get(count_key)
+            if isinstance(nested, list):
+                summary[f"{count_key}_count"] = len(nested)
+        if "message" in value:
+            summary["message"] = safe_log_data(value.get("message"), max_length=120)
+        return summary
+
+    if isinstance(value, list):
+        return {"type": "array", "size": len(value)}
+
+    if isinstance(value, str):
+        return {
+            "type": "string",
+            "length": len(value),
+            "preview": safe_log_data(value, max_length=120),
+        }
+
+    return {"type": type(value).__name__, "preview": safe_log_data(str(value), max_length=120)}

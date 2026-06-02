@@ -53,21 +53,9 @@ class LLMClient:
                 model=target_model,
                 messages=messages,
             )
-        except AuthenticationError as exc:
-            log_openai_error("chat", exc)
-            raise ApiKeyInvalidError() from exc
-        except APITimeoutError as exc:
-            log_openai_error("chat", exc)
-            raise ModelTimeoutError() from exc
-        except APIConnectionError as exc:
-            log_openai_error("chat", exc)
-            raise ModelNetworkError() from exc
-        except APIStatusError as exc:
-            log_openai_error("chat", exc)
-            raise map_api_status_error(exc) from exc
         except OpenAIError as exc:
-            log_openai_error("chat", exc)
-            raise ModelProviderError() from exc
+            _log_openai_error("chat", exc)
+            raise _map_openai_error(exc) from exc
         except Exception as exc:
             logger.warning("Unexpected error while calling DashScope: class=%s", exc.__class__.__name__)
             raise UnknownAgentError() from exc
@@ -97,27 +85,28 @@ class LLMClient:
                 content = delta.content if delta else None
                 if content:
                     yield content
-        except AuthenticationError as exc:
-            log_openai_error("streaming chat", exc)
-            raise ApiKeyInvalidError() from exc
-        except APITimeoutError as exc:
-            log_openai_error("streaming chat", exc)
-            raise ModelTimeoutError() from exc
-        except APIConnectionError as exc:
-            log_openai_error("streaming chat", exc)
-            raise ModelNetworkError() from exc
-        except APIStatusError as exc:
-            log_openai_error("streaming chat", exc)
-            raise map_api_status_error(exc) from exc
         except OpenAIError as exc:
-            log_openai_error("streaming chat", exc)
-            raise ModelProviderError() from exc
+            _log_openai_error("streaming chat", exc)
+            raise _map_openai_error(exc) from exc
         except Exception as exc:
             logger.warning("Unexpected error while streaming from DashScope: class=%s", exc.__class__.__name__)
             raise UnknownAgentError() from exc
 
 
-def map_api_status_error(exc: APIStatusError) -> AgentError:
+def _map_openai_error(exc: OpenAIError) -> AgentError:
+    if isinstance(exc, AuthenticationError):
+        return ApiKeyInvalidError()
+    if isinstance(exc, APITimeoutError):
+        return ModelTimeoutError()
+    if isinstance(exc, APIConnectionError):
+        return ModelNetworkError()
+    if isinstance(exc, APIStatusError):
+        return _map_api_status_error(exc)
+
+    return ModelProviderError()
+
+
+def _map_api_status_error(exc: APIStatusError) -> AgentError:
     status_code = exc.status_code
 
     if status_code in {401, 403}:
@@ -139,24 +128,24 @@ def map_api_status_error(exc: APIStatusError) -> AgentError:
     return ModelProviderError(status_code=status_code, retryable=False)
 
 
-def log_openai_error(operation: str, exc: OpenAIError) -> None:
+def _log_openai_error(operation: str, exc: OpenAIError) -> None:
     logger.warning(
         "DashScope %s error: class=%s status=%s error_type=%s",
         operation,
         exc.__class__.__name__,
         getattr(exc, "status_code", None),
-        openai_error_type(exc),
+        _openai_error_type(exc),
     )
 
 
-def openai_error_type(exc: OpenAIError) -> str | None:
+def _openai_error_type(exc: OpenAIError) -> str | None:
     body = getattr(exc, "body", None)
     if isinstance(body, dict):
-        return error_type_from_body(body)
+        return _error_type_from_body(body)
     return None
 
 
-def error_type_from_body(body: dict[str, Any]) -> str | None:
+def _error_type_from_body(body: dict[str, Any]) -> str | None:
     error = body.get("error")
     if isinstance(error, dict):
         value = error.get("type") or error.get("code")

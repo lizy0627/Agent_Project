@@ -8,6 +8,7 @@ from app.agent.planner import AgentPlan, LLMPlanGenerator, Planner
 from app.agent.reactor import ReActAgent, ReActReasoningStep, ReActResult
 from app.agent.state import AgentStep as ReActTraceStep
 from app.core.config import Settings
+from app.core.exceptions import AgentError, ErrorCode
 from app.core.logger import get_logger
 from app.core.safe_logging import safe_log_data
 from app.mcp.manager import MCPManager
@@ -37,6 +38,8 @@ from app.tools.tool_manager import ToolManager
 
 logger = get_logger(__name__)
 _PLANNER_SOURCE: ContextVar[str | None] = ContextVar("planner_source", default=None)
+_PLANNER_FALLBACK_ERROR: ContextVar[dict[str, Any] | None] = ContextVar("planner_fallback_error", default=None)
+TRACE_VALUE_MAX_LENGTH = 120
 
 
 class AgentService:
@@ -176,6 +179,7 @@ class AgentService:
                 )
                 self._append_tool_trace(trace, planned_call, workflow_result)
                 self._emit_status(status_callback, STATUS_GENERATING, emitted_statuses)
+                self._append_model_trace_start(trace)
                 logger.info("[SearchWorkflow] streaming summarize start")
                 stream = self.search_workflow.stream_summary(
                     model_messages,
@@ -202,6 +206,7 @@ class AgentService:
             if tool_result is not None:
                 self._emit_status(status_callback, STATUS_GENERATING, emitted_statuses)
             model_messages = self.message_builder.with_tool_result(messages, tool_result)
+            self._append_model_trace_start(trace)
             stream = self.llm_client.stream_complete_chat(model_messages, model=model)
             logger.info(
                 "Agent stream prepared: model=%s duration_ms=%.2f",
@@ -280,16 +285,12 @@ class AgentService:
 
         if step.type == "action":
             return AgentTraceStep(
-                step="action",
+                step="tool_call",
                 status=step.status or "running",
                 message=f"Selected tool: {step.tool_name}.",
                 tool_name=step.tool_name,
-                metadata={
-                    "turn": step.turn,
-                    "tool_args": step.tool_args or {},
-                }
-                if step.turn is not None
-                else {"tool_args": step.tool_args or {}},
+                tool_args=self._safe_trace_data(step.tool_args or {}),
+                metadata={"turn": step.turn} if step.turn is not None else None,
             )
 
         if step.type == "observation":
@@ -299,7 +300,9 @@ class AgentService:
                 status=status,
                 message=step.error or "Observed tool result.",
                 tool_name=step.tool_name,
-                observation=step.observation,
+                observation=self._safe_trace_data(step.observation),
+                error_code=self._trace_error_code_from_observation(step.observation),
+                retryable=self._trace_retryable_from_observation(step.observation),
                 metadata={"turn": step.turn} if step.turn is not None else None,
             )
 
@@ -329,11 +332,12 @@ class AgentService:
         self._append_tool_trace(active_trace, planned_call, workflow_result)
         logger.info("[SearchWorkflow] llm summarize start")
         summarize_started_at = perf_counter()
+        self._append_model_trace_start(active_trace)
         try:
             reply = self.llm_client.complete_chat(model_messages, model=model)
             self._append_model_trace(active_trace, summarize_started_at, "success")
         except Exception as exc:
-            self._append_model_trace(active_trace, summarize_started_at, "failed", message=str(exc))
+            self._append_model_trace(active_trace, summarize_started_at, "failed", message=exc)
             raise
         finally:
             logger.info(
@@ -355,10 +359,11 @@ class AgentService:
         """Call the model and append a final_answer trace step."""
 
         started_at = perf_counter()
+        self._append_model_trace_start(trace)
         try:
             reply = self.llm_client.complete_chat(messages, model=model)
         except Exception as exc:
-            self._append_model_trace(trace, started_at, "failed", message=str(exc))
+            self._append_model_trace(trace, started_at, "failed", message=exc)
             raise
 
         self._append_model_trace(trace, started_at, "success")
@@ -372,6 +377,13 @@ class AgentService:
         """Plan the optional tool call and append a front-end friendly trace step."""
 
         started_at = perf_counter()
+        trace.append(
+            AgentTraceStep(
+                step="planner",
+                status="running",
+                message="Planning request.",
+            )
+        )
         try:
             planned_call, agent_plan = self._plan_conversation(messages)
         except Exception as exc:
@@ -379,8 +391,10 @@ class AgentService:
                 AgentTraceStep(
                     step="planner",
                     status="failed",
-                    message=str(exc),
+                    message=self._public_error_message(exc),
                     duration_ms=self._elapsed_ms(started_at),
+                    error_code=self._error_code(exc),
+                    retryable=self._retryable(exc),
                 )
             )
             raise
@@ -434,15 +448,31 @@ class AgentService:
         trace.append(
             AgentTraceStep(
                 step="tool_call",
-                status=status,
-                message=message or f"Tool call finished: {tool_name}",
+                status="running",
+                message=f"Calling tool: {tool_name}",
                 tool_name=tool_name,
-                duration_ms=tool_result.duration_ms if tool_result is not None else None,
+                tool_args=self._safe_trace_data(dict(getattr(planned_call, "arguments", {}) or {}))
+                if planned_call is not None
+                else None,
                 metadata={
-                    "tool_args": dict(getattr(planned_call, "arguments", {}) or {}),
+                    "tool_args": self._safe_trace_data(dict(getattr(planned_call, "arguments", {}) or {})),
                 }
                 if planned_call is not None
                 else None,
+            )
+        )
+        trace.append(
+            AgentTraceStep(
+                step="tool_call",
+                status=status,
+                message=message or f"Tool call finished: {tool_name}",
+                tool_name=tool_name,
+                tool_args=self._safe_trace_data(dict(getattr(planned_call, "arguments", {}) or {}))
+                if planned_call is not None
+                else None,
+                duration_ms=tool_result.duration_ms if tool_result is not None else None,
+                error_code=tool_result.error_code if tool_result is not None else None,
+                retryable=tool_result.retryable if tool_result is not None else None,
             )
         )
         trace.append(
@@ -453,6 +483,8 @@ class AgentService:
                 tool_name=tool_name,
                 observation=tool_result_to_observation(tool_result),
                 duration_ms=tool_result.duration_ms if tool_result is not None else None,
+                error_code=tool_result.error_code if tool_result is not None else None,
+                retryable=tool_result.retryable if tool_result is not None else None,
             )
         )
 
@@ -463,10 +495,24 @@ class AgentService:
             metadata: dict[str, Any] = {
                 "step_id": step.step_id,
                 "description": step.description,
-                "tool_args": step.tool_args,
+                "tool_args": self._safe_trace_data(step.tool_args),
                 "depends_on": step.depends_on,
             }
             if step.tool_name:
+                tool_result = step.observation if isinstance(step.observation, ToolResult) else None
+                trace.append(
+                    AgentTraceStep(
+                        step="tool_call",
+                        status="running",
+                        message=f"Calling tool: {step.tool_name}",
+                        step_id=step.step_id,
+                        description=step.description,
+                        tool_name=step.tool_name,
+                        tool_args=self._safe_trace_data(step.tool_args),
+                        depends_on=step.depends_on,
+                        metadata={**metadata, "tool_args": self._safe_trace_data(step.tool_args)},
+                    )
+                )
                 trace.append(
                     AgentTraceStep(
                         step="tool_call",
@@ -475,9 +521,11 @@ class AgentService:
                         step_id=step.step_id,
                         description=step.description,
                         tool_name=step.tool_name,
-                        tool_args=step.tool_args,
+                        tool_args=self._safe_trace_data(step.tool_args),
                         depends_on=step.depends_on,
                         duration_ms=step.duration_ms,
+                        error_code=tool_result.error_code if tool_result is not None else self._error_code_from_step(step),
+                        retryable=tool_result.retryable if tool_result is not None else self._retryable_from_step(step),
                         metadata=metadata,
                     )
                 )
@@ -489,10 +537,12 @@ class AgentService:
                         step_id=step.step_id,
                         description=step.description,
                         tool_name=step.tool_name,
-                        tool_args=step.tool_args,
+                        tool_args=self._safe_trace_data(step.tool_args),
                         depends_on=step.depends_on,
                         observation=self._serialize_observation(step.observation),
                         duration_ms=step.duration_ms,
+                        error_code=tool_result.error_code if tool_result is not None else self._error_code_from_step(step),
+                        retryable=tool_result.retryable if tool_result is not None else self._retryable_from_step(step),
                         metadata=metadata,
                     )
                 )
@@ -505,20 +555,31 @@ class AgentService:
                     message=step.error or step.description,
                     step_id=step.step_id,
                     description=step.description,
-                    tool_args=step.tool_args,
+                    tool_args=self._safe_trace_data(step.tool_args),
                     depends_on=step.depends_on,
                     observation=self._serialize_observation(step.observation),
                     duration_ms=step.duration_ms,
+                    error_code=self._error_code_from_step(step),
+                    retryable=self._retryable_from_step(step),
                     metadata=metadata,
                 )
             )
+
+    def _append_model_trace_start(self, trace: list[AgentTraceStep]) -> None:
+        trace.append(
+            AgentTraceStep(
+                step="final_answer",
+                status="running",
+                message="Generating final answer.",
+            )
+        )
 
     def _append_model_trace(
         self,
         trace: list[AgentTraceStep],
         started_at: float,
         status: str,
-        message: str | None = None,
+        message: Any | None = None,
     ) -> None:
         """Append the final model generation step."""
 
@@ -526,8 +587,10 @@ class AgentService:
             AgentTraceStep(
                 step="final_answer",
                 status=status,
-                message=message,
+                message=self._public_error_message(message) if status == "failed" and message else message,
                 duration_ms=self._elapsed_ms(started_at),
+                error_code=self._error_code(message) if status == "failed" else None,
+                retryable=self._retryable(message) if status == "failed" else None,
             )
         )
 
@@ -621,16 +684,27 @@ class AgentService:
 
         if self._looks_like_simple_direct_chat(messages):
             _PLANNER_SOURCE.set("simple_direct")
+            _PLANNER_FALLBACK_ERROR.set(None)
             return None, self.rule_planner.direct_answer_plan(self._latest_user_message(messages).strip())
 
         try:
             agent_plan = self.llm_planner.generate(messages)
             _PLANNER_SOURCE.set("llm_planner")
+            _PLANNER_FALLBACK_ERROR.set(None)
             return self._planned_call_from_agent_plan(agent_plan), agent_plan
         except Exception as exc:
             logger.warning(
                 "LLM planner failed; falling back to rule planner: error=%s",
                 exc,
+            )
+            _PLANNER_FALLBACK_ERROR.set(
+                {
+                    "source": "llm_planner",
+                    "status": "failed",
+                    "error_code": self._error_code(exc),
+                    "retryable": self._retryable(exc),
+                    "message": "LLM planner failed; used rule fallback.",
+                }
             )
 
         planned_call = self._plan_tool_call(messages)
@@ -872,9 +946,12 @@ class AgentService:
         """Attach the structured plan without changing the legacy trace shape."""
 
         metadata: dict[str, Any] = {
-            "plan": agent_plan.model_dump(),
+            "plan": self._safe_plan_metadata(agent_plan),
             "planner_source": _PLANNER_SOURCE.get() or "unknown",
         }
+        fallback_error = _PLANNER_FALLBACK_ERROR.get()
+        if fallback_error is not None:
+            metadata["planner_attempts"] = [fallback_error]
         if planned_call is None:
             return metadata
         if planned_call.route_score:
@@ -886,7 +963,7 @@ class AgentService:
     def _serialize_observation(self, observation: Any) -> Any:
         if isinstance(observation, ToolResult):
             return tool_result_to_observation(observation)
-        return observation
+        return self._safe_trace_data(observation)
 
     def _react_trace_steps(self, result: ReActResult) -> list[AgentTraceStep]:
         """Convert AgentTrace steps into the legacy API trace dataclass."""
@@ -904,6 +981,10 @@ class AgentService:
                     tool_name=step.tool_name,
                     observation=self._serialize_react_observation(step),
                     duration_ms=step.duration_ms,
+                    error_code=step.error_code or self._trace_error_code_from_observation(step.observation),
+                    retryable=step.retryable
+                    if step.retryable is not None
+                    else self._trace_retryable_from_observation(step.observation),
                     metadata=self._react_step_metadata(step),
                 )
             )
@@ -912,15 +993,15 @@ class AgentService:
     def _react_step_metadata(self, step: ReActTraceStep) -> dict[str, Any] | None:
         metadata = dict(step.metadata or {})
         if step.tool_args:
-            metadata["tool_args"] = step.tool_args
+            metadata["tool_args"] = self._safe_trace_data(step.tool_args)
         if step.tool_call is not None:
-            metadata["tool_call"] = step.tool_call.model_dump(exclude_none=True)
+            metadata["tool_call"] = self._safe_trace_data(step.tool_call.model_dump(exclude_none=True))
         return metadata or None
 
     def _serialize_react_observation(self, step: ReActTraceStep) -> Any:
         if isinstance(step.observation, ToolResult):
             return tool_result_to_observation(step.observation)
-        return step.observation
+        return self._safe_trace_data(step.observation)
 
     def _last_react_tool_result(self, result: ReActResult) -> ToolResult | None:
         if not result.tool_calls:
@@ -943,6 +1024,51 @@ class AgentService:
 
     def _elapsed_ms(self, started_at: float) -> float:
         return round((perf_counter() - started_at) * 1000, 2)
+
+    def _safe_trace_data(self, value: Any) -> Any:
+        return safe_log_data(value, max_length=TRACE_VALUE_MAX_LENGTH)
+
+    def _safe_plan_metadata(self, agent_plan: AgentPlan) -> dict[str, Any]:
+        plan = self._safe_trace_data(agent_plan.model_dump())
+        question = agent_plan.question or ""
+        plan["question"] = {
+            "length": len(question),
+            "preview": self._safe_trace_data(question[:TRACE_VALUE_MAX_LENGTH]),
+        }
+        return plan
+
+    def _public_error_message(self, error: Any) -> str:
+        if isinstance(error, AgentError):
+            return error.message
+        text = str(error or "").strip()
+        return self._safe_trace_data(text) if text else "Step failed."
+
+    def _error_code(self, error: Any) -> str:
+        if isinstance(error, AgentError):
+            return str(error.code)
+        return str(ErrorCode.UNKNOWN_ERROR)
+
+    def _retryable(self, error: Any) -> bool:
+        return bool(error.retryable) if isinstance(error, AgentError) else False
+
+    def _error_code_from_step(self, step: ReActTraceStep) -> str | None:
+        if step.status != "failed":
+            return None
+        return str(ErrorCode.TOOL_EXECUTION_ERROR if step.tool_name else ErrorCode.UNKNOWN_ERROR)
+
+    def _retryable_from_step(self, step: ReActTraceStep) -> bool | None:
+        return False if step.status == "failed" else None
+
+    def _trace_error_code_from_observation(self, observation: Any) -> str | None:
+        if isinstance(observation, dict):
+            error_code = observation.get("error_code")
+            return str(error_code) if error_code else None
+        return None
+
+    def _trace_retryable_from_observation(self, observation: Any) -> bool | None:
+        if isinstance(observation, dict) and "retryable" in observation:
+            return bool(observation.get("retryable"))
+        return None
 
     def _safe_planned_tool_log(self, planned_call: PlannedToolCall | None) -> dict | None:
         if planned_call is None:

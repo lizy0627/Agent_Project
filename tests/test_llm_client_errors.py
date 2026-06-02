@@ -2,12 +2,13 @@ import logging
 
 import httpx
 import pytest
-from openai import APIStatusError, OpenAIError
+from openai import APIConnectionError, APIStatusError, APITimeoutError, AuthenticationError, OpenAIError
 
 from app.core.exceptions import (
     ApiKeyInvalidError,
     ErrorCode,
     InvalidArgumentsError,
+    ModelNetworkError,
     ModelProviderError,
     ModelTimeoutError,
 )
@@ -51,6 +52,13 @@ def api_status_error(status_code: int, error_type: str = "provider_error") -> AP
     return APIStatusError("provider error with api_key=sk-test-secret", response=response, body=body)
 
 
+def authentication_error() -> AuthenticationError:
+    request = httpx.Request("POST", "https://example.test/v1/chat/completions")
+    body = {"error": {"type": "authentication_error"}}
+    response = httpx.Response(401, request=request, json=body)
+    return AuthenticationError("bad api_key=sk-test-secret", response=response, body=body)
+
+
 @pytest.mark.parametrize(
     ("status_code", "expected_type", "expected_code", "expected_retryable", "expected_status"),
     [
@@ -92,6 +100,94 @@ def test_stream_complete_chat_maps_api_status_errors():
     assert exc_info.value.code == ErrorCode.RATE_LIMIT
     assert exc_info.value.retryable is True
     assert exc_info.value.status_code == 429
+
+
+@pytest.mark.parametrize(
+    ("error", "expected_type", "expected_code", "expected_retryable", "expected_status"),
+    [
+        (
+            authentication_error(),
+            ApiKeyInvalidError,
+            ErrorCode.API_KEY_INVALID,
+            False,
+            401,
+        ),
+        (
+            APITimeoutError(request=httpx.Request("POST", "https://example.test/v1/chat/completions")),
+            ModelTimeoutError,
+            ErrorCode.MODEL_TIMEOUT,
+            True,
+            504,
+        ),
+        (
+            APIConnectionError(
+                message="connection failed with api_key=sk-test-secret",
+                request=httpx.Request("POST", "https://example.test/v1/chat/completions"),
+            ),
+            ModelNetworkError,
+            ErrorCode.NETWORK_ERROR,
+            True,
+            503,
+        ),
+    ],
+)
+def test_complete_chat_maps_openai_errors(
+    error: Exception,
+    expected_type: type[Exception],
+    expected_code: ErrorCode,
+    expected_retryable: bool,
+    expected_status: int,
+):
+    client = client_raising(error)
+
+    with pytest.raises(expected_type) as exc_info:
+        client.complete_chat([])
+
+    mapped_error = exc_info.value
+    assert mapped_error.code == expected_code
+    assert mapped_error.retryable is expected_retryable
+    assert mapped_error.status_code == expected_status
+
+
+@pytest.mark.parametrize(
+    ("error", "expected_type", "expected_code"),
+    [
+        (
+            APITimeoutError(request=httpx.Request("POST", "https://example.test/v1/chat/completions")),
+            ModelTimeoutError,
+            ErrorCode.MODEL_TIMEOUT,
+        ),
+        (
+            APIConnectionError(
+                message="connection failed",
+                request=httpx.Request("POST", "https://example.test/v1/chat/completions"),
+            ),
+            ModelNetworkError,
+            ErrorCode.NETWORK_ERROR,
+        ),
+        (authentication_error(), ApiKeyInvalidError, ErrorCode.API_KEY_INVALID),
+        (api_status_error(429, "rate_limit_error"), ModelProviderError, ErrorCode.RATE_LIMIT),
+        (api_status_error(500, "server_error"), ModelProviderError, ErrorCode.MODEL_PROVIDER_ERROR),
+    ],
+)
+def test_complete_chat_stability_error_mapping(error: Exception, expected_type: type[Exception], expected_code: ErrorCode):
+    client = client_raising(error)
+
+    with pytest.raises(expected_type) as exc_info:
+        client.complete_chat([])
+
+    assert exc_info.value.code == expected_code
+
+
+def test_stream_complete_chat_maps_direct_openai_errors():
+    client = client_raising(APITimeoutError(request=httpx.Request("POST", "https://example.test/v1/chat/completions")))
+
+    with pytest.raises(ModelTimeoutError) as exc_info:
+        list(client.stream_complete_chat([]))
+
+    assert exc_info.value.code == ErrorCode.MODEL_TIMEOUT
+    assert exc_info.value.retryable is True
+    assert exc_info.value.status_code == 504
 
 
 def test_openai_errors_log_safe_type_without_secret_or_traceback(caplog):

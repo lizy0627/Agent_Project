@@ -57,6 +57,9 @@ class AgentTraceStep:
     tool_args: dict[str, Any] | None = None
     depends_on: list[str] | None = None
     observation: Any | None = None
+    error_code: str | None = None
+    retryable: bool | None = None
+    request_id: str | None = None
     metadata: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
@@ -82,6 +85,12 @@ class AgentTraceStep:
             payload["observation"] = self.observation
         if self.duration_ms is not None:
             payload["duration_ms"] = self.duration_ms
+        if self.error_code is not None:
+            payload["error_code"] = self.error_code
+        if self.retryable is not None:
+            payload["retryable"] = self.retryable
+        if self.request_id is not None:
+            payload["request_id"] = self.request_id
         if self.metadata is not None:
             payload["metadata"] = self.metadata
         return payload

@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from enum import StrEnum
+from typing import Any
 
 from fastapi.responses import JSONResponse
 
@@ -167,8 +168,8 @@ def error_payload(
     message: str | None = None,
     code: str | ErrorCode | None = None,
     request_id: str | None = None,
-    detail: dict | None = None,
-) -> dict:
+    detail: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Return the public API error payload without traceback or internal details."""
 
     error_body = {
@@ -194,7 +195,7 @@ def error_response(
     message: str | None = None,
     code: str | ErrorCode | None = None,
     request_id: str | None = None,
-    detail: dict | None = None,
+    detail: dict[str, Any] | None = None,
     status_code: int | None = None,
 ) -> JSONResponse:
     return JSONResponse(

@@ -1,6 +1,15 @@
 from app.tools import create_default_tool_manager
 from app.tools.base import BaseTool
-from app.tools.registry import TOOL_EXECUTION_ERROR, ToolRegistry
+import pytest
+
+from app.tools.registry import (
+    API_KEY_MISSING,
+    INVALID_ARGUMENTS,
+    NETWORK_ERROR,
+    TOOL_EXECUTION_ERROR,
+    TOOL_TIMEOUT,
+    ToolRegistry,
+)
 
 
 class EchoTool(BaseTool):
@@ -46,6 +55,33 @@ def test_tool_registry_normalizes_failed_tool_result():
     assert result.success is False
     assert result.error == "bad args"
     assert result.error_code == TOOL_EXECUTION_ERROR
+
+
+@pytest.mark.parametrize(
+    ("exc", "expected_code", "expected_retryable"),
+    [
+        (TimeoutError("tool timed out"), TOOL_TIMEOUT, True),
+        (ConnectionError("connection refused"), NETWORK_ERROR, True),
+        (RuntimeError("API key is missing"), API_KEY_MISSING, False),
+        (ValueError("bad value"), INVALID_ARGUMENTS, False),
+        (TypeError("bad type"), INVALID_ARGUMENTS, False),
+    ],
+)
+def test_tool_registry_classifies_stability_errors(monkeypatch, exc, expected_code, expected_retryable):
+    registry = ToolRegistry()
+    tool = EchoTool()
+    registry.register(tool)
+
+    def raise_error(**_):
+        raise exc
+
+    monkeypatch.setattr(tool, "run", raise_error)
+
+    result = registry.run_tool("echo", {"text": "hello"}, max_retries=0)
+
+    assert result.success is False
+    assert result.error_code == expected_code
+    assert result.retryable is expected_retryable
 
 
 def test_default_tool_registry_includes_existing_tools_and_read_webpage_alias():

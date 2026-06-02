@@ -1,7 +1,7 @@
-"""Compatibility entry point for the backend.app FastAPI application."""
+"""Compatibility entry point for the canonical app.main FastAPI application."""
 
-from backend.app.core.config import HOST, PORT, get_settings
-from backend.app.main import app, create_app, open_browser
+from app.core.config import HOST, PORT, get_settings
+from app.main import app, create_app, open_browser
 
 __all__ = ["app", "create_app", "open_browser"]
 

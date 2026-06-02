@@ -72,6 +72,9 @@ class AgentTraceStep(BaseModel):
     depends_on: list[str] | None = Field(default=None, description="Planner step dependencies")
     observation: Any | None = Field(default=None, description="Tool output or execution observation")
     duration_ms: float | None = Field(default=None, description="Step duration in milliseconds")
+    error_code: str | None = Field(default=None, description="Stable error code when this step failed")
+    retryable: bool | None = Field(default=None, description="Whether this failed step can be retried")
+    request_id: str | None = Field(default=None, description="Request id associated with this trace step")
     metadata: dict[str, Any] | None = Field(default=None, description="Optional structured UI hints")
 
 
@@ -79,7 +82,7 @@ class ChatResponse(BaseModel):
     """Response body returned by the chat endpoint."""
 
     success: bool = True
-    request_id: str
+    request_id: str = Field(..., description="Server-generated request id for tracing one chat request")
     reply: str
     model: str
     conversation_id: str

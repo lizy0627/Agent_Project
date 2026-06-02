@@ -45,6 +45,9 @@ class AgentStep(BaseModel):
     observation: Any | None = Field(default=None, description="Tool output or execution observation.")
     error: str | None = Field(default=None, description="Error captured without crashing the agent.")
     duration_ms: float | None = Field(default=None, description="Step execution duration in milliseconds.")
+    error_code: str | None = Field(default=None, description="Stable error code when this step failed.")
+    retryable: bool | None = Field(default=None, description="Whether this failed step can be retried.")
+    request_id: str | None = Field(default=None, description="Request id associated with this trace step.")
     metadata: dict[str, Any] | None = Field(default=None, description="Optional structured UI/debug metadata.")
 
     def to_api_dict(self) -> dict[str, Any]:
@@ -64,6 +67,9 @@ class AgentStep(BaseModel):
             "depends_on": self.depends_on or None,
             "observation": self.observation,
             "duration_ms": self.duration_ms,
+            "error_code": self.error_code,
+            "retryable": self.retryable,
+            "request_id": self.request_id,
             "metadata": self.metadata,
         }
         for key, value in optional_values.items():

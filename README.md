@@ -6,7 +6,7 @@ AgentOS 是一个基于 **FastAPI + DashScope/OpenAI-Compatible API** 的工程�
 
 这个项目不是完整的生产级 Agent 平台。README 只描述当前代码中已经存在或正在实验的能力；Reflector、通用 Workflow 编排、任务队列、插件市场、OpenTelemetry 等没有接入主链路的内容不会写成已完成能力。
 
-> 注意：仓库里同时保留了 `app/` 和 `backend/app/` 两套相近命名空间。新增能力主要集中在顶层 `app/` 主实现；`backend/app` 中有兼容入口和部分镜像文件，个别文件可能滞后。部署前请以实际启动入口和 OpenAPI schema 为准。
+> 注意：仓库里同时保留了 `app/` 和 `backend/app/` 两套相近命名空间。当前唯一主运行入口是顶层 `app.main`；根目录 `main.py` 和 `uvicorn main:app` 都会加载顶层 `app/` 实现。`backend/app` 只保留给旧 import 路径和少量兼容测试使用，新增业务逻辑、API 路由、Agent 能力、工具和服务应优先写入顶层 `app/`，不要再写入 `backend/app`。
 
 ## 当前能力边界
 
@@ -27,12 +27,12 @@ AgentOS 是一个基于 **FastAPI + DashScope/OpenAI-Compatible API** 的工程�
 - **Reflector**：`backend/app/agent/reflector.py` 中有轻量 trace 反思器，但当前没有接入 `/chat` 或 `/chat/stream` 主链路，因此属于实验性模块。
 - **Workflow**：`app.workflow` 提供 DAG 执行器，`SearchWorkflow` 会在搜索场景内部使用 `research_workflow`；但通用 Workflow 编排还没有作为公开 Agent 主链路或 API 暴露，暂按实验性能力处理。
 - **向量记忆**：`MEMORY_VECTOR_ENABLED=true` 后会为长期记忆生成 embedding 并在 JSON 记忆条目中保存向量，再用本地余弦相似度检索。它不是独立向量数据库，也没有向量库持久化服务。
-- **backend/app 同步状态**：`backend/app` 保留兼容入口，主要用于兼容 `main:app` 启动路径；新增 Agent 模式字段需要继续保持两套命名空间同步。
+- **backend/app 兼容状态**：`backend/app` 保留旧命名空间兼容层；`backend.app.main` 只是 re-export 顶层 `app.main`。测试中仍有少量 `backend.app.*` import 用来确认兼容路径没有断裂，但主运行链路、mypy 检查和新增实现都应以顶层 `app/` 为准。
 
 ### Roadmap
 
 - 将 Reflector 接入主链路，并在 API trace 中返回反思结果。
-- 明确 `app/` 与 `backend/app/` 的单一运行入口，消除兼容层滞后。
+- 逐步将仍被测试覆盖的 `backend.app.*` 镜像模块收敛为 re-export，最后移除过期镜像文件。
 - 将通用 Workflow 编排暴露为稳定 API 或 Agent 可调用能力。
 - 为 Agent Trace 增加持久化检索、前端时间线和失败重放。
 - 增加生产级部署文件、健康检查、观测指标和更细粒度的工具权限控制。
@@ -107,14 +107,14 @@ flowchart TD
 
 ```text
 .
-├── app/                            # 当前主要实现：agent、api、services、tools、memory、mcp、workflow
+├── app/                            # 主实现和唯一运行入口：agent、api、services、tools、memory、mcp、workflow、main.py
 ├── backend/
-│   └── app/                        # 兼容入口和部分镜像模块
+│   └── app/                        # 旧 import 兼容层和部分待收敛镜像模块，不放新增业务逻辑
 ├── frontend/                       # 本地 Web UI
 ├── scripts/                        # MCP、搜索和连接测试脚本
 ├── tests/                          # 单元测试和 API 测试
 ├── alembic/                        # 数据库迁移
-├── main.py                         # 兼容启动入口
+├── main.py                         # 兼容启动入口，re-export app.main
 ├── requirements.txt
 ├── pyproject.toml
 └── README.md
@@ -182,11 +182,13 @@ WEB_SEARCH_PROVIDER=tavily
 
 ### 4. 启动服务
 
-兼容入口：
+主入口：
 
 ```bash
 uvicorn main:app --reload
 ```
+
+该命令会加载根目录 `main.py`，再转发到顶层 `app.main:app`。旧路径 `backend.app.main` 仅作为兼容 re-export 保留。
 
 也可以直接运行：
 

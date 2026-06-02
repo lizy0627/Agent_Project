@@ -1,1 +1,5 @@
-"""最小 DashScope Agent 项目包。"""
+"""Legacy compatibility namespace.
+
+The canonical implementation lives under top-level app/. Keep new runtime
+logic in app/ and use backend.app only when preserving old import paths.
+"""

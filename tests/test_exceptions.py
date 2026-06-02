@@ -42,6 +42,29 @@ def test_error_payload_supports_request_id_and_explicit_detail_only():
     }
 
 
+def test_error_payload_stability_shape_for_request_id_and_detail():
+    error = AgentError(
+        message="Network failed",
+        code=ErrorCode.NETWORK_ERROR,
+        status_code=503,
+        retryable=True,
+    )
+
+    payload = error_payload(error)
+    assert set(payload["error"]) == {"code", "message", "retryable"}
+    assert payload["error"]["code"] == "NETWORK_ERROR"
+    assert payload["error"]["message"]
+    assert payload["error"]["retryable"] is True
+
+    payload_with_request = error_payload(error, request_id="req-network")
+    assert payload_with_request["error"]["request_id"] == "req-network"
+    assert "detail" not in payload_with_request["error"]
+
+    payload_with_detail = error_payload(error, request_id="req-network", detail={"provider": "dashscope"})
+    assert payload_with_detail["error"]["request_id"] == "req-network"
+    assert payload_with_detail["error"]["detail"] == {"provider": "dashscope"}
+
+
 def test_error_response_forwards_structured_error_options():
     response = error_response(
         AgentError("missing", code=ErrorCode.NOT_FOUND, status_code=404, retryable=False),

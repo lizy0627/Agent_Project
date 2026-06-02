@@ -1117,14 +1117,7 @@ function getMessageDisplayContent(message) {
     return message?.content || "";
   }
 
-  const content = String(message.content || "").trim();
-  const detail = getToolErrorDetail(message);
-  const rawMessage = sanitizeErrorText(detail.rawMessage || message.toolErrorMessage || message.toolError || "").trim();
-  if (!content || looksLikeBackendStack(content) || content === rawMessage || content === detail.message) {
-    return formatToolFailureMessage(message);
-  }
-
-  return content;
+  return formatToolFailureMessage(message);
 }
 
 function createMessageToolbar(message) {
@@ -1286,16 +1279,29 @@ function createMessageErrorDetails(message) {
 }
 
 function buildMessageErrorDetails(message) {
-  if (!message || (!message.errorDetail && !isToolFailed(message))) {
+  const hasTraceDetail = Array.isArray(message?.trace) ? message.trace.length > 0 : Boolean(message?.trace);
+  const hasDirectErrorDetail =
+    message?.role === "error" &&
+    Boolean(
+      message?.errorDetail ||
+        message?.rawMessage ||
+        message?.errorCode ||
+        message?.requestId ||
+        message?.retryable !== undefined ||
+        hasTraceDetail,
+    );
+  if (!message || (!hasDirectErrorDetail && !isToolFailed(message))) {
     return null;
   }
 
   const detail = sanitizeErrorDetailValue(message.errorDetail) || {};
   const normalizedToolDetail = normalizeToolErrorDetail(message.toolErrorDetail);
-  const toolDetail = sanitizeErrorDetailValue(normalizedToolDetail);
+  const toolDetail = sanitizeErrorDetailValue(message.toolErrorDetail);
   const rawMessage = sanitizeErrorDetailValue(
     detail.rawMessage ||
+      detail.raw_message ||
       message.rawMessage ||
+      normalizedToolDetail.rawMessage ||
       normalizedToolDetail.message ||
       message.toolErrorMessage ||
       message.toolError ||
@@ -1305,23 +1311,35 @@ function buildMessageErrorDetails(message) {
     detail.message || (isToolFailed(message) ? getToolErrorMessage(message) : message.content) || getToolErrorMessage(message),
   );
   const result = compactObject({
-    requestId: detail.requestId ?? message.requestId,
     code:
       detail.code ||
+      detail.errorCode ||
+      detail.error_code ||
       message.errorCode ||
       normalizedToolDetail.code ||
       message.toolErrorCode ||
       inferErrorCode(rawMessage || friendlyMessage),
     message: friendlyMessage,
     retryable: detail.retryable ?? message.retryable ?? normalizedToolDetail.retryable ?? message.toolRetryable,
+    requestId: detail.requestId ?? detail.request_id ?? message.requestId,
     rawMessage,
-    toolName: detail.toolName ?? normalizedToolDetail.toolName ?? message.toolName,
-    toolStatus: message.toolStatus,
-    toolErrorCode: message.toolErrorCode,
-    toolErrorMessage: sanitizeErrorDetailValue(message.toolErrorMessage),
-    toolErrorDetail: toolDetail,
-    trace: sanitizeErrorDetailValue(message.trace),
-    durationMs: detail.durationMs ?? normalizedToolDetail.durationMs ?? message.durationMs ?? message.toolDurationMs,
+    toolName: detail.toolName ?? detail.tool_name ?? normalizedToolDetail.toolName ?? message.toolName,
+    toolStatus: detail.toolStatus ?? detail.tool_status ?? message.toolStatus,
+    toolErrorCode: detail.toolErrorCode ?? detail.tool_error_code ?? message.toolErrorCode,
+    toolErrorMessage: sanitizeErrorDetailValue(
+      detail.toolErrorMessage ?? detail.tool_error_message ?? message.toolErrorMessage,
+    ),
+    toolErrorDetail: sanitizeErrorDetailValue(detail.toolErrorDetail ?? detail.tool_error_detail ?? toolDetail),
+    toolDurationMs:
+      detail.toolDurationMs ??
+      detail.tool_duration_ms ??
+      detail.durationMs ??
+      detail.duration_ms ??
+      normalizedToolDetail.toolDurationMs ??
+      normalizedToolDetail.durationMs ??
+      message.toolDurationMs ??
+      message.durationMs,
+    trace: sanitizeErrorDetailValue(detail.trace ?? message.trace),
   });
 
   return Object.keys(result).length > 0 ? result : null;
@@ -1571,7 +1589,9 @@ function normalizeToolErrorDetail(detail) {
     message: detail.message ?? detail.errorMessage ?? detail.error_message,
     retryable: detail.retryable,
     toolName: detail.toolName ?? detail.tool_name,
+    rawMessage: detail.rawMessage ?? detail.raw_message,
     durationMs: detail.durationMs ?? detail.duration_ms,
+    toolDurationMs: detail.toolDurationMs ?? detail.tool_duration_ms,
   };
 }
 
@@ -1994,6 +2014,9 @@ function updateMessageElementOnly(messageId, updates) {
     ...currentMessage,
     ...updates,
   };
+  if (updates.role && updates.role !== currentMessage.role) {
+    return false;
+  }
   const nextRole = updatedMessage.role;
   const nextType = updatedMessage.type;
   const shouldShowNewMessageNotice =
@@ -2665,6 +2688,9 @@ function markTraceStage(trace, key, status, message, details = {}) {
       durationMs: details.durationMs ?? stage.durationMs,
       toolArgs: details.toolArgs ?? stage.toolArgs,
       observation: details.observation ?? stage.observation,
+      errorCode: details.errorCode ?? stage.errorCode,
+      retryable: details.retryable ?? stage.retryable,
+      requestId: details.requestId ?? stage.requestId,
     };
   });
 }
@@ -2682,6 +2708,9 @@ function addTraceEvent(title, detail = "", status = "running", eventDetails = {}
       durationMs: eventDetails.durationMs ?? null,
       toolArgs: eventDetails.toolArgs ?? null,
       observation: eventDetails.observation ?? null,
+      errorCode: eventDetails.errorCode ?? "",
+      retryable: eventDetails.retryable ?? null,
+      requestId: eventDetails.requestId ?? "",
     },
     ...activeTrace.events,
   ].slice(0, TRACE_MAX_EVENTS);
@@ -2741,7 +2770,11 @@ function applyApiTraceToTrace(trace, apiTrace) {
 
     if (normalizedStep.status === "failed") {
       hasFailed = true;
-      trace.error = sanitizeErrorText(normalizedStep.message || trace.error);
+      trace.error = sanitizeErrorText(
+        normalizedStep.message ||
+          [normalizedStep.errorCode, normalizedStep.retryable === true ? "retryable" : ""].filter(Boolean).join(" ") ||
+          trace.error,
+      );
     } else if (normalizedStep.status === "running") {
       hasRunning = true;
     }
@@ -2766,6 +2799,9 @@ function applyApiTraceToTrace(trace, apiTrace) {
       durationMs: normalizedStep.durationMs,
       toolArgs: normalizedStep.toolArgs,
       observation: normalizedStep.observation,
+      errorCode: normalizedStep.errorCode,
+      retryable: normalizedStep.retryable,
+      requestId: normalizedStep.requestId,
     });
     trace.events.unshift({
       title: normalizedStep.title,
@@ -2778,6 +2814,9 @@ function applyApiTraceToTrace(trace, apiTrace) {
       durationMs: normalizedStep.durationMs,
       toolArgs: normalizedStep.toolArgs,
       observation: normalizedStep.observation,
+      errorCode: normalizedStep.errorCode,
+      retryable: normalizedStep.retryable,
+      requestId: normalizedStep.requestId,
     });
   });
 
@@ -2813,6 +2852,9 @@ function normalizeApiTraceStep(step) {
   const agentName = step.agent_name || step.agentName || step.metadata?.agent_name || step.metadata?.manager || step.observation?.agent_name || "";
   const durationMs = step.duration_ms ?? step.durationMs ?? step.tool_call?.duration_ms ?? null;
   const toolArgs = step.tool_args || step.toolArgs || step.tool_call?.tool_args || step.tool_call?.action_args || step.metadata?.tool_args || null;
+  const errorCode = step.error_code || step.errorCode || step.tool_call?.error_code || step.observation?.error_code || "";
+  const retryable = step.retryable ?? step.tool_call?.retryable ?? step.observation?.retryable ?? null;
+  const requestId = step.request_id || step.requestId || "";
   return {
     key,
     status,
@@ -2823,6 +2865,9 @@ function normalizeApiTraceStep(step) {
     durationMs,
     toolArgs,
     observation: step.observation ?? null,
+    errorCode,
+    retryable,
+    requestId,
   };
 }
 
@@ -3118,6 +3163,15 @@ function createTraceMeta(item) {
     parts.push(actor);
   }
   parts.push(`Duration ${duration}`);
+  if (item.errorCode) {
+    parts.push(`Error ${item.errorCode}`);
+  }
+  if (item.retryable !== undefined && item.retryable !== null) {
+    parts.push(`Retryable ${item.retryable === true ? "yes" : "no"}`);
+  }
+  if (item.requestId) {
+    parts.push(`Request ${String(item.requestId).slice(0, 8)}`);
+  }
 
   const meta = document.createElement("div");
   meta.className = "trace-stage-meta";
@@ -3149,6 +3203,19 @@ function createTraceDetails(item) {
   if (item.observation != null) {
     fragments.push(createTraceDisclosure("observation", item.observation));
   }
+  const errorDetail = {};
+  if (item.errorCode) {
+    errorDetail.error_code = item.errorCode;
+  }
+  if (item.retryable !== undefined && item.retryable !== null) {
+    errorDetail.retryable = item.retryable;
+  }
+  if (item.requestId) {
+    errorDetail.request_id = item.requestId;
+  }
+  if (Object.keys(errorDetail).length > 0) {
+    fragments.push(createTraceDisclosure("error_detail", errorDetail));
+  }
   if (fragments.length === 0) {
     return null;
   }
@@ -3179,6 +3246,9 @@ function formatTraceDisclosureLabel(label) {
   }
   if (label === "observation") {
     return "Observation";
+  }
+  if (label === "error_detail") {
+    return "Error";
   }
   return label.replace(/_/g, " ");
 }
@@ -3663,14 +3733,11 @@ async function requestAgentReply(
 
   activeAbortController = new AbortController();
   let didTimeout = false;
-  const timeoutTimer = shouldUseStreaming
+  const clearRequestTimeout = shouldUseStreaming
     ? null
-    : window.setTimeout(() => {
+    : createRequestTimeout(activeAbortController, () => {
         didTimeout = true;
-        if (activeAbortController) {
-          activeAbortController.abort();
-        }
-      }, REQUEST_TIMEOUT_MS);
+      });
   const handleStreamIdleTimeout = () => {
     didTimeout = true;
     if (activeAbortController) {
@@ -3702,15 +3769,15 @@ async function requestAgentReply(
           activeAbortController.signal,
           targetConversationId,
         );
-    if (timeoutTimer) {
-      window.clearTimeout(timeoutTimer);
+    if (clearRequestTimeout) {
+      clearRequestTimeout();
     }
     activeAbortController = null;
     return result;
   } catch (error) {
     console.warn("POST /chat request error", error);
-    if (timeoutTimer) {
-      window.clearTimeout(timeoutTimer);
+    if (clearRequestTimeout) {
+      clearRequestTimeout();
     }
     activeAbortController = null;
     if (error.name === "AbortError") {
@@ -3733,6 +3800,49 @@ async function requestAgentReply(
       message: CHAT_FAILURE_MESSAGE,
     });
   }
+}
+
+function createRequestTimeout(controller, onTimeout) {
+  const timer = window.setTimeout(() => {
+    if (typeof onTimeout === "function") {
+      onTimeout();
+    }
+    if (!controller.signal.aborted) {
+      controller.abort();
+    }
+  }, REQUEST_TIMEOUT_MS);
+
+  return () => {
+    window.clearTimeout(timer);
+  };
+}
+
+function createIdleTimeout(signal, onIdleTimeout) {
+  let idleTimer = null;
+
+  const clear = () => {
+    if (idleTimer) {
+      window.clearTimeout(idleTimer);
+      idleTimer = null;
+    }
+  };
+  const reset = () => {
+    clear();
+    idleTimer = window.setTimeout(() => {
+      if (!signal.aborted && typeof onIdleTimeout === "function") {
+        onIdleTimeout();
+      }
+    }, REQUEST_TIMEOUT_MS);
+  };
+  const dispose = () => {
+    clear();
+    signal.removeEventListener("abort", clear);
+  };
+
+  signal.addEventListener("abort", clear, { once: true });
+  reset();
+
+  return { reset, dispose };
 }
 
 async function requestDocumentAnswer(message, { model, signal }) {
@@ -3838,6 +3948,7 @@ async function requestJsonAgentReply(requestBody, signal, fallbackConversationId
     toolErrorDetail: data.tool_error_detail,
     toolDurationMs: data.tool_duration_ms,
     trace: data.trace || [],
+    errorDetail: buildAgentReplyErrorDetail(data),
   };
 }
 
@@ -3851,27 +3962,7 @@ async function requestStreamingAgentReply(
   onIdleTimeout,
 ) {
   debugLog("POST /chat/stream request start", requestBody);
-  let idleTimer = null;
-  const clearIdleTimer = () => {
-    if (idleTimer) {
-      window.clearTimeout(idleTimer);
-      idleTimer = null;
-    }
-  };
-  const resetIdleTimer = () => {
-    clearIdleTimer();
-    idleTimer = window.setTimeout(() => {
-      if (!signal.aborted && typeof onIdleTimeout === "function") {
-        onIdleTimeout();
-      }
-    }, REQUEST_TIMEOUT_MS);
-  };
-  const disposeIdleTimer = () => {
-    clearIdleTimer();
-    signal.removeEventListener("abort", clearIdleTimer);
-  };
-  signal.addEventListener("abort", clearIdleTimer, { once: true });
-  resetIdleTimer();
+  const idleTimeout = createIdleTimeout(signal, onIdleTimeout);
   let response;
   try {
     response = await fetchWithAuth(CHAT_STREAM_API_URL, {
@@ -3884,7 +3975,7 @@ async function requestStreamingAgentReply(
       signal,
     });
   } catch (error) {
-    disposeIdleTimer();
+    idleTimeout.dispose();
     throw error;
   }
 
@@ -3893,12 +3984,12 @@ async function requestStreamingAgentReply(
     try {
       data = await parseJsonResponse(response);
     } catch (error) {
-      disposeIdleTimer();
+      idleTimeout.dispose();
       throw error;
     }
     const message = toFriendlyError(data.error || response.status);
     console.warn("Streaming chat request failed:", message);
-    disposeIdleTimer();
+    idleTimeout.dispose();
     throw createAgentError(
       { ...data, message: data.error || response.status },
       { message: message || CHAT_FAILURE_MESSAGE },
@@ -3906,7 +3997,7 @@ async function requestStreamingAgentReply(
   }
 
   if (!response.body) {
-    disposeIdleTimer();
+    idleTimeout.dispose();
     throw new Error("浏览器不支持读取流式响应。");
   }
 
@@ -3921,7 +4012,7 @@ async function requestStreamingAgentReply(
     if (!event) {
       return;
     }
-    resetIdleTimer();
+    idleTimeout.reset();
 
     if (event.event === "metadata") {
       metadata = event.data || {};
@@ -3972,7 +4063,7 @@ async function requestStreamingAgentReply(
     }
 
     if (event.event === "error") {
-      throw createAgentError(event.data?.error || event.data);
+      throw createAgentError(event.data);
     }
   };
 
@@ -3996,11 +4087,11 @@ async function requestStreamingAgentReply(
       handleStreamEvent(parseSseEvent(buffer));
     }
   } catch (error) {
-    disposeIdleTimer();
+    idleTimeout.dispose();
     throw error;
   }
 
-  disposeIdleTimer();
+  idleTimeout.dispose();
   return {
     aborted: false,
     requestId: done.request_id || metadata.request_id,
@@ -4018,6 +4109,7 @@ async function requestStreamingAgentReply(
     toolErrorDetail: done.tool_error_detail ?? metadata.tool_error_detail,
     toolDurationMs: done.tool_duration_ms ?? metadata.tool_duration_ms,
     trace: done.trace || metadata.trace || streamTrace,
+    errorDetail: buildAgentReplyErrorDetail({ ...metadata, ...done, trace: done.trace || metadata.trace || streamTrace }),
   };
 }
 
@@ -4036,6 +4128,35 @@ function normalizeToolMetadata(data = {}) {
     toolDurationMs: data.tool_duration_ms,
     trace: data.trace || [],
   };
+}
+
+function buildAgentReplyErrorDetail(data = {}) {
+  const hasError =
+    data.error ||
+    data.tool_error ||
+    data.tool_error_code ||
+    data.tool_error_message ||
+    data.tool_error_detail ||
+    data.tool_status === "failed" ||
+    data.tool_status === false;
+  if (!hasError) {
+    return null;
+  }
+
+  return compactObject({
+    code: data.code || data.error_code || data.tool_error_code || inferErrorCode(data.error || data.tool_error_message),
+    message: sanitizeErrorDetailValue(data.error || data.message || data.tool_error_message || data.tool_error),
+    retryable: data.retryable ?? data.tool_retryable,
+    requestId: data.request_id,
+    rawMessage: sanitizeErrorDetailValue(data.raw_message || data.rawMessage || data.error || data.tool_error),
+    toolName: data.tool_name,
+    toolStatus: data.tool_status,
+    toolErrorCode: data.tool_error_code,
+    toolErrorMessage: sanitizeErrorDetailValue(data.tool_error_message),
+    toolErrorDetail: sanitizeErrorDetailValue(data.tool_error_detail),
+    toolDurationMs: data.tool_duration_ms,
+    trace: sanitizeErrorDetailValue(data.trace),
+  });
 }
 
 function parseSseEvent(rawEvent) {
@@ -4257,6 +4378,7 @@ async function regenerateAgentReply(messageId) {
       toolRetryable: result.toolRetryable,
       toolErrorDetail: result.toolErrorDetail,
       toolDurationMs: result.toolDurationMs,
+      errorDetail: result.errorDetail,
       trace: result.trace || [],
       createdAt: getCurrentTime(),
     });
@@ -4264,9 +4386,15 @@ async function regenerateAgentReply(messageId) {
   } catch (error) {
     console.warn("regenerateAgentReply error", error);
     const friendlyMessage = getAgentFailureMessage(error);
+    const errorDetail = getAgentErrorDetail(error, friendlyMessage);
     finalizeAgentTrace({}, { error: friendlyMessage });
-    updateMessage(loadingMessage.id, originalMessage);
-    window.alert(friendlyMessage);
+    updateMessage(loadingMessage.id, {
+      type: "text",
+      role: "error",
+      content: friendlyMessage,
+      errorDetail,
+      createdAt: getCurrentTime(),
+    });
   } finally {
     if (searchStatusTimer) {
       window.clearTimeout(searchStatusTimer);
@@ -4323,16 +4451,29 @@ function getAgentFailureMessage(error) {
 }
 
 function createAgentError(rawError, overrides = {}) {
-  const rawMessage = normalizeErrorText(rawError) || String(rawError || "");
+  const rawMessage = normalizeRawErrorMessage(rawError) || normalizeErrorText(rawError) || String(rawError || "");
   const friendlyMessage = overrides.message || toFriendlyError(rawError);
   const error = new Error(friendlyMessage);
   error.agentErrorDetail = compactObject({
     requestId: overrides.requestId || normalizeRequestId(rawError),
     code: overrides.code || normalizeErrorCode(rawError) || inferErrorCode(rawMessage || friendlyMessage),
     message: friendlyMessage,
-    retryable: overrides.retryable,
+    retryable: overrides.retryable ?? normalizeErrorRetryable(rawError),
     rawMessage: sanitizeErrorDetailValue(rawMessage),
-    durationMs: overrides.durationMs,
+    toolName: overrides.toolName ?? normalizeErrorField(rawError, ["toolName", "tool_name"]),
+    toolStatus: overrides.toolStatus ?? normalizeErrorField(rawError, ["toolStatus", "tool_status"]),
+    toolErrorCode: overrides.toolErrorCode ?? normalizeErrorField(rawError, ["toolErrorCode", "tool_error_code"]),
+    toolErrorMessage: sanitizeErrorDetailValue(
+      overrides.toolErrorMessage ?? normalizeErrorField(rawError, ["toolErrorMessage", "tool_error_message"]),
+    ),
+    toolErrorDetail: sanitizeErrorDetailValue(
+      overrides.toolErrorDetail ?? normalizeErrorField(rawError, ["toolErrorDetail", "tool_error_detail"]),
+    ),
+    toolDurationMs:
+      overrides.toolDurationMs ??
+      overrides.durationMs ??
+      normalizeErrorField(rawError, ["toolDurationMs", "tool_duration_ms", "durationMs", "duration_ms"]),
+    trace: sanitizeErrorDetailValue(overrides.trace ?? normalizeErrorField(rawError, ["trace"])),
   });
   return error;
 }
@@ -4362,31 +4503,90 @@ function normalizeErrorText(errorValue) {
       messageValue && typeof messageValue === "object"
         ? messageValue.message || messageValue.error_message || messageValue.code
         : messageValue;
-    const message = normalizedMessage || errorValue.error_message || nestedError?.message || errorValue.error || errorValue.code;
+    const detailMessage = normalizeErrorField(errorValue, ["message", "errorMessage", "error_message"]);
+    const message =
+      normalizedMessage ||
+      detailMessage ||
+      errorValue.error_message ||
+      nestedError?.message ||
+      errorValue.error ||
+      errorValue.code;
     return String(message || "");
   }
   return String(errorValue);
 }
 
-function normalizeErrorCode(errorValue) {
-  if (!errorValue || typeof errorValue !== "object") {
+function normalizeRawErrorMessage(errorValue) {
+  const rawMessage = normalizeErrorField(errorValue, [
+    "rawMessage",
+    "raw_message",
+    "rawError",
+    "raw_error",
+    "detailMessage",
+    "detail_message",
+  ]);
+  if (rawMessage === undefined || rawMessage === null || rawMessage === "") {
     return "";
   }
-  return String(errorValue.code || errorValue.errorCode || errorValue.error_code || errorValue.error?.code || "");
+  if (typeof rawMessage === "object") {
+    try {
+      return JSON.stringify(rawMessage);
+    } catch {
+      return String(rawMessage);
+    }
+  }
+  return String(rawMessage);
+}
+
+function normalizeErrorCode(errorValue) {
+  return String(normalizeErrorField(errorValue, ["code", "errorCode", "error_code"]) || "");
 }
 
 function normalizeRequestId(errorValue) {
+  return String(normalizeErrorField(errorValue, ["requestId", "request_id"]) || "");
+}
+
+function normalizeErrorRetryable(errorValue) {
+  const retryable = normalizeErrorField(errorValue, ["retryable", "canRetry", "can_retry"]);
+  return retryable === undefined ? undefined : retryable;
+}
+
+function normalizeErrorField(errorValue, keys) {
+  const candidates = getErrorObjectCandidates(errorValue);
+  for (const candidate of candidates) {
+    for (const key of keys) {
+      if (candidate[key] !== undefined && candidate[key] !== null && candidate[key] !== "") {
+        return candidate[key];
+      }
+    }
+  }
+  return undefined;
+}
+
+function getErrorObjectCandidates(errorValue) {
   if (!errorValue || typeof errorValue !== "object") {
-    return "";
+    return [];
   }
 
-  return String(
-    errorValue.requestId ||
-      errorValue.request_id ||
-      errorValue.error?.requestId ||
-      errorValue.error?.request_id ||
-      "",
-  );
+  const candidates = [errorValue];
+  ["error", "message", "detail", "details", "error_detail"].forEach((key) => {
+    const value = errorValue[key];
+    if (value && typeof value === "object") {
+      candidates.push(value);
+    }
+  });
+
+  const nestedError = errorValue.error;
+  if (nestedError && typeof nestedError === "object") {
+    ["detail", "details", "error_detail"].forEach((key) => {
+      const value = nestedError[key];
+      if (value && typeof value === "object") {
+        candidates.push(value);
+      }
+    });
+  }
+
+  return candidates;
 }
 
 function friendlyErrorFromCode(code) {
@@ -4703,6 +4903,7 @@ async function sendCurrentMessage() {
       toolRetryable: result.toolRetryable,
       toolErrorDetail: result.toolErrorDetail,
       toolDurationMs: result.toolDurationMs,
+      errorDetail: result.errorDetail,
       trace: result.trace || [],
       createdAt: getCurrentTime(),
     });

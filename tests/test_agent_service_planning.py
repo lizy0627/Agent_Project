@@ -51,7 +51,9 @@ def test_simple_direct_chat_skips_llm_planner(agent_service: AgentService):
     assert planned_call is None
     assert plan.steps[0].step_id == "direct_answer"
     assert fake_llm.calls == 0
-    assert trace[0].metadata["planner_source"] == "simple_direct"
+    assert trace[0].step == "planner"
+    assert trace[0].status == "running"
+    assert trace[1].metadata["planner_source"] == "simple_direct"
 
 
 @pytest.mark.parametrize("message", ["hi there", "good morning", "谢谢你", "讲个笑话"])
@@ -72,7 +74,8 @@ def test_non_simple_chat_uses_llm_planner(agent_service: AgentService):
     assert planned_call is None
     assert plan.question == "搜索 Python 最新版本"
     assert fake_llm.calls == 1
-    assert trace[0].metadata["planner_source"] == "llm_planner"
+    assert [step.status for step in trace[:2]] == ["running", "success"]
+    assert trace[1].metadata["planner_source"] == "llm_planner"
 
 
 def test_llm_planner_failure_falls_back_to_rule_planner(agent_service: AgentService):
@@ -89,7 +92,9 @@ def test_llm_planner_failure_falls_back_to_rule_planner(agent_service: AgentServ
     assert planned_call.name == "calculate"
     assert plan.steps[0].tool_name == "calculate"
     assert fake_llm.calls == 1
-    assert trace[0].metadata["planner_source"] == "rule_fallback"
+    assert trace[1].metadata["planner_source"] == "rule_fallback"
+    assert trace[1].metadata["planner_attempts"][0]["status"] == "failed"
+    assert trace[1].metadata["planner_attempts"][0]["error_code"] == "UNKNOWN_ERROR"
 
 
 def test_trace_exposes_planner_source_and_plan_step_fields(agent_service: AgentService):
@@ -124,11 +129,15 @@ def test_trace_exposes_planner_source_and_plan_step_fields(agent_service: AgentS
     executor_trace = agent_service.executor.execute(plan)
     agent_service._append_executor_trace(trace, executor_trace)
 
-    assert trace[0].metadata["planner_source"] == "llm_planner"
-    assert trace[1].to_dict()["step_id"] == "tool_1"
-    assert trace[1].to_dict()["depends_on"] == []
-    assert trace[3].to_dict()["step_id"] == "final_answer"
-    assert trace[3].to_dict()["depends_on"] == ["tool_1"]
+    assert trace[1].metadata["planner_source"] == "llm_planner"
+    assert trace[2].to_dict()["step_id"] == "tool_1"
+    assert trace[2].status == "running"
+    assert trace[2].to_dict()["depends_on"] == []
+    assert trace[3].to_dict()["step_id"] == "tool_1"
+    assert trace[3].status == "failed"
+    assert trace[3].to_dict()["error_code"] == "TOOL_NOT_FOUND"
+    assert trace[5].to_dict()["step_id"] == "final_answer"
+    assert trace[5].to_dict()["depends_on"] == ["tool_1"]
 
 
 @pytest.mark.parametrize(
