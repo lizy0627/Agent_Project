@@ -95,6 +95,7 @@ class ChatResponse(BaseModel):
     tool_name: str | None = None
     tool_status: str | None = None
     tool_result: Any | None = None
+    tool_result_summary: Any | None = None
     tool_error: str | None = None
     tool_duration_ms: float | None = None
     tool_error_code: str | None = None

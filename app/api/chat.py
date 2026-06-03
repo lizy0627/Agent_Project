@@ -18,6 +18,7 @@ from app.core.exceptions import (
     error_response,
 )
 from app.core.logger import get_logger
+from app.agent.executor import tool_result_to_observation
 from app.memory import MemoryManager
 from app.memory.vector_store import MemoryEmbeddingProvider
 from app.schemas.chat import (
@@ -374,7 +375,13 @@ def chat(
             multi_agent=is_multi_agent,
             agent_results=multi_agent_results_payload(reply.trace) if is_multi_agent else [],
             **tool_metadata,
-            trace=trace_payload(reply.trace, memory_used=memory_used, request_id=request_id),
+            trace=trace_payload(
+                reply.trace,
+                memory_used=memory_used,
+                request_id=request_id,
+                tool_result=reply.tool_result,
+                include_minimal=True,
+            ),
         )
     except AgentError as exc:
         log_chat_request_event(
@@ -386,7 +393,11 @@ def chat(
             duration_ms=elapsed_ms(request_started_at),
         )
         logger.info("Chat request failed: request_id=%s code=%s status=%s", request_id, exc.code, exc.status_code)
-        return error_response(exc, request_id=request_id)
+        return error_response_with_trace(
+            exc,
+            request_id=request_id,
+            duration_ms=elapsed_ms(request_started_at),
+        )
     except Exception:
         log_chat_request_event(
             "Unhandled chat request error",
@@ -397,7 +408,12 @@ def chat(
             duration_ms=elapsed_ms(request_started_at),
         )
         logger.exception("Unhandled chat request error: request_id=%s", request_id)
-        return error_response(UnknownAgentError(), request_id=request_id)
+        error = UnknownAgentError()
+        return error_response_with_trace(
+            error,
+            request_id=request_id,
+            duration_ms=elapsed_ms(request_started_at),
+        )
 
 
 @router.post("/chat/stream")
@@ -537,7 +553,13 @@ def stream_chat(
                     "agent_results": multi_agent_results_payload(reply.trace),
                     **tool_metadata,
                     "memory_used": memory_used,
-                    "trace": trace_payload(reply.trace, memory_used=memory_used, request_id=request_id),
+                    "trace": trace_payload(
+                        reply.trace,
+                        memory_used=memory_used,
+                        request_id=request_id,
+                        tool_result=reply.tool_result,
+                        include_minimal=True,
+                    ),
                 }
                 yield sse_event("metadata", metadata)
                 assistant_reply = reply.content
@@ -608,7 +630,12 @@ def stream_chat(
                     "agent_results": [],
                     **tool_metadata,
                     "memory_used": memory_used,
-                    "trace": trace_payload(trace, memory_used=memory_used, request_id=request_id),
+                    "trace": trace_payload(
+                        trace,
+                        memory_used=memory_used,
+                        request_id=request_id,
+                        tool_result=tool_result,
+                    ),
                 },
             )
 
@@ -657,7 +684,13 @@ def stream_chat(
                 "agent_results": [],
                 **tool_metadata,
                 "memory_used": memory_used,
-                "trace": trace_payload(trace, memory_used=memory_used, request_id=request_id),
+                "trace": trace_payload(
+                    trace,
+                    memory_used=memory_used,
+                    request_id=request_id,
+                    tool_result=tool_result,
+                    include_minimal=True,
+                ),
             }
             log_chat_request_event(
                 "Streaming chat request finished",
@@ -827,6 +860,7 @@ def tool_response_metadata(tool_result) -> dict:
             "tool_name": None,
             "tool_status": None,
             "tool_result": None,
+            "tool_result_summary": None,
             "tool_error": None,
             "tool_duration_ms": None,
             "tool_error_code": None,
@@ -840,6 +874,7 @@ def tool_response_metadata(tool_result) -> dict:
         "tool_name": tool_result.name,
         "tool_status": get_tool_status(tool_result),
         "tool_result": tool_result.result,
+        "tool_result_summary": tool_result_to_observation(tool_result),
         "tool_error": tool_result.error,
         "tool_duration_ms": tool_result.duration_ms,
         "tool_error_code": tool_result.error_code,
@@ -854,16 +889,93 @@ def trace_payload(
     *,
     memory_used: int = 0,
     request_id: str | None = None,
+    tool_result=None,
+    include_minimal: bool = False,
 ) -> list[dict]:
     """Serialize agent trace steps while preserving the stable front-end shape."""
 
     payload = [memory_trace_step(memory_used, request_id=request_id)] if memory_used > 0 else []
     if trace:
+        if tool_result is not None and not has_tool_trace(trace):
+            payload.extend(
+                attach_request_id(step.to_dict(), request_id)
+                for step in tool_result_trace_steps(tool_result, include_final=False)
+            )
         payload.extend(
             attach_request_id(step.to_dict() if hasattr(step, "to_dict") else dict(step), request_id)
             for step in trace
         )
+    elif tool_result is not None:
+        payload.extend(
+            attach_request_id(step.to_dict(), request_id)
+            for step in tool_result_trace_steps(tool_result)
+        )
+    elif include_minimal:
+        payload.extend(
+            attach_request_id(step.to_dict(), request_id)
+            for step in minimal_trace_steps()
+        )
     return payload
+
+
+def minimal_trace_steps() -> list[AgentTraceStepData]:
+    return [
+        AgentTraceStepData(step="planner", status="running", message="Planning request."),
+        AgentTraceStepData(step="planner", status="success", message="Planned direct answer."),
+        AgentTraceStepData(step="final_answer", status="running", message="Generating final answer."),
+        AgentTraceStepData(step="final_answer", status="success", message="Final answer generated."),
+    ]
+
+
+def has_tool_trace(trace: list[AgentTraceStepData]) -> bool:
+    for step in trace:
+        step_name = getattr(step, "step", None)
+        if step_name is None and isinstance(step, dict):
+            step_name = step.get("step")
+        if step_name in {"tool_call", "observation"}:
+            return True
+    return False
+
+
+def tool_result_trace_steps(tool_result, *, include_final: bool = True) -> list[AgentTraceStepData]:
+    status = get_tool_status(tool_result) or "skipped"
+    tool_name = tool_result.name or None
+    message = tool_result.error_message or tool_result.error or f"Tool call finished: {tool_name}"
+    steps = [
+        AgentTraceStepData(
+            step="tool_call",
+            status="running",
+            message=f"Calling tool: {tool_name}" if tool_name else "Calling tool.",
+            tool_name=tool_name,
+        ),
+        AgentTraceStepData(
+            step="tool_call",
+            status=status,
+            message=message,
+            tool_name=tool_name,
+            duration_ms=tool_result.duration_ms,
+            error_code=tool_result.error_code if status == "failed" else None,
+            retryable=tool_result.retryable if status == "failed" else None,
+        ),
+        AgentTraceStepData(
+            step="observation",
+            status=status,
+            message=message if status == "failed" else "Observed tool result.",
+            tool_name=tool_name,
+            observation=tool_result_to_observation(tool_result),
+            duration_ms=tool_result.duration_ms,
+            error_code=tool_result.error_code if status == "failed" else None,
+            retryable=tool_result.retryable if status == "failed" else None,
+        ),
+    ]
+    if include_final:
+        steps.extend(
+            [
+                AgentTraceStepData(step="final_answer", status="running", message="Generating final answer."),
+                AgentTraceStepData(step="final_answer", status="success", message="Final answer generated."),
+            ]
+        )
+    return steps
 
 
 def attach_request_id(step: dict, request_id: str | None) -> dict:
@@ -942,8 +1054,10 @@ def react_status_message(step: dict) -> str | None:
 def stream_error_payload(error: AgentError, *, request_id: str, trace: list[dict] | None = None) -> dict:
     payload = error_payload(error, request_id=request_id)
     payload["request_id"] = request_id
-    if trace:
-        payload["trace"] = trace
+    payload["trace"] = trace or trace_payload(
+        [error_trace_step(error)],
+        request_id=request_id,
+    )
     return payload
 
 
@@ -956,6 +1070,31 @@ def streaming_error_response(error: AgentError, *, request_id: str) -> Streaming
             "Connection": "keep-alive",
             "X-Accel-Buffering": "no",
         },
+    )
+
+
+def error_response_with_trace(
+    error: AgentError,
+    *,
+    request_id: str,
+    duration_ms: float | None = None,
+) -> JSONResponse:
+    payload = error_payload(error, request_id=request_id)
+    payload["trace"] = trace_payload(
+        [error_trace_step(error, duration_ms=duration_ms)],
+        request_id=request_id,
+    )
+    return JSONResponse(status_code=error.status_code, content=payload)
+
+
+def error_trace_step(error: AgentError, *, duration_ms: float | None = None) -> AgentTraceStepData:
+    return AgentTraceStepData(
+        step="final_answer",
+        status="failed",
+        message=error.message,
+        duration_ms=duration_ms,
+        error_code=str(error.code),
+        retryable=error.retryable,
     )
 
 

@@ -1,4 +1,7 @@
-"""Compatibility exports for settings while backend.app becomes the runtime layout."""
+"""Compatibility exports for legacy backend.app settings imports.
+
+The canonical settings implementation lives in top-level app.config.settings.
+"""
 
 from app.config.settings import (
     APP_DESCRIPTION,

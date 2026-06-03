@@ -89,7 +89,7 @@ const MODE_PROMPTS = {
   代码助手: "你是一个耐心的编程导师。请优先解释思路，再给出简洁代码，并提醒可能的坑。",
   学习助手: "你是一个学习教练。请把复杂概念拆成小步骤，并给出适合练习的例子、检查点和复习建议。",
   面试助手: "你是一个专业的面试辅导助手。请围绕岗位面试场景回答，优先给出结构化思路、示例回答、追问点和改进建议。",
-  文档问答: "你是一个严谨的文档问答助手。请优先依据上传文档内容回答，没有依据时明确说明。",
+  文档问答: "你是一个严谨的文档问答助手。请基于上传文档片段回答；当前使用关键词片段检索，没有依据时明确说明。",
 };
 
 const MODE_ALIASES = {
@@ -1217,12 +1217,12 @@ function createToolPanel(message) {
 
   const details = document.createElement("div");
   details.className = "tool-panel-details";
-  details.appendChild(createToolDetail("工具名称", message.toolName || "未命名工具"));
+  const toolErrorDetail = getToolErrorDetail(message);
+  details.appendChild(createToolDetail("工具名称", message.toolName || toolErrorDetail.toolName || "未命名工具"));
   details.appendChild(createToolDetail("工具状态", statusText));
-  details.appendChild(createToolDetail("耗时", formatToolDuration(message.toolDurationMs)));
+  details.appendChild(createToolDetail("耗时", formatToolDuration(message.toolDurationMs ?? toolErrorDetail.durationMs)));
   if (shouldShowToolErrorDetail(message)) {
-    const detail = getToolErrorDetail(message);
-    details.appendChild(createToolDetail("是否可重试", formatToolRetryable(detail.retryable)));
+    details.appendChild(createToolDetail("是否可重试", formatToolRetryable(toolErrorDetail.retryable)));
   }
   const routeReason = getToolRouteReason(message);
   if (routeReason) {
@@ -1294,10 +1294,10 @@ function buildMessageErrorDetails(message) {
     return null;
   }
 
-  const detail = sanitizeErrorDetailValue(message.errorDetail) || {};
+  const detail = normalizeStructuredErrorDetailObject(message.errorDetail);
   const normalizedToolDetail = normalizeToolErrorDetail(message.toolErrorDetail);
-  const toolDetail = sanitizeErrorDetailValue(message.toolErrorDetail);
-  const rawMessage = sanitizeErrorDetailValue(
+  const toolDetail = sanitizeStructuredErrorDetailValue(message.toolErrorDetail);
+  const rawMessage = sanitizeStructuredErrorDetailValue(
     detail.rawMessage ||
       detail.raw_message ||
       message.rawMessage ||
@@ -1326,10 +1326,10 @@ function buildMessageErrorDetails(message) {
     toolName: detail.toolName ?? detail.tool_name ?? normalizedToolDetail.toolName ?? message.toolName,
     toolStatus: detail.toolStatus ?? detail.tool_status ?? message.toolStatus,
     toolErrorCode: detail.toolErrorCode ?? detail.tool_error_code ?? message.toolErrorCode,
-    toolErrorMessage: sanitizeErrorDetailValue(
+    toolErrorMessage: sanitizeStructuredErrorDetailValue(
       detail.toolErrorMessage ?? detail.tool_error_message ?? message.toolErrorMessage,
     ),
-    toolErrorDetail: sanitizeErrorDetailValue(detail.toolErrorDetail ?? detail.tool_error_detail ?? toolDetail),
+    toolErrorDetail: sanitizeStructuredErrorDetailValue(detail.toolErrorDetail ?? detail.tool_error_detail ?? toolDetail),
     toolDurationMs:
       detail.toolDurationMs ??
       detail.tool_duration_ms ??
@@ -1339,7 +1339,7 @@ function buildMessageErrorDetails(message) {
       normalizedToolDetail.durationMs ??
       message.toolDurationMs ??
       message.durationMs,
-    trace: sanitizeErrorDetailValue(detail.trace ?? message.trace),
+    trace: sanitizeStructuredErrorDetailValue(detail.trace ?? message.trace),
   });
 
   return Object.keys(result).length > 0 ? result : null;
@@ -1390,6 +1390,37 @@ function sanitizeErrorDetailValue(value) {
   );
 }
 
+function normalizeStructuredErrorDetailObject(value) {
+  const detail = sanitizeStructuredErrorDetailValue(value);
+  return detail && typeof detail === "object" && !Array.isArray(detail) ? detail : {};
+}
+
+function sanitizeStructuredErrorDetailValue(value) {
+  if (value === undefined || value === null || value === "") {
+    return value;
+  }
+
+  if (typeof value === "string") {
+    return value.trim();
+  }
+
+  if (Array.isArray(value)) {
+    return value
+      .map((item) => sanitizeStructuredErrorDetailValue(item))
+      .filter((item) => item !== undefined && item !== null && item !== "");
+  }
+
+  if (typeof value !== "object") {
+    return value;
+  }
+
+  return compactObject(
+    Object.fromEntries(
+      Object.entries(value).map(([key, item]) => [key, sanitizeStructuredErrorDetailValue(item)]),
+    ),
+  );
+}
+
 function inferErrorCode(message) {
   const text = String(message || "");
   if (/timed out|timeout|超时/i.test(text)) {
@@ -1411,7 +1442,7 @@ function getToolPanelTitle(message) {
   }
 
   if (message.toolName === "document_qa") {
-    return "文档检索";
+    return "关键词片段检索";
   }
 
   return message.toolName || "工具调用";
@@ -1519,14 +1550,7 @@ function appendMarkdownSourceCandidates(candidates, content) {
 
 function getToolDisplayResult(message) {
   if (isToolFailed(message)) {
-    const detail = getToolErrorDetail(message);
-    return compactObject({
-      error: detail.message || TOOL_FAILURE_MESSAGE,
-      code: detail.code || "TOOL_EXECUTION_ERROR",
-      retryable: formatToolRetryable(detail.retryable),
-      tool_name: detail.toolName,
-      duration_ms: detail.durationMs,
-    });
+    return formatToolFailureMessage(message);
   }
 
   if (message.toolResult !== undefined && message.toolResult !== null && message.toolResult !== "") {
@@ -1534,6 +1558,54 @@ function getToolDisplayResult(message) {
   }
 
   return "无返回结果";
+}
+
+function getToolTraceObservation(metadata = {}) {
+  if (metadata.toolResultSummary !== undefined && metadata.toolResultSummary !== null && metadata.toolResultSummary !== "") {
+    return metadata.toolResultSummary;
+  }
+  if (metadata.tool_result_summary !== undefined && metadata.tool_result_summary !== null && metadata.tool_result_summary !== "") {
+    return metadata.tool_result_summary;
+  }
+  if (isToolFailed(metadata)) {
+    return compactObject({
+      name: metadata.toolName || metadata.tool_name,
+      success: false,
+      error: getToolDisplayError(metadata),
+      duration_ms: metadata.toolDurationMs ?? metadata.tool_duration_ms,
+      error_code: metadata.toolErrorCode ?? metadata.tool_error_code,
+      error_message: metadata.toolErrorMessage ?? metadata.tool_error_message,
+      retryable: metadata.toolRetryable ?? metadata.tool_retryable,
+    });
+  }
+  const root = normalizeToolResultRoot(metadata.toolResult ?? metadata.tool_result);
+  if (root && typeof root === "object" && Object.keys(root).length > 0) {
+    return summarizeToolResultForTrace(root);
+  }
+  return null;
+}
+
+function summarizeToolResultForTrace(value) {
+  if (Array.isArray(value)) {
+    return { type: "array", size: value.length };
+  }
+  if (!value || typeof value !== "object") {
+    return value === undefined || value === null ? null : { type: typeof value, preview: sanitizeErrorText(String(value)).slice(0, 120) };
+  }
+  const summary = {
+    type: "object",
+    keys: Object.keys(value).slice(0, 12),
+    size: Object.keys(value).length,
+  };
+  ["search_results", "read_pages", "workflow_nodes", "sources", "results"].forEach((key) => {
+    if (Array.isArray(value[key])) {
+      summary[`${key}_count`] = value[key].length;
+    }
+  });
+  if (value.message) {
+    summary.message = sanitizeErrorText(String(value.message)).slice(0, 120);
+  }
+  return summary;
 }
 
 function getToolRouteReason(message) {
@@ -1614,6 +1686,11 @@ function normalizeToolErrorMessage({ toolName = "", code = "", message = "" } = 
 
   if (normalizedCode === "MCP_SERVER_UNAVAILABLE" || (normalizedToolName === "mcp_tool" && /mcp/i.test(text))) {
     return "MCP Server 未启动，请先启动 MCP Server 后重试。";
+  }
+
+  const codeMessage = friendlyErrorFromCode(normalizedCode);
+  if (codeMessage) {
+    return codeMessage;
   }
 
   return text || TOOL_FAILURE_MESSAGE;
@@ -2428,6 +2505,7 @@ function createTraceStages(status = "idle", message = "Waiting") {
     durationMs: null,
     toolArgs: null,
     observation: null,
+    errorMessage: "",
   }));
 }
 
@@ -2598,7 +2676,7 @@ function applyToolMetadataToTrace(trace, metadata) {
   markTraceStage(trace, "observation", status, status === "running" ? "Waiting for observation." : "Observation received.", {
     toolName: metadata.toolName,
     durationMs: metadata.toolDurationMs,
-    observation: getToolDisplayResult(metadata),
+    observation: getToolTraceObservation(metadata),
   });
 
   if (metadata.toolName === "web_search") {
@@ -2611,7 +2689,7 @@ function applyToolMetadataToTrace(trace, metadata) {
       markTraceStage(trace, "observation", "success", `Read ${root.read_pages.length} page(s).`, {
         toolName: metadata.toolName,
         durationMs: metadata.toolDurationMs,
-        observation: metadata.toolResult,
+        observation: getToolTraceObservation(metadata),
       });
     }
   }
@@ -2689,6 +2767,7 @@ function markTraceStage(trace, key, status, message, details = {}) {
       toolArgs: details.toolArgs ?? stage.toolArgs,
       observation: details.observation ?? stage.observation,
       errorCode: details.errorCode ?? stage.errorCode,
+      errorMessage: details.errorMessage ?? stage.errorMessage,
       retryable: details.retryable ?? stage.retryable,
       requestId: details.requestId ?? stage.requestId,
     };
@@ -2709,6 +2788,7 @@ function addTraceEvent(title, detail = "", status = "running", eventDetails = {}
       toolArgs: eventDetails.toolArgs ?? null,
       observation: eventDetails.observation ?? null,
       errorCode: eventDetails.errorCode ?? "",
+      errorMessage: eventDetails.errorMessage ?? "",
       retryable: eventDetails.retryable ?? null,
       requestId: eventDetails.requestId ?? "",
     },
@@ -2800,6 +2880,7 @@ function applyApiTraceToTrace(trace, apiTrace) {
       toolArgs: normalizedStep.toolArgs,
       observation: normalizedStep.observation,
       errorCode: normalizedStep.errorCode,
+      errorMessage: normalizedStep.errorMessage,
       retryable: normalizedStep.retryable,
       requestId: normalizedStep.requestId,
     });
@@ -2815,6 +2896,7 @@ function applyApiTraceToTrace(trace, apiTrace) {
       toolArgs: normalizedStep.toolArgs,
       observation: normalizedStep.observation,
       errorCode: normalizedStep.errorCode,
+      errorMessage: normalizedStep.errorMessage,
       retryable: normalizedStep.retryable,
       requestId: normalizedStep.requestId,
     });
@@ -2853,6 +2935,7 @@ function normalizeApiTraceStep(step) {
   const durationMs = step.duration_ms ?? step.durationMs ?? step.tool_call?.duration_ms ?? null;
   const toolArgs = step.tool_args || step.toolArgs || step.tool_call?.tool_args || step.tool_call?.action_args || step.metadata?.tool_args || null;
   const errorCode = step.error_code || step.errorCode || step.tool_call?.error_code || step.observation?.error_code || "";
+  const errorMessage = step.error_message || step.errorMessage || step.tool_call?.error || step.observation?.error_message || step.observation?.error || "";
   const retryable = step.retryable ?? step.tool_call?.retryable ?? step.observation?.retryable ?? null;
   const requestId = step.request_id || step.requestId || "";
   return {
@@ -2866,6 +2949,7 @@ function normalizeApiTraceStep(step) {
     toolArgs,
     observation: step.observation ?? null,
     errorCode,
+    errorMessage,
     retryable,
     requestId,
   };
@@ -2925,6 +3009,12 @@ function traceDetailForApiStep(step, key, toolName, agentName, durationMs) {
   const duration = durationMs == null ? "" : ` · ${formatToolDuration(durationMs)}`;
   if (message) {
     return `${sanitizeErrorText(message)}${duration}`;
+  }
+  const errorMessage = step.error_message || step.errorMessage || step.tool_call?.error || step.observation?.error_message || step.observation?.error || "";
+  const errorCode = step.error_code || step.errorCode || step.tool_call?.error_code || step.observation?.error_code || "";
+  if (String(step.status || "") === "failed") {
+    const reason = sanitizeErrorText(errorMessage || errorCode || "Step failed.");
+    return `${reason}${duration}`;
   }
   if (key === "tool_call" && toolName) {
     return `Tool ${toolName}${duration}`;
@@ -3207,6 +3297,9 @@ function createTraceDetails(item) {
   if (item.errorCode) {
     errorDetail.error_code = item.errorCode;
   }
+  if (item.errorMessage) {
+    errorDetail.error_message = item.errorMessage;
+  }
   if (item.retryable !== undefined && item.retryable !== null) {
     errorDetail.retryable = item.retryable;
   }
@@ -3393,7 +3486,7 @@ function setMode(mode) {
   currentModeText.textContent = currentMode;
   settingsModeSelect.value = currentMode;
   messageInput.placeholder = currentMode === "文档问答"
-    ? "基于已选择文档提问，Enter 发送，Shift + Enter 换行"
+    ? "基于已选文档片段提问，Enter 发送，Shift + Enter 换行"
     : "输入问题，Enter 发送，Shift + Enter 换行";
 
   modeButtons.forEach((button) => {
@@ -3565,7 +3658,7 @@ function renderDocumentList(errorMessage = "") {
   if (errorMessage || documents.length === 0) {
     const empty = document.createElement("div");
     empty.className = "document-empty";
-    empty.textContent = errorMessage || "上传 txt / md / pdf 后，可切换到文档问答模式提问。";
+    empty.textContent = errorMessage || "上传 txt / md / pdf 后，可使用关键词片段问答。";
     documentList.appendChild(empty);
     return;
   }
@@ -3934,6 +4027,9 @@ async function requestJsonAgentReply(requestBody, signal, fallbackConversationId
   return {
     aborted: false,
     requestId: data.request_id,
+    errorCode: data.code || data.error_code || data.tool_error_code,
+    retryable: data.retryable ?? data.tool_retryable,
+    rawMessage: sanitizeStructuredErrorDetailValue(data.raw_message || data.rawMessage || data.error || data.tool_error),
     reply: data.reply || "",
     model: data.model || "",
     conversationId: data.conversation_id || fallbackConversationId,
@@ -3941,6 +4037,7 @@ async function requestJsonAgentReply(requestBody, signal, fallbackConversationId
     toolName: data.tool_name,
     toolStatus: data.tool_status,
     toolResult: data.tool_result,
+    toolResultSummary: data.tool_result_summary,
     toolError: data.tool_error,
     toolErrorCode: data.tool_error_code,
     toolErrorMessage: data.tool_error_message,
@@ -4074,6 +4171,7 @@ async function requestStreamingAgentReply(
         break;
       }
 
+      idleTimeout.reset();
       buffer += decoder.decode(value, { stream: true });
       const parts = buffer.split(/\n\n/);
       buffer = parts.pop() || "";
@@ -4095,6 +4193,12 @@ async function requestStreamingAgentReply(
   return {
     aborted: false,
     requestId: done.request_id || metadata.request_id,
+    errorCode: done.code || done.error_code || done.tool_error_code || metadata.code || metadata.error_code || metadata.tool_error_code,
+    retryable: done.retryable ?? done.tool_retryable ?? metadata.retryable ?? metadata.tool_retryable,
+    rawMessage: sanitizeStructuredErrorDetailValue(
+      done.raw_message || done.rawMessage || done.error || done.tool_error ||
+        metadata.raw_message || metadata.rawMessage || metadata.error || metadata.tool_error,
+    ),
     reply,
     model: done.model || metadata.model || "",
     conversationId: done.conversation_id || metadata.conversation_id || fallbackConversationId,
@@ -4102,6 +4206,7 @@ async function requestStreamingAgentReply(
     toolName: done.tool_name ?? metadata.tool_name,
     toolStatus: done.tool_status ?? metadata.tool_status,
     toolResult: done.tool_result ?? metadata.tool_result,
+    toolResultSummary: done.tool_result_summary ?? metadata.tool_result_summary,
     toolError: done.tool_error ?? metadata.tool_error,
     toolErrorCode: done.tool_error_code ?? metadata.tool_error_code,
     toolErrorMessage: done.tool_error_message ?? metadata.tool_error_message,
@@ -4120,6 +4225,7 @@ function normalizeToolMetadata(data = {}) {
     toolName: data.tool_name,
     toolStatus: data.tool_status,
     toolResult: data.tool_result,
+    toolResultSummary: data.tool_result_summary,
     toolError: data.tool_error,
     toolErrorCode: data.tool_error_code,
     toolErrorMessage: data.tool_error_message,
@@ -4148,14 +4254,14 @@ function buildAgentReplyErrorDetail(data = {}) {
     message: sanitizeErrorDetailValue(data.error || data.message || data.tool_error_message || data.tool_error),
     retryable: data.retryable ?? data.tool_retryable,
     requestId: data.request_id,
-    rawMessage: sanitizeErrorDetailValue(data.raw_message || data.rawMessage || data.error || data.tool_error),
+    rawMessage: sanitizeStructuredErrorDetailValue(data.raw_message || data.rawMessage || data.error || data.tool_error),
     toolName: data.tool_name,
     toolStatus: data.tool_status,
     toolErrorCode: data.tool_error_code,
-    toolErrorMessage: sanitizeErrorDetailValue(data.tool_error_message),
-    toolErrorDetail: sanitizeErrorDetailValue(data.tool_error_detail),
+    toolErrorMessage: sanitizeStructuredErrorDetailValue(data.tool_error_message),
+    toolErrorDetail: sanitizeStructuredErrorDetailValue(data.tool_error_detail),
     toolDurationMs: data.tool_duration_ms,
-    trace: sanitizeErrorDetailValue(data.trace),
+    trace: sanitizeStructuredErrorDetailValue(data.trace),
   });
 }
 
@@ -4366,6 +4472,9 @@ async function regenerateAgentReply(messageId) {
       type: "text",
       role: "agent",
       requestId: result.requestId,
+      errorCode: result.errorCode || result.errorDetail?.code,
+      retryable: result.retryable ?? result.errorDetail?.retryable,
+      rawMessage: result.rawMessage ?? result.errorDetail?.rawMessage,
       content: result.reply || "Agent 没有返回文本内容。",
       model: result.model,
       usedTool: result.usedTool,
@@ -4386,13 +4495,11 @@ async function regenerateAgentReply(messageId) {
   } catch (error) {
     console.warn("regenerateAgentReply error", error);
     const friendlyMessage = getAgentFailureMessage(error);
-    const errorDetail = getAgentErrorDetail(error, friendlyMessage);
     finalizeAgentTrace({}, { error: friendlyMessage });
     updateMessage(loadingMessage.id, {
       type: "text",
       role: "error",
-      content: friendlyMessage,
-      errorDetail,
+      ...buildAgentErrorMessageUpdates(error, friendlyMessage),
       createdAt: getCurrentTime(),
     });
   } finally {
@@ -4452,28 +4559,29 @@ function getAgentFailureMessage(error) {
 
 function createAgentError(rawError, overrides = {}) {
   const rawMessage = normalizeRawErrorMessage(rawError) || normalizeErrorText(rawError) || String(rawError || "");
-  const friendlyMessage = overrides.message || toFriendlyError(rawError);
+  const normalizedCode = overrides.code || normalizeErrorCode(rawError);
+  const friendlyMessage = overrides.message || friendlyErrorFromCode(normalizedCode) || toFriendlyError(rawError);
   const error = new Error(friendlyMessage);
   error.agentErrorDetail = compactObject({
     requestId: overrides.requestId || normalizeRequestId(rawError),
-    code: overrides.code || normalizeErrorCode(rawError) || inferErrorCode(rawMessage || friendlyMessage),
+    code: normalizedCode || inferErrorCode(rawMessage || friendlyMessage),
     message: friendlyMessage,
     retryable: overrides.retryable ?? normalizeErrorRetryable(rawError),
-    rawMessage: sanitizeErrorDetailValue(rawMessage),
+    rawMessage: sanitizeStructuredErrorDetailValue(rawMessage),
     toolName: overrides.toolName ?? normalizeErrorField(rawError, ["toolName", "tool_name"]),
     toolStatus: overrides.toolStatus ?? normalizeErrorField(rawError, ["toolStatus", "tool_status"]),
     toolErrorCode: overrides.toolErrorCode ?? normalizeErrorField(rawError, ["toolErrorCode", "tool_error_code"]),
-    toolErrorMessage: sanitizeErrorDetailValue(
+    toolErrorMessage: sanitizeStructuredErrorDetailValue(
       overrides.toolErrorMessage ?? normalizeErrorField(rawError, ["toolErrorMessage", "tool_error_message"]),
     ),
-    toolErrorDetail: sanitizeErrorDetailValue(
+    toolErrorDetail: sanitizeStructuredErrorDetailValue(
       overrides.toolErrorDetail ?? normalizeErrorField(rawError, ["toolErrorDetail", "tool_error_detail"]),
     ),
     toolDurationMs:
       overrides.toolDurationMs ??
       overrides.durationMs ??
       normalizeErrorField(rawError, ["toolDurationMs", "tool_duration_ms", "durationMs", "duration_ms"]),
-    trace: sanitizeErrorDetailValue(overrides.trace ?? normalizeErrorField(rawError, ["trace"])),
+    trace: sanitizeStructuredErrorDetailValue(overrides.trace ?? normalizeErrorField(rawError, ["trace"])),
   });
   return error;
 }
@@ -4488,7 +4596,26 @@ function getAgentErrorDetail(error, friendlyMessage) {
     requestId: normalizeRequestId(error),
     code: normalizeErrorCode(error) || inferErrorCode(rawMessage || friendlyMessage),
     message: friendlyMessage,
-    rawMessage: sanitizeErrorDetailValue(rawMessage),
+    rawMessage: sanitizeStructuredErrorDetailValue(rawMessage),
+  });
+}
+
+function buildAgentErrorMessageUpdates(error, friendlyMessage) {
+  const errorDetail = getAgentErrorDetail(error, friendlyMessage);
+  return compactObject({
+    content: friendlyMessage,
+    errorDetail,
+    requestId: errorDetail.requestId,
+    errorCode: errorDetail.code,
+    retryable: errorDetail.retryable,
+    rawMessage: errorDetail.rawMessage,
+    toolName: errorDetail.toolName,
+    toolStatus: errorDetail.toolStatus,
+    toolErrorCode: errorDetail.toolErrorCode,
+    toolErrorMessage: errorDetail.toolErrorMessage,
+    toolErrorDetail: errorDetail.toolErrorDetail,
+    toolDurationMs: errorDetail.toolDurationMs,
+    trace: errorDetail.trace,
   });
 }
 
@@ -4891,6 +5018,9 @@ async function sendCurrentMessage() {
       type: "text",
       role: "agent",
       requestId: result.requestId,
+      errorCode: result.errorCode || result.errorDetail?.code,
+      retryable: result.retryable ?? result.errorDetail?.retryable,
+      rawMessage: result.rawMessage ?? result.errorDetail?.rawMessage,
       content: result.reply || "Agent 没有返回文本内容。",
       model: result.model,
       usedTool: result.usedTool,
@@ -4912,13 +5042,11 @@ async function sendCurrentMessage() {
   } catch (error) {
     console.warn("sendCurrentMessage error", error);
     const friendlyMessage = getAgentFailureMessage(error);
-    const errorDetail = getAgentErrorDetail(error, friendlyMessage);
     finalizeAgentTrace({}, { error: friendlyMessage });
     updateMessage(loadingMessage.id, {
       type: "text",
       role: "error",
-      content: friendlyMessage,
-      errorDetail,
+      ...buildAgentErrorMessageUpdates(error, friendlyMessage),
       createdAt: getCurrentTime(),
     });
   } finally {

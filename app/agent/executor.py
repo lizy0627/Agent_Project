@@ -131,7 +131,7 @@ def tool_result_to_observation(result: ToolResult | None) -> dict[str, Any] | No
     return {
         "name": result.name,
         "success": result.success,
-        "error": result.error,
+        "error": result.error_message or result.error,
         "duration_ms": result.duration_ms,
         "error_code": result.error_code or (None if result.success else TOOL_EXECUTION_ERROR),
         "error_message": result.error_message,

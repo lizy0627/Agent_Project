@@ -1,4 +1,4 @@
-from typing import Any, Iterator
+from typing import Any, Iterator, NoReturn
 
 from openai import (
     APIConnectionError,
@@ -54,8 +54,7 @@ class LLMClient:
                 messages=messages,
             )
         except OpenAIError as exc:
-            _log_openai_error("chat", exc)
-            raise _map_openai_error(exc) from exc
+            _raise_mapped_openai_error("chat", exc)
         except Exception as exc:
             logger.warning("Unexpected error while calling DashScope: class=%s", exc.__class__.__name__)
             raise UnknownAgentError() from exc
@@ -86,11 +85,15 @@ class LLMClient:
                 if content:
                     yield content
         except OpenAIError as exc:
-            _log_openai_error("streaming chat", exc)
-            raise _map_openai_error(exc) from exc
+            _raise_mapped_openai_error("streaming chat", exc)
         except Exception as exc:
             logger.warning("Unexpected error while streaming from DashScope: class=%s", exc.__class__.__name__)
             raise UnknownAgentError() from exc
+
+
+def _raise_mapped_openai_error(operation: str, exc: OpenAIError) -> NoReturn:
+    _log_openai_error(operation, exc)
+    raise _map_openai_error(exc) from exc
 
 
 def _map_openai_error(exc: OpenAIError) -> AgentError:

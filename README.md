@@ -6,7 +6,7 @@ AgentOS 是一个基于 **FastAPI + DashScope/OpenAI-Compatible API** 的工程�
 
 这个项目不是完整的生产级 Agent 平台。README 只描述当前代码中已经存在或正在实验的能力；Reflector、通用 Workflow 编排、任务队列、插件市场、OpenTelemetry 等没有接入主链路的内容不会写成已完成能力。
 
-> 注意：仓库里同时保留了 `app/` 和 `backend/app/` 两套相近命名空间。当前唯一主运行入口是顶层 `app.main`；根目录 `main.py` 和 `uvicorn main:app` 都会加载顶层 `app/` 实现。`backend/app` 只保留给旧 import 路径和少量兼容测试使用，新增业务逻辑、API 路由、Agent 能力、工具和服务应优先写入顶层 `app/`，不要再写入 `backend/app`。
+> 注意：仓库里同时保留了 `app/` 和 `backend/app/` 两套相近命名空间。当前唯一主启动入口是根目录 `main.py`；它直接 re-export 顶层 `app.main:app`，因此 `uvicorn main:app` 和 `python main.py` 都会加载顶层 `app/` 实现。`backend/app` 是历史兼容命名空间，只用于旧 import 路径和少量兼容测试，可能滞后于顶层 `app/`；新增业务逻辑、API 路由、Agent 能力、工具和服务应写入顶层 `app/`，不要再写入 `backend/app`。
 
 ## 当前能力边界
 
@@ -18,6 +18,7 @@ AgentOS 是一个基于 **FastAPI + DashScope/OpenAI-Compatible API** 的工程�
 - **ToolRegistry**：统一注册、列举和执行工具，返回标准化 `ToolResult`，并包含错误分类、重试标记和耗时信息。
 - **AgentTrace**：聊天接口和 Agent 服务会记录 planner、tool_call、observation、thought、final_answer 等步骤，便于前端展示和排查问题。
 - **Memory**：`MemoryManager` 提供 JSON 存储的短期会话上下文和长期用户记忆；可选开启本地向量相似度检索。
+- **文档片段问答**：`/documents` 支持上传 txt/md/pdf，把解析出的文本切分为 chunk 并保存到 SQLite；提问时按关键词命中次数给片段计分，再把选中的文档片段交给模型回答。当前实现是轻量级关键词检索 + 文档片段问答，不是 embedding/向量 RAG，也没有接入向量库。
 - **MCP Tool Adapter**：`MCPTool`、`MCPManager`、`MCPRouter` 支持把外部 MCP Server 的工具包装成本地工具调用。
 - **Multi-Agent Router**：`ManagerAgent` 可以按任务路由到 `SearchAgent`、`SummaryAgent`、`CodeAgent`，再聚合子 Agent 结果。
 - **Streaming Chat**：`/chat/stream` 使用 Server-Sent Events 输出状态、元数据、文本 chunk、完成事件和错误事件。
@@ -27,7 +28,7 @@ AgentOS 是一个基于 **FastAPI + DashScope/OpenAI-Compatible API** 的工程�
 - **Reflector**：`backend/app/agent/reflector.py` 中有轻量 trace 反思器，但当前没有接入 `/chat` 或 `/chat/stream` 主链路，因此属于实验性模块。
 - **Workflow**：`app.workflow` 提供 DAG 执行器，`SearchWorkflow` 会在搜索场景内部使用 `research_workflow`；但通用 Workflow 编排还没有作为公开 Agent 主链路或 API 暴露，暂按实验性能力处理。
 - **向量记忆**：`MEMORY_VECTOR_ENABLED=true` 后会为长期记忆生成 embedding 并在 JSON 记忆条目中保存向量，再用本地余弦相似度检索。它不是独立向量数据库，也没有向量库持久化服务。
-- **backend/app 兼容状态**：`backend/app` 保留旧命名空间兼容层；`backend.app.main` 只是 re-export 顶层 `app.main`。测试中仍有少量 `backend.app.*` import 用来确认兼容路径没有断裂，但主运行链路、mypy 检查和新增实现都应以顶层 `app/` 为准。
+- **backend/app 兼容状态**：`backend/app` 保留旧命名空间兼容层；`backend.app.main` 只是 re-export 顶层 `app.main`。当前主运行链路从根目录 `main.py` 进入顶层 `app/`，顶层 `app/` 不依赖 `backend.app.*`。测试中仍有少量 `backend.app.*` import 用来确认兼容路径没有断裂，但新增实现都应以顶层 `app/` 为准。
 
 ### Roadmap
 
@@ -35,6 +36,7 @@ AgentOS 是一个基于 **FastAPI + DashScope/OpenAI-Compatible API** 的工程�
 - 逐步将仍被测试覆盖的 `backend.app.*` 镜像模块收敛为 re-export，最后移除过期镜像文件。
 - 将通用 Workflow 编排暴露为稳定 API 或 Agent 可调用能力。
 - 为 Agent Trace 增加持久化检索、前端时间线和失败重放。
+- 文档问答后续可接入 embedding + 向量检索，用语义召回替换当前关键词片段计分。
 - 增加生产级部署文件、健康检查、观测指标和更细粒度的工具权限控制。
 
 ## 技术栈
@@ -119,6 +121,14 @@ flowchart TD
 ├── pyproject.toml
 └── README.md
 ```
+
+### app/ 与 backend/app/
+
+- `main.py` 是当前启动入口，导入并暴露 `app.main:app`、`create_app` 和 `open_browser`。
+- `uvicorn main:app --reload` 会先加载根目录 `main.py`，再使用顶层 `app.main` 创建出的 FastAPI 应用。
+- `backend/app/main.py` 仅用于兼容旧的 `backend.app.main` import；它不承载新的启动逻辑。
+- `backend/app` 下仍有历史镜像模块和少量 re-export，测试会引用部分 `backend.app.*` 路径来保证兼容性。它不是新增功能的落点，也不应作为运行入口。
+- 如果需要保留旧路径，优先把 `backend/app` 中对应模块收敛为薄 re-export；实际实现应放在顶层 `app/`。
 
 ## 快速开始
 
@@ -228,7 +238,7 @@ pytest
 | `CONVERSATION_DB_PATH` | `data/conversations.db` | SQLite 会话数据库路径 |
 | `CONVERSATION_DATABASE_URL` | - | SQLAlchemy 数据库 URL |
 | `CONVERSATION_MAX_ROUNDS` | `30` | 每个会话保留的最大轮数 |
-| `DOCUMENT_DB_PATH` | `data/documents.db` | 文档索引数据库路径 |
+| `DOCUMENT_DB_PATH` | `data/documents.db` | 文档元数据和片段 SQLite 数据库路径 |
 | `DOCUMENT_UPLOAD_MAX_BYTES` | `5242880` | 文档上传大小限制 |
 | `AUTH_ENABLED` | `true` | 是否启用 JWT 鉴权 |
 | `AUTH_DB_PATH` | `data/auth.db` | 用户认证数据库路径 |

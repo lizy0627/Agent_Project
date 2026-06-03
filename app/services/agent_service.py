@@ -314,7 +314,7 @@ class AgentService:
         return AgentTraceStep(
             step="final_answer",
             status="success",
-            message=str(step.content or ""),
+            message="Final answer generated.",
             metadata=metadata or None,
         )
 
@@ -973,29 +973,68 @@ class AgentService:
 
         trace_steps: list[AgentTraceStep] = []
         for step in result.trace.steps:
-            trace_steps.append(
-                AgentTraceStep(
-                    step=step.step,
-                    status=step.status,
-                    message=step.message or step.error,
-                    tool_name=step.tool_name,
-                    observation=self._serialize_react_observation(step),
-                    duration_ms=step.duration_ms,
-                    error_code=step.error_code or self._trace_error_code_from_observation(step.observation),
-                    retryable=step.retryable
-                    if step.retryable is not None
-                    else self._trace_retryable_from_observation(step.observation),
-                    metadata=self._react_step_metadata(step),
-                )
+            trace_steps.extend(
+                self._react_api_trace_steps(step)
             )
         return trace_steps
+
+    def _react_api_trace_steps(self, step: ReActTraceStep) -> list[AgentTraceStep]:
+        """Expose ReAct trace with the same start/end event shape as plan execution."""
+
+        metadata = self._react_step_metadata(step)
+        error_code = (
+            step.error_code
+            or self._trace_error_code_from_tool_call(step)
+            or self._trace_error_code_from_observation(step.observation)
+        )
+        retryable = (
+            step.retryable
+            if step.retryable is not None
+            else self._trace_retryable_from_tool_call(step)
+            if self._trace_retryable_from_tool_call(step) is not None
+            else self._trace_retryable_from_observation(step.observation)
+        )
+        message = step.message or step.error
+        public_message = (
+            self._public_error_message(message)
+            if step.status == "failed" and message
+            else self._react_public_message(step, message)
+        )
+        terminal = AgentTraceStep(
+            step=step.step,
+            status=step.status,
+            message=public_message,
+            tool_name=step.tool_name,
+            tool_args=self._safe_trace_data(step.tool_args) if step.tool_args else None,
+            observation=self._serialize_react_observation(step),
+            duration_ms=step.duration_ms,
+            error_code=error_code if step.status == "failed" else None,
+            retryable=retryable if step.status == "failed" else None,
+            metadata=metadata,
+        )
+        if step.step not in {"planner", "tool_call", "final_answer"} or step.status == "running":
+            return [terminal]
+
+        return [
+            AgentTraceStep(
+                step=step.step,
+                status="running",
+                message=self._react_start_message(step),
+                tool_name=step.tool_name,
+                tool_args=self._safe_trace_data(step.tool_args) if step.tool_args else None,
+                metadata=metadata,
+            ),
+            terminal,
+        ]
 
     def _react_step_metadata(self, step: ReActTraceStep) -> dict[str, Any] | None:
         metadata = dict(step.metadata or {})
         if step.tool_args:
             metadata["tool_args"] = self._safe_trace_data(step.tool_args)
         if step.tool_call is not None:
-            metadata["tool_call"] = self._safe_trace_data(step.tool_call.model_dump(exclude_none=True))
+            tool_call = step.tool_call.model_dump(exclude_none=True)
+            tool_call.pop("result", None)
+            metadata["tool_call"] = self._safe_trace_data(tool_call)
         return metadata or None
 
     def _serialize_react_observation(self, step: ReActTraceStep) -> Any:
@@ -1069,6 +1108,37 @@ class AgentService:
         if isinstance(observation, dict) and "retryable" in observation:
             return bool(observation.get("retryable"))
         return None
+
+    def _trace_error_code_from_tool_call(self, step: ReActTraceStep) -> str | None:
+        if step.tool_call is None:
+            return None
+        error_code = step.tool_call.error_code
+        return str(error_code) if error_code else None
+
+    def _trace_retryable_from_tool_call(self, step: ReActTraceStep) -> bool | None:
+        if step.tool_call is None or step.tool_call.retryable is None:
+            return None
+        return bool(step.tool_call.retryable)
+
+    def _react_start_message(self, step: ReActTraceStep) -> str:
+        if step.step == "planner":
+            return "Planning request."
+        if step.step == "tool_call":
+            return f"Calling tool: {step.tool_name}" if step.tool_name else "Calling tool."
+        if step.step == "final_answer":
+            return "Generating final answer."
+        return "Step started."
+
+    def _react_public_message(self, step: ReActTraceStep, message: Any | None) -> str | None:
+        if step.step == "final_answer" and step.status == "success":
+            return "Final answer generated."
+        if step.step == "planner" and step.status == "success":
+            return "Started ReAct loop."
+        if step.step == "tool_call" and step.status == "success" and step.tool_name:
+            return f"Tool call finished: {step.tool_name}"
+        if message is None:
+            return None
+        return self._safe_trace_data(str(message))
 
     def _safe_planned_tool_log(self, planned_call: PlannedToolCall | None) -> dict | None:
         if planned_call is None:

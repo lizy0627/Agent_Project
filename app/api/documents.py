@@ -133,7 +133,7 @@ def ask_document(
     store: DocumentStore = Depends(get_document_store),
     agent: DashScopeAgent = Depends(get_agent),
 ) -> DocumentAskResponse | JSONResponse:
-    """Retrieve relevant chunks and ask the existing DashScopeAgent to answer."""
+    """Retrieve keyword-scored chunks and ask the existing DashScopeAgent to answer."""
 
     try:
         clean_document_id = document_id.strip()
